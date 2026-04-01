@@ -1,8 +1,0 @@
-{
-  "crons": [
-    {
-      "path": "/api/automation/paper/run",
-      "schedule": "*/1 * * * *"
-    }
-  ]
-}
