@@ -1,0 +1,25 @@
+---
+alwaysApply: true
+---
+
+---
+
+description: Enforce small, modular files and token efficiency
+globs: "\*_/_.{ts,tsx}"
+alwaysApply: true
+
+---
+
+# Token Efficiency & Modular Architecture
+
+- **Line Limit**: Every file must be under 300 lines.
+- **Refactor Trigger**: If a file reaches 250 lines, automatically propose splitting it.
+- **Separation of Concerns**:
+  - Move complex logic to `@/hooks`.
+  - Move types to `@/types`.
+  - Move API/Crypto calls to `@/services`.
+- **Output Style**: Use Search/Replace blocks. Never rewrite an entire file for a small change.
+- **No Yapping**: Do not explain code unless I ask "why". Just show the code.
+- **MCP**: Use my mcp into connect with my backend and change data table etc
+- **Deploy Function**: when you deploy function turn off verify jwt --jwt
+  https://emviaygygylosvmtsvlq.supabase.co this is my db link

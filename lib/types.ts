@@ -178,6 +178,12 @@ export type ScalpingDirection = "long" | "short";
 export interface ScalpingSettings {
   timeframe: ScalpingTimeframe;
   minAiConfidence: number;
+  /** RSI below this favors long entries (bot `rsi_buy_threshold`). */
+  rsiBuyThreshold: number;
+  /** RSI above this favors exits / overbought (bot `rsi_sell_threshold`). */
+  rsiSellThreshold: number;
+  /** Max simultaneous open positions per account (bot `max_open_trades`). */
+  maxOpenTrades: number;
   minExpectedProfitToFeeRatio: number;
   maxSpreadPct: number;
   minLiquidityUsd: number;
@@ -287,6 +293,13 @@ export interface DemoTrade {
   spreadPct?: number;
   executionNotes?: string[];
   followedSignal: boolean;
+  /** Parsed from `trades.ai_reasoning` when present (buys / bot audit JSON). */
+  aiReasoning?: {
+    proTip?: string;
+    oneHBearishCapApplied?: boolean;
+    rawWeightedConfidence?: number;
+    effectiveConfidence?: number;
+  };
 }
 
 export interface DemoAccount {

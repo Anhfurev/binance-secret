@@ -1,7 +1,7 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { LANGUAGE_STORAGE_KEY, type LanguageMode } from "@/lib/language";
+import { createContext, useContext, useMemo } from "react";
+import type { LanguageMode } from "@/lib/language";
 
 interface LanguageContextValue {
   language: LanguageMode;
@@ -15,28 +15,16 @@ const LanguageContext = createContext<LanguageContextValue | undefined>(
 );
 
 export function LanguageProvider({ children }: { children: React.ReactNode }) {
-  const [language, setLanguage] = useState<LanguageMode>("en");
-
-  useEffect(() => {
-    const saved = localStorage.getItem(LANGUAGE_STORAGE_KEY);
-    if (saved === "en" || saved === "mn") {
-      setLanguage(saved);
-    }
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
-  }, [language]);
+  const language: LanguageMode = "en";
 
   const value = useMemo<LanguageContextValue>(
     () => ({
       language,
-      setLanguage,
-      toggleLanguage: () =>
-        setLanguage((prev) => (prev === "en" ? "mn" : "en")),
-      t: (en: string, mn: string) => (language === "mn" ? mn : en),
+      setLanguage: () => undefined,
+      toggleLanguage: () => undefined,
+      t: (en: string, _mn: string) => en,
     }),
-    [language],
+    [],
   );
 
   return (

@@ -15,10 +15,11 @@ import { X, StickyNote, Activity, Plus } from "lucide-react";
 import { useLanguage } from "@/components/language-provider";
 import { useRouter } from "next/navigation";
 import type { DemoTrade } from "@/lib/types";
+import { ProTipCallout } from "@/components/trading/pro-tip-callout";
 
 interface OpenPositionsTableProps {
   positions: DemoTrade[];
-  onClose: (trade: DemoTrade) => void;
+  onClose: (trade: DemoTrade) => void | Promise<void>;
   onJournalOpen: (trade: DemoTrade) => void;
   formatDate: (date: Date) => string;
   formatPrice: (price: number) => string;
@@ -33,6 +34,11 @@ export function OpenPositionsTable({
 }: OpenPositionsTableProps) {
   const { t } = useLanguage();
   const router = useRouter();
+  const formatPositionPrice = (price: number) => {
+    if (!Number.isFinite(price)) return formatPrice(0);
+    if (Math.abs(price) < 0.01) return `$${price.toFixed(8)}`;
+    return formatPrice(price);
+  };
 
   if (positions.length === 0) {
     return (
@@ -90,6 +96,10 @@ export function OpenPositionsTable({
                       AI Signal
                     </Badge>
                   )}
+                  <ProTipCallout
+                    aiReasoning={trade.aiReasoning}
+                    className="w-full min-w-0 max-w-[min(100%,32rem)]"
+                  />
                 </div>
               </TableCell>
               <TableCell>
@@ -110,7 +120,12 @@ export function OpenPositionsTable({
               </TableCell>
               <TableCell className="font-mono text-foreground">
                 <div className="flex flex-col">
-                  <span>{formatPrice(trade.entryPrice)}</span>
+                  <span>{formatPositionPrice(trade.entryPrice)}</span>
+                  {Number.isFinite((trade as any).currentPrice) ? (
+                    <span className="text-[10px] text-muted-foreground">
+                      Live: {formatPositionPrice((trade as any).currentPrice)}
+                    </span>
+                  ) : null}
                   {trade.isFutures && trade.liquidationPrice && (
                     <span className="text-[10px] text-destructive">
                       Liq: {formatPrice(trade.liquidationPrice)}
@@ -161,7 +176,7 @@ export function OpenPositionsTable({
                     onClick={() => onClose(trade)}
                   >
                     <X className="mr-1 h-3 w-3" />
-                    Close
+                    Close Trade
                   </Button>
                   <Button
                     variant="ghost"

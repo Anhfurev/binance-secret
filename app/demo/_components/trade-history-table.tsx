@@ -19,6 +19,7 @@ import {
   StickyNote,
 } from "lucide-react";
 import type { DemoTrade } from "@/lib/types";
+import { ProTipCallout } from "@/components/trading/pro-tip-callout";
 
 interface TradeHistoryTableProps {
   history: DemoTrade[];
@@ -33,6 +34,14 @@ export function TradeHistoryTable({
   formatDate,
   formatPrice,
 }: TradeHistoryTableProps) {
+  if (history.length === 0) {
+    return (
+      <div className="py-10 text-center text-sm text-muted-foreground">
+        No trade history yet. Closed trades will appear here.
+      </div>
+    );
+  }
+
   return (
     <div className="overflow-x-auto">
       <Table>
@@ -71,6 +80,10 @@ export function TradeHistoryTable({
                   {trade.notes && (
                     <StickyNote className="h-3 w-3 text-muted-foreground" />
                   )}
+                  <ProTipCallout
+                    aiReasoning={trade.aiReasoning}
+                    className="w-full min-w-0 max-w-[min(100%,32rem)]"
+                  />
                 </div>
               </TableCell>
               <TableCell>

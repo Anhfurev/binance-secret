@@ -1,12 +1,17 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Bot } from "lucide-react";
+import { Bot, Loader2, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { useLanguage } from "@/components/language-provider";
 import { cn } from "@/lib/utils";
+import { formatUnknownError } from "@/lib/error-utils";
+import { useAuth } from "@/components/auth-provider";
+import { supabase } from "@/lib/supabase";
+import { Switch } from "@/components/ui/switch";
 import type { AutoPilotMode, CloudSyncState, WalletMode } from "./types";
 import { AUTOMATION_EVENT } from "./types";
 
@@ -23,6 +28,7 @@ interface AITradingMasterControlProps {
   cloudSyncMessage: string | null;
   lastCloudSync: string | null;
   formatDate: (date: Date) => string;
+  resolvedBotUserId?: string | null;
 }
 
 export function AITradingMasterControl({
@@ -38,30 +44,244 @@ export function AITradingMasterControl({
   cloudSyncMessage,
   lastCloudSync,
   formatDate,
+  resolvedBotUserId,
 }: AITradingMasterControlProps) {
   const { t } = useLanguage();
+  const { user } = useAuth();
+  const [isSaving, setIsSaving] = useState(false);
+  const [isSavingLive, setIsSavingLive] = useState(false);
+  const [isSavingAggressive, setIsSavingAggressive] = useState(false);
+  const [liveExecutionEnabled, setLiveExecutionEnabled] = useState(false);
+  const [aggressiveModeEnabled, setAggressiveModeEnabled] = useState(false);
+  const [resolvedUserId, setResolvedUserId] = useState<string | null>(null);
+  const DEFAULT_SYMBOLS = ["BTCUSDT", "PEPEUSDT", "SOLUSDT"] as const;
 
-  const handleToggle = () => {
-    if (walletMode === "real") return;
+  const fetchBotSettingsSnapshot = async () => {
+    const response = await fetch("/api/bot-settings", { cache: "no-store" });
+    if (!response.ok) return null;
+    return await response.json();
+  };
+
+  useEffect(() => {
+    void (async () => {
+      const targetUserId = await resolveTargetUserId();
+      if (!targetUserId) return;
+      await refreshAutoPilotState(targetUserId);
+      await refreshLiveExecutionState(targetUserId);
+      await refreshAggressiveModeState(targetUserId);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- resync when auth or resolved bot user changes; helpers are stable enough per run
+  }, [user?.id, resolvedBotUserId]);
+
+  const resolveTargetUserId = async () => {
+    const snapshot = await fetchBotSettingsSnapshot();
+    const snapshotUserId = snapshot?.user_id ? String(snapshot.user_id) : null;
+    if (snapshotUserId) {
+      setResolvedUserId(snapshotUserId);
+      if (typeof snapshot?.is_live_trading_enabled === "boolean") {
+        setLiveExecutionEnabled(Boolean(snapshot.is_live_trading_enabled));
+      }
+      if (typeof snapshot?.is_aggressive_mode === "boolean") {
+        setAggressiveModeEnabled(Boolean(snapshot.is_aggressive_mode));
+      }
+      return snapshotUserId;
+    }
+    if (resolvedBotUserId) {
+      setResolvedUserId(resolvedBotUserId);
+      return resolvedBotUserId;
+    }
+    if (user?.id) {
+      setResolvedUserId(user.id);
+      return user.id;
+    }
+    if (resolvedUserId) return resolvedUserId;
+    return null;
+  };
+
+  const refreshAutoPilotState = async (userId: string) => {
+    const snapshot = await fetchBotSettingsSnapshot();
+    if (snapshot?.user_id && String(snapshot.user_id) === userId) {
+      if (typeof snapshot?.is_autopilot_enabled === "boolean") {
+        onToggleAutoPilot(Boolean(snapshot.is_autopilot_enabled));
+      }
+    }
+  };
+
+  const refreshLiveExecutionState = async (userId: string) => {
+    const snapshot = await fetchBotSettingsSnapshot();
+    if (snapshot?.user_id && String(snapshot.user_id) === userId) {
+      if (typeof snapshot?.is_live_trading_enabled === "boolean") {
+        setLiveExecutionEnabled(Boolean(snapshot.is_live_trading_enabled));
+      }
+    }
+  };
+
+  const refreshAggressiveModeState = async (userId: string) => {
+    const snapshot = await fetchBotSettingsSnapshot();
+    if (snapshot?.user_id && String(snapshot.user_id) === userId) {
+      if (typeof snapshot?.is_aggressive_mode === "boolean") {
+        setAggressiveModeEnabled(Boolean(snapshot.is_aggressive_mode));
+      }
+    }
+  };
+
+  const handleToggle = async () => {
+    console.log("Toggle clicked", demoAutoPilot);
     const next = !demoAutoPilot;
-    onToggleAutoPilot(next);
-    if (next) onAutoPilotModeChange("signals");
-    window.dispatchEvent(
-      new CustomEvent(AUTOMATION_EVENT, { detail: { enabled: next } }),
-    );
-    toast.success(
-      next
-        ? t("Full AI Trading ENABLED", "Бүтэн AI Арилжаа АСААЛАА")
-        : t("Full AI Trading DISABLED", "Бүтэн AI Арилжаа УНТРААЛАА"),
-      {
-        description: next
-          ? t(
-              "AI will now scan and execute trades automatically.",
-              "AI одоо автоматаар дохио скан хийж арилжаа хийнэ.",
-            )
-          : t("Switched to manual mode.", "Гараар горим руу шилжлээ."),
-      },
-    );
+    if (!user?.id) {
+      onToggleAutoPilot(next);
+      if (next) onAutoPilotModeChange("signals");
+      window.dispatchEvent(
+        new CustomEvent(AUTOMATION_EVENT, { detail: { enabled: next } }),
+      );
+      return;
+    }
+
+    try {
+      setIsSaving(true);
+      const targetUserId = await resolveTargetUserId();
+      if (!targetUserId) {
+        throw new Error("No user found for AUTOPILOT toggle.");
+      }
+      const response = await fetch("/api/bot-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: targetUserId,
+          is_autopilot_enabled: next,
+        }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body?.error ?? "Failed to update AUTOPILOT");
+      }
+
+      await refreshAutoPilotState(targetUserId);
+      if (next) onAutoPilotModeChange("signals");
+      window.dispatchEvent(
+        new CustomEvent(AUTOMATION_EVENT, { detail: { enabled: next } }),
+      );
+      toast.success(
+        next
+          ? t("Full AI Trading ENABLED", "Бүтэн AI Арилжаа АСААЛАА")
+          : t("Full AI Trading DISABLED", "Бүтэн AI Арилжаа УНТРААЛАА"),
+        {
+          description: t(
+            "Saved to bot_settings successfully.",
+            "bot_settings-д амжилттай хадгалагдлаа.",
+          ),
+        },
+      );
+    } catch (error) {
+      const message = formatUnknownError(error);
+      console.error("[AITradingMasterControl][toggle-autopilot]", message, error);
+      toast.error(
+        t("Failed to save AI toggle", "AI товч хадгалах үед алдаа гарлаа"),
+        { description: message },
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleToggleLiveExecution = async (next: boolean) => {
+    const targetUserId = await resolveTargetUserId();
+    if (!targetUserId) {
+      toast.error(
+        t("No user found for LIVE EXECUTION toggle.", "LIVE EXECUTION өөрчлөх хэрэглэгч олдсонгүй."),
+      );
+      return;
+    }
+    try {
+      setIsSavingLive(true);
+      const response = await fetch("/api/bot-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: targetUserId,
+          is_live_trading_enabled: next,
+        }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body?.error ?? "Failed to update LIVE EXECUTION");
+      }
+      const updated = await response.json();
+      setLiveExecutionEnabled(Boolean(updated?.is_live_trading_enabled));
+      toast.success(
+        next
+          ? t("LIVE EXECUTION enabled", "LIVE EXECUTION асаалттай")
+          : t("LIVE EXECUTION disabled", "LIVE EXECUTION унтраалттай"),
+        {
+          description: t(
+            "Live execution setting saved.",
+            "Live execution тохиргоо хадгалагдлаа.",
+          ),
+        },
+      );
+    } catch (error) {
+      const message = formatUnknownError(error);
+      console.error("[AITradingMasterControl][toggle-live]", message, error);
+      toast.error(
+        t(
+          "Failed to save LIVE EXECUTION setting.",
+          "LIVE EXECUTION тохиргоо хадгалах үед алдаа гарлаа.",
+        ),
+        { description: message },
+      );
+    } finally {
+      setIsSavingLive(false);
+    }
+  };
+
+  const handleToggleAggressiveMode = async (next: boolean) => {
+    const targetUserId = await resolveTargetUserId();
+    if (!targetUserId) {
+      toast.error(
+        t("No user found for AGGRESSIVE MODE toggle.", "AGGRESSIVE MODE өөрчлөх хэрэглэгч олдсонгүй."),
+      );
+      return;
+    }
+    try {
+      console.log("Aggressive mode toggle clicked", {
+        current: aggressiveModeEnabled,
+        next,
+      });
+      setIsSavingAggressive(true);
+      setAggressiveModeEnabled(next);
+      const response = await fetch("/api/bot-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: targetUserId,
+          is_aggressive_mode: next,
+        }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body?.error ?? "Failed to update AGGRESSIVE MODE");
+      }
+      const updated = await response.json();
+      setAggressiveModeEnabled(Boolean(updated?.is_aggressive_mode));
+      toast.success(
+        next
+          ? t("AGGRESSIVE MODE enabled", "AGGRESSIVE MODE асаалттай")
+          : t("AGGRESSIVE MODE disabled", "AGGRESSIVE MODE унтраалттай"),
+      );
+    } catch (error) {
+      const message = formatUnknownError(error);
+      console.error("[AITradingMasterControl][toggle-aggressive]", message, error);
+      setAggressiveModeEnabled((prev) => !prev);
+      toast.error(
+        t(
+          "Failed to save AGGRESSIVE MODE setting.",
+          "AGGRESSIVE MODE тохиргоо хадгалах үед алдаа гарлаа.",
+        ),
+        { description: message },
+      );
+    } finally {
+      setIsSavingAggressive(false);
+    }
   };
 
   return (
@@ -149,7 +369,7 @@ export function AITradingMasterControl({
           <div className="flex flex-col items-end gap-3">
             <Button
               size="lg"
-              disabled={walletMode === "real"}
+              disabled={isSaving}
               className={cn(
                 "min-w-40 gap-2 text-sm font-semibold transition-all",
                 demoAutoPilot
@@ -158,7 +378,11 @@ export function AITradingMasterControl({
               )}
               onClick={handleToggle}
             >
-              <Bot className="h-4 w-4" />
+              {isSaving ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Bot className="h-4 w-4" />
+              )}
               {demoAutoPilot
                 ? t("Turn OFF AI", "AI Унтраах")
                 : t("Turn ON AI", "AI Асаах")}
@@ -182,6 +406,50 @@ export function AITradingMasterControl({
               >
                 {t("DCA Mode", "DCA горим")}
               </Button>
+            </div>
+            <div className="w-full rounded-lg border border-warning/40 bg-warning/10 p-3 text-left">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <p className="flex items-center gap-2 text-xs font-semibold text-white">
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                  LIVE EXECUTION
+                </p>
+                <Switch
+                  checked={liveExecutionEnabled}
+                  disabled={isSavingLive}
+                  onCheckedChange={handleToggleLiveExecution}
+                />
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                {t(
+                  "Enabling this will use real USDT for trades.",
+                  "Үүнийг асаавал арилжаанд бодит USDT ашиглана.",
+                )}
+              </p>
+            </div>
+            <div className="w-full rounded-lg border border-orange-500/40 bg-red-500/10 p-3 text-left">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <p
+                  title={t(
+                    "Bypasses technical indicators to follow high-confidence AI signals immediately.",
+                    "Техникийн шүүлтүүрийг тойрч, өндөр итгэлтэй AI дохиог шууд дагана.",
+                  )}
+                  className="flex cursor-help items-center gap-2 text-xs font-semibold text-orange-300"
+                >
+                  <AlertTriangle className="h-3.5 w-3.5 text-orange-400" />
+                  AGGRESSIVE MODE
+                </p>
+                <Switch
+                  checked={aggressiveModeEnabled}
+                  disabled={isSavingAggressive}
+                  onCheckedChange={handleToggleAggressiveMode}
+                />
+              </div>
+              <p className="text-[11px] text-orange-200/90">
+                {t(
+                  "Higher risk: AI-first entries with reduced technical veto.",
+                  "Илүү эрсдэлтэй: техникийн veto багассан AI-first оролт.",
+                )}
+              </p>
             </div>
           </div>
         </div>

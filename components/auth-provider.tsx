@@ -14,14 +14,10 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => Boolean(supabase));
 
   useEffect(() => {
-    if (!isSupabaseConfigured || !supabase) {
-      setUser(null);
-      setLoading(false);
-      return;
-    }
+    if (!isSupabaseConfigured || !supabase) return;
 
     let active = true;
 

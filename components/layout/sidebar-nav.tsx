@@ -16,18 +16,12 @@ import {
   HelpCircle,
   Zap,
   BarChart3,
-  LogIn,
+  UserRound,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useLanguage } from "@/components/language-provider";
-import { useAuth } from "@/components/auth-provider";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { useBalance } from "@/components/balance-provider";
 
 interface NavItem {
   href: string;
@@ -76,9 +70,9 @@ const navItems: NavItem[] = [
 
 const bottomNavItems: NavItem[] = [
   {
-    href: "/auth",
-    label: "Sign In",
-    icon: LogIn,
+    href: "/profile",
+    label: "Profile",
+    icon: UserRound,
   },
   {
     href: "/help",
@@ -95,7 +89,7 @@ const bottomNavItems: NavItem[] = [
 export function SidebarNav() {
   const pathname = usePathname();
   const { t } = useLanguage();
-  const { user: authUser, loading: authLoading } = useAuth();
+  const { demoBalance } = useBalance();
 
   const getLabel = (label: string) => {
     const labels: Record<string, string> = {
@@ -105,16 +99,15 @@ export function SidebarNav() {
       "Portfolio AI": "Багцын AI",
       "Whale Tracker": "Whale хяналт",
       Predictions: "Таамаглал",
+      Profile: "Профайл",
       "Help & Guide": "Тусламж",
-      "Sign In": "Нэвтрэх",
       Settings: "Тохиргоо",
     };
     return t(label, labels[label] ?? label);
   };
 
   return (
-    <TooltipProvider delayDuration={0}>
-      <aside className="fixed left-0 top-0 z-40 flex h-screen w-16 flex-col border-r border-border/50 bg-card/50 backdrop-blur-xl lg:w-64">
+    <aside className="fixed left-0 top-0 z-40 flex h-screen w-16 flex-col border-r border-border/50 bg-card/50 backdrop-blur-xl lg:w-64">
         {/* Logo */}
         <div className="flex h-16 items-center border-b border-border/50 px-4">
           <div className="flex items-center gap-3">
@@ -141,49 +134,38 @@ export function SidebarNav() {
             {navItems.map((item) => {
               const isActive = pathname === item.href;
               const Icon = item.icon;
+              const label = getLabel(item.label);
 
               return (
-                <Tooltip key={item.href}>
-                  <TooltipTrigger asChild>
-                    <Link href={item.href}>
-                      <Button
-                        variant="ghost"
-                        className={cn(
-                          "w-full justify-center lg:justify-start transition-colors",
-                          isActive &&
-                            "bg-primary/15 text-primary hover:bg-primary/20",
-                          !isActive &&
-                            "text-muted-foreground hover:bg-primary/10 hover:text-primary focus-visible:bg-primary/10 focus-visible:text-primary",
-                        )}
-                        size="default"
-                      >
-                        <Icon className="h-5 w-5 shrink-0" />
-                        <span className="ml-3 hidden lg:inline-flex flex-1">
-                          {getLabel(item.label)}
-                        </span>
-                        {item.badge && (
-                          <Badge
-                            variant={item.badgeVariant || "default"}
-                            className="ml-auto hidden text-[10px] lg:inline-flex"
-                          >
-                            {item.badge}
-                          </Badge>
-                        )}
-                      </Button>
-                    </Link>
-                  </TooltipTrigger>
-                  <TooltipContent side="right" className="lg:hidden">
-                    <p>{getLabel(item.label)}</p>
+                <Button
+                  key={item.href}
+                  asChild
+                  title={label}
+                  variant="ghost"
+                  className={cn(
+                    "w-full justify-center lg:justify-start transition-colors",
+                    isActive &&
+                      "bg-primary/15 text-primary hover:bg-primary/20",
+                    !isActive &&
+                      "text-muted-foreground hover:bg-primary/10 hover:text-primary focus-visible:bg-primary/10 focus-visible:text-primary",
+                  )}
+                  size="default"
+                >
+                  <Link href={item.href}>
+                    <Icon className="h-5 w-5 shrink-0" />
+                    <span className="ml-3 hidden lg:inline-flex flex-1">
+                      {label}
+                    </span>
                     {item.badge && (
                       <Badge
-                        variant={item.badgeVariant}
-                        className="ml-2 text-[10px]"
+                        variant={item.badgeVariant || "default"}
+                        className="ml-auto hidden text-[10px] lg:inline-flex"
                       >
                         {item.badge}
                       </Badge>
                     )}
-                  </TooltipContent>
-                </Tooltip>
+                  </Link>
+                </Button>
               );
             })}
           </div>
@@ -191,42 +173,33 @@ export function SidebarNav() {
 
         {/* Bottom Navigation */}
         <div className="border-t border-border/50 p-2">
-          {bottomNavItems
-            .filter((item) => {
-              if (item.href !== "/auth") return true;
-              if (authLoading) return false;
-              return !authUser;
-            })
-            .map((item) => {
+          {bottomNavItems.map((item) => {
             const isActive = pathname === item.href;
             const Icon = item.icon;
+            const label = getLabel(item.label);
 
             return (
-              <Tooltip key={item.href}>
-                <TooltipTrigger asChild>
-                  <Link href={item.href}>
-                    <Button
-                      variant="ghost"
-                      className={cn(
-                        "w-full justify-center lg:justify-start transition-colors",
-                        isActive &&
-                          "bg-primary/15 text-primary hover:bg-primary/20",
-                        !isActive &&
-                          "text-muted-foreground hover:bg-primary/10 hover:text-primary focus-visible:bg-primary/10 focus-visible:text-primary",
-                      )}
-                      size="default"
-                    >
-                      <Icon className="h-5 w-5 shrink-0" />
-                      <span className="ml-3 hidden lg:inline-flex">
-                        {getLabel(item.label)}
-                      </span>
-                    </Button>
-                  </Link>
-                </TooltipTrigger>
-                <TooltipContent side="right" className="lg:hidden">
-                  <p>{getLabel(item.label)}</p>
-                </TooltipContent>
-              </Tooltip>
+              <Button
+                key={item.href}
+                asChild
+                title={label}
+                variant="ghost"
+                className={cn(
+                  "w-full justify-center lg:justify-start transition-colors",
+                  isActive &&
+                    "bg-primary/15 text-primary hover:bg-primary/20",
+                  !isActive &&
+                    "text-muted-foreground hover:bg-primary/10 hover:text-primary focus-visible:bg-primary/10 focus-visible:text-primary",
+                )}
+                size="default"
+              >
+                <Link href={item.href}>
+                  <Icon className="h-5 w-5 shrink-0" />
+                  <span className="ml-3 hidden lg:inline-flex">
+                    {label}
+                  </span>
+                </Link>
+              </Button>
             );
           })}
         </div>
@@ -243,9 +216,11 @@ export function SidebarNav() {
             <p className="mt-1 text-[10px] text-muted-foreground">
               {t("29 days remaining", "29 хоног үлдсэн")}
             </p>
+            <p className="mt-1 text-[10px] text-primary">
+              {t("Balance", "Баланс")}: ${demoBalance.toLocaleString()}
+            </p>
           </div>
         </div>
       </aside>
-    </TooltipProvider>
   );
 }

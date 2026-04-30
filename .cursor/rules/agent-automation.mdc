@@ -1,0 +1,35 @@
+---
+description: How agents should ship, fix, and review this repo
+globs: "**/*"
+alwaysApply: false
+---
+
+# Default behavior
+
+- Small diffs. One task per change set.
+- After edits: run `npm run lint` (and `npm run build` if the change is large).
+- Say risks: auth, RLS, secrets, cron, edge deploy.
+- DB change: add rollback note (how to undo migration or revert column).
+
+# PR-ready checklist (before merge)
+
+- [ ] Lint clean (`npm run lint`)
+- [ ] Typecheck: `npx tsc --noEmit` if types touched
+- [ ] Tests: run if `*.test.*` or `__tests__` exist for changed code
+- [ ] Risk notes: what could break in prod
+- [ ] Rollback note if DB or secrets changed
+
+# Workflows (use with Cursor commands)
+
+- Feature: `/ship` → `/review` (optional `/test`)
+- Bug: `/fix` → `/review`
+- DB: migrate locally → `/test` → `/review`
+
+# MCP (when enabled)
+
+- Supabase: check tool schema before SQL. Prefer read-only first.
+- Browser: use for `/demo` and main flows after UI edits.
+
+# Commands reference
+
+- See `.cursor/commands/ship.md`, `fix.md`, `review.md`, `test.md`.

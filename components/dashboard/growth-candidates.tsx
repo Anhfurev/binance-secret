@@ -1,5 +1,6 @@
 'use client'
 
+import Image from 'next/image'
 import { Sparkles, ArrowUp, ArrowDown, Minus, TrendingUp, AlertTriangle, Info } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -130,10 +131,13 @@ export function GrowthCandidates({ candidates, signalsChanged, isLoading }: Grow
                     </div>
                   </div>
                   <div className="flex items-center gap-2.5">
-                    <img 
-                      src={candidate.image} 
+                    <Image
+                      src={candidate.image}
                       alt={candidate.name}
+                      width={32}
+                      height={32}
                       className="h-8 w-8 rounded-full"
+                      unoptimized
                     />
                     <div>
                       <div className="flex items-center gap-2">

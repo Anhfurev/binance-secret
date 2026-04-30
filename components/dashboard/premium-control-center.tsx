@@ -214,7 +214,6 @@ export function PremiumControlCenter({
             <Switch
               checked={autoPilotEnabled}
               onCheckedChange={onAutoPilotChange}
-              disabled={!canEnableLiveAutoPilot}
               aria-label="Auto trade toggle"
             />
           </div>
@@ -224,14 +223,14 @@ export function PremiumControlCenter({
               <p className="flex items-center gap-2 font-medium text-white">
                 <AlertTriangle className="h-3.5 w-3.5" />
                 {t(
-                  "Auto trade locked for safety",
-                  "Аюулгүй байдлаар auto trade түгжээтэй",
+                  "Live exchange orders locked for safety",
+                  "Live биржийн захиалга аюулгүй байдлаар түгжээтэй",
                 )}
               </p>
               <p className="mt-1 text-muted-foreground">
                 {t(
-                  "Requirements: Binance connected, trading permission ON, withdrawals OFF.",
-                  "Шаардлага: Binance холбогдсон, trading permission ON, withdrawal OFF.",
+                  "Demo AI autopilot still works. Live order requirements: Binance connected, trading permission ON, withdrawals OFF.",
+                  "Demo AI autopilot ажиллана. Live захиалгын шаардлага: Binance холбогдсон, trading permission ON, withdrawal OFF.",
                 )}
               </p>
             </div>

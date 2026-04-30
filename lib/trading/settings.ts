@@ -26,6 +26,9 @@ export interface AppSettings {
 export const defaultScalpingSettings: ScalpingSettings = {
   timeframe: "3m",
   minAiConfidence: 70,
+  rsiBuyThreshold: 30,
+  rsiSellThreshold: 70,
+  maxOpenTrades: 5,
   minExpectedProfitToFeeRatio: 2,
   maxSpreadPct: 0.05,
   minLiquidityUsd: 1_500_000,

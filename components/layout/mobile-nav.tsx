@@ -19,7 +19,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useLanguage } from "@/components/language-provider";
-import { useAuth } from "@/components/auth-provider";
 
 const mainNavItems = [
   { href: "/", label: "Home", icon: LayoutDashboard },
@@ -29,9 +28,9 @@ const mainNavItems = [
 ];
 
 const moreNavItems = [
+  { href: "/profile", label: "Profile" },
   { href: "/optimizer", label: "Portfolio AI" },
   { href: "/whale", label: "Whale Tracker" },
-  { href: "/auth", label: "Sign In" },
   { href: "/help", label: "Help & Guide" },
   { href: "/settings", label: "Settings" },
 ];
@@ -39,7 +38,6 @@ const moreNavItems = [
 export function MobileNav() {
   const pathname = usePathname();
   const { t } = useLanguage();
-  const { user: authUser, loading: authLoading } = useAuth();
 
   const getLabel = (label: string) => {
     const labels: Record<string, string> = {
@@ -49,9 +47,9 @@ export function MobileNav() {
       Paper: "Демо",
       "Portfolio AI": "Багцын AI",
       "Whale Tracker": "Whale хяналт",
-      "Sign In": "Нэвтрэх",
       "Help & Guide": "Тусламж",
       Settings: "Тохиргоо",
+      Profile: "Профайл",
       More: "Бусад",
     };
     return t(label, labels[label] ?? label);
@@ -102,13 +100,7 @@ export function MobileNav() {
             align="end"
             className="mb-2 w-48 border-border/70 bg-card/95 backdrop-blur-xl"
           >
-            {moreNavItems
-              .filter((item) => {
-                if (item.href !== "/auth") return true;
-                if (authLoading) return false;
-                return !authUser;
-              })
-              .map((item) => (
+            {moreNavItems.map((item) => (
               <DropdownMenuItem
                 key={item.href}
                 className="cursor-pointer focus:bg-primary/10 focus:text-primary"

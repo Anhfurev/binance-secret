@@ -1,0 +1,37 @@
+---
+description: Global project architecture and file-size rules
+globs: "**/*.{ts,tsx,js,jsx}"
+alwaysApply: true
+---
+
+# Core Rules
+
+- Keep every file under 300 lines.
+- If a file reaches 250 lines, split it immediately.
+- Prefer Next.js Server Components by default.
+- Add `"use client"` only when required by hooks/browser APIs.
+
+# Modular Structure
+
+- Move complex UI logic into `@/hooks`.
+- Move API and integration logic into `@/services`.
+- Move shared app state into `@/lib/store`.
+- Move shared domain types into `@/types`.
+
+# AI App Focus
+
+- Keep AI orchestration centralized in reusable store/hooks.
+- Avoid duplicating AI logic across pages.
+- Mount global AI entry points in `app/layout.tsx`.
+
+# PR-ready (before merge)
+
+- Run `npm run lint`. If types touched: `npx tsc --noEmit`.
+- Note risks (auth, RLS, secrets, edge deploy). DB change: add rollback note.
+- Never paste or commit secrets. Client only `NEXT_PUBLIC_*`.
+
+# Cursor helpers
+
+- Project detail: `.cursor/rules/project-rules.mdc`, `.cursor/rules/agent-automation.mdc`.
+- Agents: `.cursor/agents/project-shipper.md`, `project-reviewer.md`.
+- Commands: `.cursor/commands/ship.md`, `fix.md`, `review.md`, `test.md`.

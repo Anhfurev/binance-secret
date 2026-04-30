@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "ccxt": "https://esm.sh/ccxt@4.2.0",
+    "@supabase/functions-js": "jsr:@supabase/functions-js@^2"
+  }
+}

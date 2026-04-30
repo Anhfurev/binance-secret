@@ -15,6 +15,7 @@ interface PageHeaderProps {
   onAddFunds: () => void;
   onPracticeTrade: () => void;
   onReset: () => void;
+  currentBalance: number;
 }
 
 export function PageHeader({
@@ -25,12 +26,13 @@ export function PageHeader({
   onAddFunds,
   onPracticeTrade,
   onReset,
+  currentBalance,
 }: PageHeaderProps) {
   const { t } = useLanguage();
 
   return (
-    <div className="mb-8">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+    <div className="mb-6">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
         <div>
           <h1 className="flex items-center gap-3 text-2xl font-bold text-foreground md:text-3xl">
             <Wallet className="h-7 w-7 text-primary" />
@@ -61,11 +63,11 @@ export function PageHeader({
             </Button>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex w-full flex-wrap items-center gap-2 xl:w-auto xl:justify-end">
           <Badge
             variant={walletMode === "demo" ? "secondary" : "outline"}
             className={cn(
-              "px-3 py-1",
+              "px-3 py-1 whitespace-nowrap",
               walletMode === "real" && "border-warning/40 bg-warning/10",
             )}
           >
@@ -75,7 +77,7 @@ export function PageHeader({
           </Badge>
           <Badge
             variant={daysRemaining > 7 ? "default" : "destructive"}
-            className="px-3 py-1"
+            className="px-3 py-1 whitespace-nowrap"
           >
             <Clock className="mr-1.5 h-3 w-3" />
             {daysRemaining} {t("days remaining", "хоног үлдсэн")}
@@ -83,7 +85,7 @@ export function PageHeader({
           <Badge
             variant="outline"
             className={cn(
-              "px-3 py-1",
+              "px-3 py-1 whitespace-nowrap",
               cloudSyncState === "synced" &&
                 "border-success/40 bg-success/10 text-success",
               cloudSyncState === "syncing" &&
@@ -105,7 +107,7 @@ export function PageHeader({
           <Button
             size="sm"
             onClick={onAddFunds}
-            className="bg-success hover:bg-success/90 text-success-foreground"
+            className="bg-success text-success-foreground hover:bg-success/90"
             disabled={walletMode === "real"}
           >
             <DollarSign className="mr-2 h-4 w-4" />

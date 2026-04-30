@@ -1,5 +1,6 @@
 'use client'
 
+import Image from 'next/image'
 import { useState, useMemo } from 'react'
 import { ArrowUpDown, TrendingUp, TrendingDown, Search, BarChart3 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -24,6 +25,26 @@ interface MarketBoardProps {
 
 type SortKey = 'market_cap_rank' | 'current_price' | 'price_change_percentage_24h' | 'market_cap' | 'total_volume'
 type SortOrder = 'asc' | 'desc'
+
+type MarketSortableHeaderProps = {
+  label: string
+  sortKeyName: SortKey
+  onSort: (key: SortKey) => void
+}
+
+function MarketSortableHeader({ label, sortKeyName, onSort }: MarketSortableHeaderProps) {
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="-ml-3 h-8 gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+      onClick={() => onSort(sortKeyName)}
+    >
+      {label}
+      <ArrowUpDown className="h-3 w-3" />
+    </Button>
+  )
+}
 
 export function MarketBoard({ coins, isLoading }: MarketBoardProps) {
   const [searchQuery, setSearchQuery] = useState('')
@@ -72,18 +93,6 @@ export function MarketBoard({ coins, isLoading }: MarketBoardProps) {
     return `$${num.toLocaleString()}`
   }
 
-  const SortableHeader = ({ label, sortKeyName }: { label: string; sortKeyName: SortKey }) => (
-    <Button
-      variant="ghost"
-      size="sm"
-      className="-ml-3 h-8 gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
-      onClick={() => handleSort(sortKeyName)}
-    >
-      {label}
-      <ArrowUpDown className="h-3 w-3" />
-    </Button>
-  )
-
   return (
     <Card className="card-hover border-border/50 bg-card/50 backdrop-blur-sm">
       <CardHeader className="pb-3">
@@ -114,16 +123,16 @@ export function MarketBoard({ coins, isLoading }: MarketBoardProps) {
                 <TableHead className="w-12 text-center">#</TableHead>
                 <TableHead>Coin</TableHead>
                 <TableHead className="text-right">
-                  <SortableHeader label="Price" sortKeyName="current_price" />
+                  <MarketSortableHeader label="Price" sortKeyName="current_price" onSort={handleSort} />
                 </TableHead>
                 <TableHead className="text-right">
-                  <SortableHeader label="24h %" sortKeyName="price_change_percentage_24h" />
+                  <MarketSortableHeader label="24h %" sortKeyName="price_change_percentage_24h" onSort={handleSort} />
                 </TableHead>
                 <TableHead className="hidden text-right md:table-cell">
-                  <SortableHeader label="Market Cap" sortKeyName="market_cap" />
+                  <MarketSortableHeader label="Market Cap" sortKeyName="market_cap" onSort={handleSort} />
                 </TableHead>
                 <TableHead className="hidden text-right lg:table-cell">
-                  <SortableHeader label="Volume" sortKeyName="total_volume" />
+                  <MarketSortableHeader label="Volume" sortKeyName="total_volume" onSort={handleSort} />
                 </TableHead>
               </TableRow>
             </TableHeader>
@@ -149,10 +158,13 @@ export function MarketBoard({ coins, isLoading }: MarketBoardProps) {
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2.5">
-                          <img 
-                            src={coin.image} 
+                          <Image
+                            src={coin.image}
                             alt={coin.name}
+                            width={28}
+                            height={28}
                             className="h-7 w-7 rounded-full"
+                            unoptimized
                           />
                           <div>
                             <p className="font-medium">{coin.name}</p>

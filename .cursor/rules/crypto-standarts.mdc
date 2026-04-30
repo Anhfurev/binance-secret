@@ -1,0 +1,13 @@
+---
+description: Standards for crypto integrations and Next.js
+globs: "**/crypto/**, **/hooks/use-*.ts"
+alwaysApply: false
+---
+
+# Crypto App Standards
+
+- **Stack**: viem/ethers v6, TanStack Query.
+- **Price Feeds**: Use SWR or React Query. Avoid manual `useEffect` intervals for price updates.
+- **Security**: Never hardcode addresses. Use `@/constants/contracts.ts`.
+- **Formatting**: Use `Intl.NumberFormat` for currency. Always handle "Dust" amounts (small decimals) carefully.
+- **MCP**: Use my mcp into connect with my backend and chnage data table etc
