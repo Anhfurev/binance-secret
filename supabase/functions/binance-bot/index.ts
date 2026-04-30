@@ -37,6 +37,7 @@ import {
   runRetentionCleanup,
   runStaleTradeGuard,
 } from "./health-check.ts";
+import { runDebuggerHealthAndFix } from "./health-debugger.ts";
 
 const lastAiPriceBySymbol = new Map<string, number>();
 
@@ -309,6 +310,41 @@ async function handleHealthCheckOnly(
   });
 }
 
+async function handleDebuggerHealthOnly(
+  supabase: ReturnType<typeof createClient>,
+  applyFixes: boolean,
+): Promise<Response> {
+  const startedAtMs = Date.now();
+  const batchId = `debug-${crypto.randomUUID().slice(0, 8)}`;
+  console.log("[DEBUGGER] starting debugger_health_only", { batchId, applyFixes });
+
+  const [snapshot, staleResult, retentionResult, debuggerResult] = await Promise.all([
+    safeExecute("debug_health_snapshot", () => collectHealthSnapshot({ supabase }), null),
+    safeExecute("debug_stale_guard", () => runStaleTradeGuard({ supabase, batchId }), null),
+    safeExecute(
+      "debug_retention",
+      () => runRetentionCleanup({ supabase, batchId, force: true }),
+      null,
+    ),
+    safeExecute(
+      "debugger_health",
+      () => runDebuggerHealthAndFix({ supabase, batchId, applyFixes }),
+      null,
+    ),
+  ]);
+
+  return jsonResponse({
+    ok: true,
+    mode: "debugger_health_only",
+    batch_id: batchId,
+    elapsed_ms: Date.now() - startedAtMs,
+    debugger: debuggerResult,
+    snapshot,
+    stale_trade_guard: staleResult,
+    retention_cleanup: retentionResult,
+  });
+}
+
 async function handleAuthenticatedCron(
   supabase: ReturnType<typeof createClient>,
   symbols: string[],
@@ -567,12 +603,16 @@ Deno.serve(async (req: Request) => {
     const symbols = parseSymbolsFromBody(parsedBody);
     const probeSymbol = symbols[0] ?? "unknown";
     const healthCheckOnly = Boolean((parsedBody as any)?.health_check_only);
+    const debuggerHealthOnly = Boolean((parsedBody as any)?.debugger_health_only);
+    const debuggerApplyFixes = (parsedBody as any)?.debugger_apply_fixes !== false;
 
     botDebug("index", "function_started", {
       method: req.method,
       sym: probeSymbol,
       n_symbols: symbols.length,
       health_check_only: healthCheckOnly,
+      debugger_health_only: debuggerHealthOnly,
+      debugger_apply_fixes: debuggerApplyFixes,
     });
     void emitSentryBootProbe({ method: req.method, symbol: probeSymbol });
 
@@ -592,6 +632,9 @@ Deno.serve(async (req: Request) => {
 
     if (healthCheckOnly) {
       return await handleHealthCheckOnly(sharedSupabase);
+    }
+    if (debuggerHealthOnly) {
+      return await handleDebuggerHealthOnly(sharedSupabase, debuggerApplyFixes);
     }
 
     if (!symbols.length) {

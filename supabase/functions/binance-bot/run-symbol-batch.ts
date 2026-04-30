@@ -23,6 +23,7 @@ import {
 import { evaluateMoneyMachineExits } from "./money-machine-guard.ts";
 import { decideHybridMatrix } from "./index-decision.ts";
 import { passesMeanReversionBuyGate } from "./regime-detection.ts";
+import { resolveNoTradeFallback } from "./no-trade-fallback.ts";
 import {
   resolveSessionAwareMinAiConfidence,
   resolveVolumeSpikeMultiplier,
@@ -288,8 +289,8 @@ export async function runSymbolBatch(params: {
         row,
       );
       const technicalScore = calculateTechnicalScore(snapshot);
-      const aggressiveModeEnabled = Boolean((row as any).is_aggressive_mode);
-      const minTech = resolveMinTechScore(row as Record<string, unknown>);
+      let aggressiveModeEnabled = Boolean((row as any).is_aggressive_mode);
+      let minTech = resolveMinTechScore(row as Record<string, unknown>);
       const minVolume24hQuote = resolveMinVolume24hQuote(row as Record<string, unknown>);
       const isGhostExecution = resolveGhostMode(row);
       const isSandboxMode = isTestMode || isGhostExecution;
@@ -316,6 +317,27 @@ export async function runSymbolBatch(params: {
         lastCandleVolume: Number(lastCandle?.volume ?? 0),
       });
       minAiConfidence = sessionAware.adjustedMinAiConfidence;
+      const noTradeFallback = await resolveNoTradeFallback({
+        supabase,
+        userId,
+        symbol,
+        hasOpenTrade: Boolean(openTrade),
+        minAiConfidence,
+        minTechScore: minTech,
+      });
+      if (noTradeFallback.active) {
+        minAiConfidence = noTradeFallback.adjustedMinAiConfidence;
+        minTech = noTradeFallback.adjustedMinTechScore;
+        aggressiveModeEnabled = aggressiveModeEnabled || noTradeFallback.forceAggressiveMode;
+        console.log("[NO_TRADE_FALLBACK]", {
+          symbol,
+          userId,
+          days_since_last_buy: noTradeFallback.daysSinceLastBuy,
+          adjusted_min_ai_confidence: minAiConfidence,
+          adjusted_min_tech_score: minTech,
+          force_aggressive: noTradeFallback.forceAggressiveMode ? 1 : 0,
+        });
+      }
 
       const strategySignal =
         !openTrade && strategyEntry.signal === "SELL"
@@ -334,6 +356,11 @@ export async function runSymbolBatch(params: {
         isSandboxMode,
         isGhostExecution,
       });
+      if (noTradeFallback.active) {
+        preflight.veto_reasons.push(
+          `NO_TRADE_FALLBACK_ACTIVE:${String(noTradeFallback.reason ?? "active")}`,
+        );
+      }
       console.log(
         `[VETO_CHECK] Symbol: ${symbol} | Passed: ${preflight.passedCount}/${preflight.totalGates} | Fails: ${JSON.stringify(preflight.veto_reasons)}`,
       );

@@ -35,6 +35,8 @@ export type RetentionRunResult = {
   logsDeleted: number | null;
   aiCacheDeleted: number | null;
   capitalReservationsDeleted: number | null;
+  botDebugTracesDeleted: number | null;
+  warRoomAuditsDeleted: number | null;
 };
 
 /**
@@ -138,6 +140,8 @@ export async function runRetentionCleanup(params: {
       logsDeleted: null,
       aiCacheDeleted: null,
       capitalReservationsDeleted: null,
+      botDebugTracesDeleted: null,
+      warRoomAuditsDeleted: null,
     };
   }
   lastRetentionRunAtMs = now;
@@ -146,7 +150,7 @@ export async function runRetentionCleanup(params: {
   const aiCacheCutoffIso = new Date(now - aiCacheRetentionHours * 60 * 60 * 1000).toISOString();
   const capitalReservationsCutoffIso = new Date(now - 5 * 60 * 1000).toISOString();
 
-  const [logsDel, aiCacheDel, capitalDel] = await Promise.all([
+  const [logsDel, aiCacheDel, capitalDel, tracesDel, warRoomDel] = await Promise.all([
     supabase
       .from("logs")
       .delete({ count: "exact" })
@@ -159,6 +163,14 @@ export async function runRetentionCleanup(params: {
       .from("capital_reservations")
       .delete({ count: "exact" })
       .lt("created_at", capitalReservationsCutoffIso),
+    supabase
+      .from("bot_debug_traces")
+      .delete({ count: "exact" })
+      .lt("created_at", logsCutoffIso),
+    supabase
+      .from("war_room_audits")
+      .delete({ count: "exact" })
+      .lt("created_at", logsCutoffIso),
   ]);
 
   await supabase.from("logs").insert([{
@@ -173,9 +185,13 @@ export async function runRetentionCleanup(params: {
       logs_deleted: logsDel.count ?? null,
       ai_cache_deleted: aiCacheDel.count ?? null,
       capital_reservations_deleted: capitalDel.count ?? null,
+      bot_debug_traces_deleted: tracesDel.count ?? null,
+      war_room_audits_deleted: warRoomDel.count ?? null,
       logs_error: logsDel.error?.message ?? null,
       ai_cache_error: aiCacheDel.error?.message ?? null,
       capital_reservations_error: capitalDel.error?.message ?? null,
+      bot_debug_traces_error: tracesDel.error?.message ?? null,
+      war_room_audits_error: warRoomDel.error?.message ?? null,
       forced: force,
     },
     created_at: new Date().toISOString(),
@@ -186,6 +202,8 @@ export async function runRetentionCleanup(params: {
     logsDeleted: logsDel.error ? null : (logsDel.count ?? 0),
     aiCacheDeleted: aiCacheDel.error ? null : (aiCacheDel.count ?? 0),
     capitalReservationsDeleted: capitalDel.error ? null : (capitalDel.count ?? 0),
+    botDebugTracesDeleted: tracesDel.error ? null : (tracesDel.count ?? 0),
+    warRoomAuditsDeleted: warRoomDel.error ? null : (warRoomDel.count ?? 0),
   };
 }
 

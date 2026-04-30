@@ -8,6 +8,42 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-04-30 — Debugger health mode + auto-fixes
+
+**Summary**
+- Added `supabase/functions/binance-bot/health-debugger.ts` with `runDebuggerHealthAndFix` to run a focused bot debugger pass (env checks, recent error pressure, symbol cycle failures, stale capital reservation lock detection, HOLD-dominance signal).
+- Added request mode in `supabase/functions/binance-bot/index.ts`: send `{"debugger_health_only": true}` to run debugger without full trading cycle.
+- Added optional fixer toggle: `debugger_apply_fixes` (default true). Current automatic fixes: stale `capital_reservations` purge and expired `ai_quota_state` cooldown reset.
+
+**Bot / stack**
+- Debugger writes a structured `logs` event with source `debugger-health` and includes issue/fix payloads for traceability.
+- `debugger_health_only` also runs snapshot, stale-trade guard, and retention cleanup to provide one full health report envelope.
+
+**Open risks / follow-ups**
+- `index.ts` remains oversized and should be split (`debugger` / `request-router` extraction) to match file-size policy.
+- Consider adding DB-side retention for `public.logs` by severity class (keep `error` longer, prune `info` aggressively).
+
+---
+
+## 2026-04-30 — Always-on no-trade fallback helper
+
+**Summary**
+- Added `supabase/functions/binance-bot/no-trade-fallback.ts` with `resolveNoTradeFallback` to detect long inactivity and temporarily relax entry gates.
+- Wired into `supabase/functions/binance-bot/run-symbol-batch.ts` so fallback runs every cycle automatically (always available).
+
+**Bot / stack**
+- Activation rule: no BUY for ~20 days (or never bought yet) and no open trade.
+- On activation, cycle uses adjusted thresholds:
+  - `min_ai_confidence`: up to `-10` points (floor `55`)
+  - `min_tech_score`: up to `-2` points (floor `3`)
+  - forces aggressive mode path for that cycle.
+- Preflight veto payload now includes `NO_TRADE_FALLBACK_ACTIVE:*` marker for audit/debug visibility.
+
+**Open risks / follow-ups**
+- Fallback is intentionally permissive to break long HOLD streaks; monitor first week closely and tighten floors if entries become too frequent.
+
+---
+
 ## 2026-04-27 — Remove Cursor `stop` hook (changelog)
 
 Removed `.cursor/hooks.json` so agent completion no longer auto-submits a follow-up to edit this file. Changelog updates are manual or by explicit ask only.
