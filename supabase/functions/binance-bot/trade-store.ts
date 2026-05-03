@@ -161,13 +161,13 @@ export function resolveTradeSizeUsd(
   currentBalance: number,
 ): number {
   const symbol = String(row.symbol ?? "").toUpperCase();
-  if (symbol === "PEPEUSDT") {
-    // Keep PEPE exposure small during test runs.
-    return Math.min(currentBalance, PEPE_TEST_TRADE_USD);
-  }
-
   const fixedUsd = toNumber(row.trade_size_usd ?? row.fixed_trade_usd, 0);
   if (fixedUsd > 0) return Math.min(currentBalance, fixedUsd);
+
+  if (symbol === "PEPEUSDT") {
+    // Default meme cap when no fixed USD on the row; explicit trade_size_usd wins above.
+    return Math.min(currentBalance, PEPE_TEST_TRADE_USD);
+  }
 
   const riskPercent = clamp(
     toNumber(row.risk_percent, DEFAULT_RISK_PERCENT),

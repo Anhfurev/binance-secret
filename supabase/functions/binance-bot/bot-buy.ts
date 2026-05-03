@@ -418,7 +418,7 @@ export async function executeBuyFlow(params: {
   snapshotImbalanceRatio?: number;
   /** 24h quote volume from ticker when available. */
   snapshotVolume24hQuote?: number | null;
-  /** Multiply final env-based `tradeUsd` when below 1 (e.g. MTF half-position override). */
+  /** Multiply final `tradeUsd` when below 1 (e.g. MTF half-position override). */
   executionUsdScale?: number;
   /** Paper/demo-only probe BUY — skips War Room quorum + ranging dip gate (never with live trading). */
   demoProbeBuy?: boolean;
@@ -604,10 +604,14 @@ export async function executeBuyFlow(params: {
     });
   }
 
-  const tradeAmount = 20;
   const envTradingAmount = Number(Deno.env.get("TRADING_AMOUNT") ?? TRADING_AMOUNT_USD ?? 0);
-  const finalTradeUsd = Math.max(20, envTradingAmount || 20);
-  let tradeUsd = Math.min(currentBalance, Math.max(tradeAmount, finalTradeUsd));
+  let tradeUsd = envTradingAmount > 0
+    ? Math.min(currentBalance, Math.max(MIN_TRADE_USD, envTradingAmount))
+    : resolveTradeSizeUsd(row, currentBalance);
+  if (!Number.isFinite(tradeUsd) || tradeUsd < MIN_TRADE_USD) {
+    tradeUsd = Math.min(currentBalance, MIN_TRADE_USD);
+  }
+  tradeUsd = Math.min(currentBalance, Math.max(MIN_TRADE_USD, tradeUsd));
   const scaleUsd = Number(executionUsdScale ?? 1);
   if (Number.isFinite(scaleUsd) && scaleUsd > 0 && scaleUsd < 1) {
     tradeUsd = Math.max(MIN_TRADE_USD, tradeUsd * scaleUsd);
@@ -615,8 +619,7 @@ export async function executeBuyFlow(params: {
   botDebug("buyFlow", "position_sizing", {
     userId,
     symbol,
-    tradeAmount,
-    finalTradeUsd,
+    envTradingAmountOverride: envTradingAmount > 0 ? envTradingAmount : null,
     selectedTradeUsd: tradeUsd,
     aiConfidence: ai.ai_confidence,
     marketRegime: regime,

@@ -8,6 +8,15 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-03 — BUY sizing uses `bot_settings` (not hardcoded $20)
+
+**Summary**
+- `executeBuyFlow` had a hardcoded **$20** floor and ignored `trade_size_usd` / `risk_percent`.
+- Sizing is now: **`TRADING_AMOUNT` env** if set, else **`resolveTradeSizeUsd`** (`fixed_trade_usd` / `trade_size_usd`, else PEPE default cap, else `%` of balance).
+- PEPE: explicit `trade_size_usd` on the row now overrides the default **$20** meme cap.
+
+---
+
 ## 2026-05-03 — bot_debug_traces + explicit AI cache invalidation
 
 **Summary**
