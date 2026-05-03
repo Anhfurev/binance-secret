@@ -156,8 +156,10 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  const invalidateUntil = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   const updatePayload: Record<string, unknown> = {
     updated_at: new Date().toISOString(),
+    ai_cache_invalidate_until: invalidateUntil,
   };
   if (typeof body?.is_autopilot_enabled === "boolean") {
     updatePayload.is_autopilot_enabled = body.is_autopilot_enabled;
@@ -181,6 +183,7 @@ export async function POST(req: NextRequest) {
     .eq("user_id", userId);
 
   if (updateResult.error) {
+    const upsertInvalidate = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     const upsertRows = DEFAULT_SYMBOLS.map((symbol) => ({
       user_id: userId,
       symbol,
@@ -189,6 +192,7 @@ export async function POST(req: NextRequest) {
       is_ghost_execution: Boolean(body?.is_ghost_execution ?? false),
       is_aggressive_mode: Boolean(body?.is_aggressive_mode ?? false),
       updated_at: new Date().toISOString(),
+      ai_cache_invalidate_until: upsertInvalidate,
       ...tunablePatch,
     }));
     const upsert = await supabaseAdmin

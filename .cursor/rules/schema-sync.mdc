@@ -7,5 +7,6 @@ alwaysApply: false
 # Schema sync (bot)
 
 - **`public.ai_cache`**: `supabase/functions/binance-bot/ai-db.ts` `.select()` / `.insert()` must match real columns. If you add fields in code, add a migration under `supabase/migrations/` and apply before deploy (`apply_migration` or `supabase db push`).
-- **`public.bot_settings`**: `take_profit_pct` / `stop_loss_pct` must not be NULL for trading bots (exits read from DB).
+- **`public.bot_settings`**: `take_profit_pct` / `stop_loss_pct` must not be NULL for trading bots (exits read from DB). Optional `ai_cache_invalidate_until` (timestamptz): when in the future, Edge skips `ai_cache` reads — set from `app/api/bot-settings` on saves, not on every SQL touch.
+- **`public.bot_debug_traces`**: must include `user_id`, `bot_id`, `cycle_id` + partial unique `(cycle_id, symbol, user_id)` for upserts in `run-symbol-batch.ts`.
 - After DDL: note RLS; Edge uses service role but app routes may not.

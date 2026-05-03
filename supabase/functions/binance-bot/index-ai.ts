@@ -26,7 +26,6 @@ import { safeExecute } from "./safe-execute.ts";
 // wiggles; higher values risk missing fast moves. 0.4% is a practical balance
 // for BTC / SOL / PEPE on a 1m heartbeat cadence.
 export const AI_PRICE_MOVE_THRESHOLD_PERCENT = 0.4;
-export const SETTINGS_CACHE_BYPASS_WINDOW_MS = 5 * 60 * 1000;
 const MAX_CONSECUTIVE_GEMINI_FAILURES = 3;
 const EMERGENCY_ABORT_MESSAGE = "Emergency Abort: Quota Limit Hit";
 
@@ -57,15 +56,13 @@ export function shouldRunAiCheck(
   return movePct > AI_PRICE_MOVE_THRESHOLD_PERCENT;
 }
 
-export function wasSettingsRecentlyChanged(row: BotSettingsRow): boolean {
-  const rawUpdatedAt = toStringValue((row as any)?.updated_at);
-  if (!rawUpdatedAt) return false;
-  const updatedAtMs = Date.parse(rawUpdatedAt);
-  if (!Number.isFinite(updatedAtMs)) return false;
-  const hasAggressive = typeof (row as any)?.is_aggressive_mode === "boolean";
-  const hasLive = typeof (row as any)?.is_live_trading_enabled === "boolean";
-  if (!hasAggressive && !hasLive) return false;
-  return Date.now() - updatedAtMs <= SETTINGS_CACHE_BYPASS_WINDOW_MS;
+/** True when UI or quota path set `ai_cache_invalidate_until` into the future. */
+export function shouldBypassAiCacheFromSettings(row: BotSettingsRow): boolean {
+  const raw = toStringValue((row as any)?.ai_cache_invalidate_until);
+  if (!raw) return false;
+  const untilMs = Date.parse(raw);
+  if (!Number.isFinite(untilMs)) return false;
+  return Date.now() < untilMs;
 }
 
 /**
@@ -120,6 +117,7 @@ export async function markAiQuotaFallback(params: {
     model_status: "OpenAI-Only",
     model_status_until: cooldownUntil,
     updated_at: nowIso,
+    ai_cache_invalidate_until: cooldownUntil,
   } as any).eq("id", botId ?? "");
   if (statusResult.error) {
     console.warn(`[binance-bot] bot_settings model_status update skipped: ${statusResult.error.message}`);
@@ -201,7 +199,7 @@ export async function getAiVerdict(params: {
   const { shouldInvokeAi, snapshot, symbol, row, supabase, safetyAi, userId, signal } = params;
   let ai = safetyAi;
   let aiQuotaFallback = false;
-  const shouldBypassCache = wasSettingsRecentlyChanged(row);
+  const shouldBypassCache = shouldBypassAiCacheFromSettings(row);
   const scoreWeights = getResolvedScoreWeightsPack(row as Record<string, unknown>);
 
   if (!shouldInvokeAi && !shouldBypassCache) {
@@ -238,7 +236,7 @@ export async function getAiVerdict(params: {
     });
     await patchAiQuotaState({ consecutive_gemini_failures: 0, last_failure_at: null });
     if (shouldBypassCache) {
-      console.warn(`[AI DEBUG] Cache bypass forced for ${symbol} due to recent settings update (aggressive/live)`);
+      console.warn(`[AI DEBUG] Cache bypass for ${symbol}: ai_cache_invalidate_until is active`);
     }
   } catch (aiError) {
     const aiDetail = formatUnknownError(aiError);

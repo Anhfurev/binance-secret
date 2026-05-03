@@ -8,6 +8,20 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-03 — bot_debug_traces + explicit AI cache invalidation
+
+**Summary**
+- Migration `20260503140000_bot_debug_traces_bot_id_cache_invalidate.sql`: ensure
+  `bot_debug_traces` has `user_id`, `bot_id`, `cycle_id`, partial unique index for
+  upserts, dedupe helper, and `bot_settings.ai_cache_invalidate_until`.
+- Replaced broken `wasSettingsRecentlyChanged` (always true for boolean columns →
+  5m cache bypass after any `updated_at` bump) with **`shouldBypassAiCacheFromSettings`**
+  reading only `ai_cache_invalidate_until`.
+- `app/api/bot-settings` POST sets `ai_cache_invalidate_until = now()+10m` on saves;
+  Gemini quota fallback sets it to the cooldown end when switching to OpenAI-only.
+
+---
+
 ## 2026-05-03 — Paper/ghost “best defaults” (DB)
 
 **Summary**

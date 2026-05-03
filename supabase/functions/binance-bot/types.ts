@@ -42,6 +42,8 @@ export type BotSettingsRow = JsonRecord & {
   min_tech_score?: number | null;
   /** Optional 24h quote-volume floor. 0 disables preflight FAIL_VOLUME for sandbox/ghost. */
   min_volume_24h_quote?: number | null;
+  /** When set in the future, Edge skips `ai_cache` reads until this instant (UTC). */
+  ai_cache_invalidate_until?: string | null;
   /** Optional basket tier for capital allocation hints (see `portfolio-basket.ts`). */
   portfolio_tier?: string | null;
   /** Optional weight 0–100 for basket sizing; null → symbol-based defaults. */
