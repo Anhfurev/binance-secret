@@ -24,6 +24,7 @@ import { evaluateMoneyMachineExits } from "./money-machine-guard.ts";
 import { decideHybridMatrix } from "./index-decision.ts";
 import { passesMeanReversionBuyGate } from "./regime-detection.ts";
 import { resolveNoTradeFallback } from "./no-trade-fallback.ts";
+import { resolveDemoPaperProbeBuy } from "./demo-paper-probe-buy.ts";
 import {
   resolveSessionAwareMinAiConfidence,
   resolveVolumeSpikeMultiplier,
@@ -155,6 +156,7 @@ export async function runSymbolBatch(params: {
   const runSingleBotCycle = async (row: any, botIndex: number, signal: AbortSignal) => {
     const userId = toStringValue(row.user_id) ?? "unknown";
     const symbol = normalizeSymbol(row.symbol, symbolFilter);
+    let demoProbeBuyFlag = false;
     botDebug("index", "bot_cycle_start", { userId, symbol, botIndex });
     let minAiConfidence = resolveMinAiConfidenceForRegime(
       row as Record<string, unknown>,
@@ -581,6 +583,37 @@ export async function runSymbolBatch(params: {
         }
       }
 
+      const paperProbe = await resolveDemoPaperProbeBuy({
+        supabase,
+        userId,
+        symbol,
+        row,
+        hasOpenTrade: Boolean(openTrade),
+      });
+      if (paperProbe.apply && decision === "HOLD") {
+        decision = "BUY";
+        reason = paperProbe.reason ?? "demo_inactivity_probe_buy";
+        demoProbeBuyFlag = true;
+        await safeExecute(
+          "demo_paper_probe_activated_log",
+          () =>
+            supabase.from("logs").insert([{
+              user_id: userId,
+              symbol,
+              level: "info",
+              source: "demo-probe-buy",
+              message: "demo_paper_probe_activated",
+              meta: {
+                event: "demo_paper_probe_activated",
+                reason: paperProbe.reason,
+                paper_only: true,
+              },
+              created_at: new Date().toISOString(),
+            }]),
+          undefined,
+        );
+      }
+
       const vetoDetailsPayload = formatVetoDetailsPayload({
         veto_reasons: [
           ...preflight.veto_reasons,
@@ -589,6 +622,7 @@ export async function runSymbolBatch(params: {
             ? ["FAIL_MAX_TRADES"]
             : []),
           ...(decision === "HOLD" && reason ? [`HOLD:${reason}`] : []),
+          ...(demoProbeBuyFlag ? ["DEMO_PAPER_PROBE_BUY_ACTIVE"] : []),
           ...(executionUsdScale != null && executionUsdScale < 1
             ? ["OVERRIDE_MTF_HALF_POSITION"]
             : []),
@@ -714,6 +748,7 @@ export async function runSymbolBatch(params: {
         cycleId,
         executionUsdScale,
         signal,
+        demoProbeBuy: demoProbeBuyFlag,
       });
 
       await logCycleSummary({

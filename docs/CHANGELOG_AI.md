@@ -32,7 +32,7 @@ Append-only log so **future chats** can see what changed in large working sessio
 - Wired into `supabase/functions/binance-bot/run-symbol-batch.ts` so fallback runs every cycle automatically (always available).
 
 **Bot / stack**
-- Activation rule: no BUY for ~20 days (or never bought yet) and no open trade.
+- Activation rule: no BUY for ~10 days (or never bought yet) and no open trade.
 - On activation, cycle uses adjusted thresholds:
   - `min_ai_confidence`: up to `-10` points (floor `55`)
   - `min_tech_score`: up to `-2` points (floor `3`)
@@ -41,6 +41,22 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 **Open risks / follow-ups**
 - Fallback is intentionally permissive to break long HOLD streaks; monitor first week closely and tighten floors if entries become too frequent.
+
+---
+
+## 2026-04-30 — Paper/demo probe BUY after long inactivity
+
+**Summary**
+- Added `supabase/functions/binance-bot/demo-paper-probe-buy.ts`: when `is_live_trading_enabled` is false (demo/paper), no open trade, and no BUY for ≥10 days (or never), upgrade HOLD → BUY once per cooldown window so execution can reach `executeBuyFlow`.
+- `executeBuyFlow` accepts `demoProbeBuy` to bypass RANGING dip gate and War Room quorum/news veto **only** when live trading is disabled (never on real Binance path).
+- Raised latency Telegram threshold to 15s (parallel symbol batches often exceed 8s).
+
+**Bot / stack**
+- Cooldown log `demo_paper_probe_activated` (source `demo-probe-buy`) prevents probe spam (minimum gap between activations).
+- `no-trade-fallback.ts` inactivity window aligned to 10 days.
+
+**Open risks / follow-ups**
+- Probe is aggressive by design for demo validation; keep `is_live_trading_enabled=false` until you intentionally go live.
 
 ---
 

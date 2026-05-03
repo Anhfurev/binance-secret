@@ -74,6 +74,8 @@ export async function processBot(params: {
   cycleId: string;
   /** When set (e.g. 0.5), scales env-based BUY notional after min-trade clamp. */
   executionUsdScale?: number;
+  /** Paper/demo only: bypass War Room + ranging gates so a probe BUY can execute. */
+  demoProbeBuy?: boolean;
   signal?: AbortSignal;
 }): Promise<BotActionResult> {
   const {
@@ -87,6 +89,7 @@ export async function processBot(params: {
     strategyReason,
     cycleId,
     executionUsdScale,
+    demoProbeBuy = false,
     signal,
   } = params;
   const strategyNotes = resolveCombinedStrategyNotes(strategyReason);
@@ -331,6 +334,7 @@ export async function processBot(params: {
         snapshotImbalanceRatio: snapshot.imbalance_ratio,
         snapshotVolume24hQuote: snapshot.volume24hQuote ?? null,
         executionUsdScale,
+        demoProbeBuy,
         signal,
       });
       if (buyResult.action === "skip") {

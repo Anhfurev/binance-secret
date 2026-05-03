@@ -305,6 +305,12 @@ export function formatCycleReason(
   if (reason === "meme_volume_sentiment_override") {
     return "Meme volatility override: volume spike + supportive sentiment + tech floor";
   }
+  if (
+    typeof reason === "string" &&
+    reason.startsWith("demo_inactivity_probe_buy")
+  ) {
+    return "Paper/demo probe BUY: long inactivity — gated BUY path (live trading unchanged)";
+  }
   if (reason === "strategy_exit_or_signal_sell") return "Strategy exit triggered SELL";
   if (reason === "ai_panic_sell") return `AI panic sell at confidence ${ai.ai_confidence}`;
   if (reason?.startsWith("runtime_error:")) return reason;

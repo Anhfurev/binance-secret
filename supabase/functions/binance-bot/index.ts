@@ -48,7 +48,7 @@ const sharedSupabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
 
 const FOUR_HOUR_MS = 4 * 60 * 60 * 1000;
 const LATENCY_WARN_THROTTLE_MS = 5 * 60 * 1000;
-const LATENCY_WARN_THRESHOLD_MS = 8_000;
+const LATENCY_WARN_THRESHOLD_MS = 15_000;
 let lastFourHourOpsHeartbeatAt = 0;
 let lastLatencyAlertAtMs = 0;
 

@@ -1,7 +1,7 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
 
-const NO_TRADE_FALLBACK_AFTER_DAYS = 20;
+const NO_TRADE_FALLBACK_AFTER_DAYS = 10;
 
 export type NoTradeFallbackResult = {
   active: boolean;

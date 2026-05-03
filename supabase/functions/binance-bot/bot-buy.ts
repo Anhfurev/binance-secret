@@ -420,6 +420,8 @@ export async function executeBuyFlow(params: {
   snapshotVolume24hQuote?: number | null;
   /** Multiply final env-based `tradeUsd` when below 1 (e.g. MTF half-position override). */
   executionUsdScale?: number;
+  /** Paper/demo-only probe BUY — skips War Room quorum + ranging dip gate (never with live trading). */
+  demoProbeBuy?: boolean;
   signal?: AbortSignal;
 }) {
   const {
@@ -438,8 +440,12 @@ export async function executeBuyFlow(params: {
     snapshotImbalanceRatio,
     snapshotVolume24hQuote,
     executionUsdScale,
+    demoProbeBuy = false,
     signal,
   } = params;
+
+  const demoProbePaper =
+    Boolean(demoProbeBuy) && !Boolean((row as any)?.is_live_trading_enabled);
   if (signal?.aborted) {
     return { action: "skip" as const, detail: "cycle_aborted" };
   }
@@ -503,6 +509,7 @@ export async function executeBuyFlow(params: {
   }
 
   if (
+    !demoProbePaper &&
     regime === "RANGING" &&
     !passesMeanReversionBuyGate({
       regime,
@@ -630,7 +637,17 @@ export async function executeBuyFlow(params: {
     baseRegimeFloor,
   });
 
-  if (warRoom.news_veto) {
+  if (demoProbePaper) {
+    botDebug("buyFlow", "demo_paper_probe_gates_relaxed", {
+      userId,
+      symbol,
+      news_veto: warRoom.news_veto,
+      quorum_passed: warRoom.quorum_passed,
+      regime,
+    });
+  }
+
+  if (warRoom.news_veto && !demoProbePaper) {
     sentryWarRoomVetoBreadcrumb({
       final_governance: warRoom.final_governance,
       news_vibe: ai.sentiment_vibe,
@@ -682,7 +699,7 @@ export async function executeBuyFlow(params: {
     };
   }
 
-  if (!warRoom.quorum_passed) {
+  if (!warRoom.quorum_passed && !demoProbePaper) {
     const goldenRatioBounceCandidate =
       bearish1hCap &&
       rawWeighted >= warRoom.governance_floor;
@@ -760,22 +777,34 @@ export async function executeBuyFlow(params: {
     };
   }
 
-  /** Single execution truth after governance (must match chart score here; 0 only if veto — already returned). */
-  const executionConfidence = warRoom.effective_confidence_after_governance;
+  /** Single execution truth after governance (demo probe can synthesize a floor when paper-only). */
+  let executionConfidence = warRoom.effective_confidence_after_governance;
+  if (demoProbePaper) {
+    executionConfidence = Math.max(
+      Number(executionConfidence) || 0,
+      rawWeighted,
+      effectiveConfidence,
+      55,
+    );
+  }
   if (!Number.isFinite(executionConfidence) || executionConfidence <= 0) {
-    botWarn("buyFlow", "war_room_execution_confidence_zero_guard", {
-      userId,
-      symbol,
-      executionConfidence,
-      news_veto: warRoom.news_veto,
-      quorum_passed: warRoom.quorum_passed,
-      effective_chart: warRoom.effective_chart_confidence,
-    });
-    return {
-      action: "skip" as const,
-      detail:
-        "BUY blocked: post–War Room guard — effective_confidence_after_governance is not finite/positive (would not call exchange).",
-    };
+    if (demoProbePaper) {
+      executionConfidence = Math.max(55, rawWeighted, effectiveConfidence, 1);
+    } else {
+      botWarn("buyFlow", "war_room_execution_confidence_zero_guard", {
+        userId,
+        symbol,
+        executionConfidence,
+        news_veto: warRoom.news_veto,
+        quorum_passed: warRoom.quorum_passed,
+        effective_chart: warRoom.effective_chart_confidence,
+      });
+      return {
+        action: "skip" as const,
+        detail:
+          "BUY blocked: post–War Room guard — effective_confidence_after_governance is not finite/positive (would not call exchange).",
+      };
+    }
   }
 
   botDebug("buyFlow", "war_room_gate_passed", {
