@@ -31,6 +31,22 @@ import {
 import { resolvePortfolioBasketHint } from "./portfolio-basket.ts";
 
 export const GEMINI_QUOTA_COOLDOWN_MS = 10 * 60 * 1000;
+/**
+ * One Gemini/Groq/OpenAI flight at a time per warm isolate. Parallel
+ * `runSymbolBatch` (multi-symbol cron) used to hammer the same key → triple 429
+ * and duplicate "moved to cooldown" logs.
+ */
+let llmProviderChain = Promise.resolve();
+function withLlmProviderSerialized<T>(fn: () => Promise<T>): Promise<T> {
+  const run = () => fn();
+  const next = llmProviderChain.then(run, run);
+  llmProviderChain = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 const AI_CACHE_WINDOW_MS = 60 * 1000;
 const AI_STALE_CACHE_FALLBACK_MS = 10 * 60 * 1000;
 const AI_UNAVAILABLE_LOG = "AI currently unavailable - switching to Technical-Only mode.";
@@ -177,14 +193,20 @@ export async function getAiAnalysis(
     console.log(`[Cache Bypass] ${symbol} reason=${options?.cacheBypassReason ?? "manual_bypass"}`);
   }
 
-  const geminiResult = await tryGeminiFlow(geminiKeys, groqKeys, snapshot, payload, symbol, options?.signal);
+  const geminiResult = await withLlmProviderSerialized(() =>
+    tryGeminiFlow(geminiKeys, groqKeys, snapshot, payload, symbol, options?.signal)
+  );
   if (geminiResult) return await applySentimentVibeCheck(geminiResult, snapshot, sw);
-  const groqResult = await tryGroqFlow(groqKeys, payload, symbol, options?.signal);
+  const groqResult = await withLlmProviderSerialized(() =>
+    tryGroqFlow(groqKeys, payload, symbol, options?.signal)
+  );
   if (groqResult) return await applySentimentVibeCheck(groqResult, snapshot, sw);
 
   if (openaiKey) {
     try {
-      const openAiResult = await openAiAnalyze(openaiKey, payload, options?.signal);
+      const openAiResult = await withLlmProviderSerialized(() =>
+        openAiAnalyze(openaiKey, payload, options?.signal)
+      );
       return await applySentimentVibeCheck(
         withAiTrace(openAiResult, {
           provider: "openai",

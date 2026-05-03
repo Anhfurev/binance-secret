@@ -411,9 +411,11 @@ export async function runSymbolBatch(params: {
         { ai: safetyAi, aiQuotaFallback: false },
       );
       const aiVerdictMs = Math.round(performance.now() - aiVerdictStarted);
-      if (aiVerdictMs > 2_000) {
+      const perfAiWarnMs = Number(Deno.env.get("PERF_AI_VERDICT_WARN_MS") ?? "6000");
+      const warnMs = Number.isFinite(perfAiWarnMs) && perfAiWarnMs >= 1500 ? perfAiWarnMs : 6000;
+      if (aiVerdictMs > warnMs) {
         console.warn(
-          `[PERF] ai_verdict slow ${aiVerdictMs}ms symbol=${symbol} user=${userId}`,
+          `[PERF] ai_verdict slow ${aiVerdictMs}ms symbol=${symbol} user=${userId} (warn_if>${warnMs}ms)`,
         );
       }
       const ai = aiVerdict.ai;

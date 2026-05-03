@@ -8,6 +8,17 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-03 — Gemini 429 / duplicate cooldown logs (multi-symbol)
+
+**Summary**
+- Serialized **Gemini / Groq / OpenAI** provider calls per isolate (`ai-core.ts`
+  `withLlmProviderSerialized`) so parallel symbol batches no longer hit the same
+  API key at once → fewer duplicate **429 → key #N cooldown** lines.
+- `[PERF] ai_verdict slow` now warns only above **6s** by default (override with
+  Edge env **`PERF_AI_VERDICT_WARN_MS`**, min 1500).
+
+---
+
 ## 2026-05-03 — Per-bot cycle timeout (fixes `CYCLE_ABORTED:llm`)
 
 **Summary**
