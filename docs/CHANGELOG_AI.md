@@ -8,6 +8,14 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-03 — Per-bot cycle timeout (fixes `CYCLE_ABORTED:llm`)
+
+**Summary**
+- Raised default **`BOT_CYCLE_TIMEOUT_MS`** from **8s → 55s** (each symbol’s bot run is parallel; LLM + veto + OHLCV was exceeding 8s).
+- Optional Edge secret **`BOT_CYCLE_TIMEOUT_MS`** (integer ms, clamped **10_000–120_000**) overrides default.
+
+---
+
 ## 2026-05-03 — BUY sizing uses `bot_settings` (not hardcoded $20)
 
 **Summary**

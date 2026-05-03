@@ -71,7 +71,14 @@ export type SymbolBatchResult = {
   scanned: number;
 };
 
-const BOT_CYCLE_TIMEOUT_MS = 8_000;
+/** Per-bot wall time (snapshot + strategy + Gemini/Groq). 8s was aborting real LLM calls (`CYCLE_ABORTED:llm`). */
+function readBotCycleTimeoutMs(): number {
+  const raw = String(Deno.env.get("BOT_CYCLE_TIMEOUT_MS") ?? "").trim();
+  const n = raw.length ? Number(raw) : NaN;
+  if (!Number.isFinite(n)) return 55_000;
+  return Math.min(120_000, Math.max(10_000, Math.floor(n)));
+}
+const BOT_CYCLE_TIMEOUT_MS = readBotCycleTimeoutMs();
 
 function hasValidNonZeroEma(snapshot: {
   emaFast: number;
