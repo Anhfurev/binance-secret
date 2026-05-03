@@ -165,6 +165,77 @@ export async function runDebuggerHealthAndFix(params: {
     });
   }
 
+  // Auto re-enable autopilot for paper / demo bots that were turned off by a
+  // previous drawdown breach. There's no real capital at risk in paper mode,
+  // and a permanent disable is the most common reason a demo bot stops trading
+  // for many days. Live bots are NOT touched here.
+  const disabledPaperBots = await supabase
+    .from("bot_settings")
+    .select("id,user_id,symbol,is_autopilot_enabled,is_live_trading_enabled,is_ghost_execution")
+    .eq("is_autopilot_enabled", false)
+    .eq("is_live_trading_enabled", false);
+  const paperBotsToReenable = Array.isArray(disabledPaperBots.data)
+    ? disabledPaperBots.data.filter((r: any) => r && !r.is_ghost_execution)
+    : [];
+  if (paperBotsToReenable.length > 0) {
+    issues.push({
+      code: "PAPER_AUTOPILOT_DISABLED",
+      severity: "warn",
+      message: "Paper bots have autopilot OFF — likely from past drawdown breach",
+      detail: {
+        affected: paperBotsToReenable.length,
+        sample: paperBotsToReenable.slice(0, 5).map((r: any) => ({
+          id: r.id, user_id: r.user_id, symbol: r.symbol,
+        })),
+      },
+    });
+    if (applyFixes) {
+      const ids = paperBotsToReenable.map((r: any) => r.id).filter(Boolean);
+      const update = await supabase
+        .from("bot_settings")
+        .update({ is_autopilot_enabled: true, updated_at: new Date().toISOString() } as any)
+        .in("id", ids);
+      fixes.push({
+        code: "REENABLE_PAPER_AUTOPILOT",
+        applied: !update.error,
+        note: update.error
+          ? update.error.message
+          : "Re-enabled autopilot for paper / demo bots (no real capital at risk)",
+        detail: { reenabled_ids_count: ids.length },
+      });
+    }
+  }
+
+  // Reset paper drawdown by syncing `profiles.starting_balance` to current
+  // `demo_balance` so a previous loss cannot keep blocking new BUYs.
+  if (applyFixes) {
+    const driftedProfiles = await supabase
+      .from("profiles")
+      .select("id,demo_balance,starting_balance")
+      .filter("demo_balance", "lt", "starting_balance");
+    const driftRows = Array.isArray(driftedProfiles.data) ? driftedProfiles.data : [];
+    if (driftRows.length > 0) {
+      const now = new Date().toISOString();
+      const updates = await Promise.all(
+        driftRows.map((row: any) =>
+          supabase
+            .from("profiles")
+            .update({ starting_balance: row.demo_balance, updated_at: now } as any)
+            .eq("id", row.id),
+        ),
+      );
+      const failed = updates.filter((u) => u.error).length;
+      fixes.push({
+        code: "RESYNC_PAPER_STARTING_BALANCE",
+        applied: failed === 0,
+        note: failed === 0
+          ? "Re-synced profiles.starting_balance to current demo_balance for paper drawdown reset"
+          : `${failed} updates failed`,
+        detail: { rows_resynced: driftRows.length - failed },
+      });
+    }
+  }
+
   if (applyFixes) {
     const quota = await getAiQuotaState("global");
     const cooldownMs = Date.parse(String(quota?.gemini_cooldown_until ?? ""));

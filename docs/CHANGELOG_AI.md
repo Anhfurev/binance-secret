@@ -44,6 +44,23 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-03 — Demo / paper bot trade unblock
+
+**Summary**
+- `bot-buy.ts`: drawdown breach in **paper mode** no longer disables `is_autopilot_enabled` (only logs + skips that BUY); live mode behavior unchanged.
+- `bot-buy.ts`: skip `reserve_buy_capital` RPC for paper-only mode (no real wallet to reserve, fixes `reserve_buy_capital_null` phantom blocks).
+- `health-debugger.ts`: auto re-enables paper bots whose autopilot was previously turned OFF, and resyncs `profiles.starting_balance` to current `demo_balance` so old paper drawdown can't keep blocking.
+- `demo-paper-probe-buy.ts`: inactivity threshold lowered to 6 hours, cooldown 90 minutes — designed to surface at least one paper BUY per day on demo accounts.
+
+**Bot / stack**
+- Live trading (`is_live_trading_enabled=true`) keeps the original drawdown autopilot disable + capital reservation behavior.
+- Demo bot resumes trading without manual `is_autopilot_enabled` reset after past paper losses.
+
+**Open risks / follow-ups**
+- Once you flip a bot to live, drawdown breach disable + reservation RPC come back automatically.
+
+---
+
 ## 2026-04-30 — Paper/demo probe BUY after long inactivity
 
 **Summary**

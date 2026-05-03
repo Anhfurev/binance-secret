@@ -466,6 +466,7 @@ export async function executeBuyFlow(params: {
     ? ((resolvedStartingBalance - currentBalance) / resolvedStartingBalance) * 100
     : 0;
   const ghostMode = resolveGhostMode(row);
+  const isPaperOnly = !Boolean((row as any)?.is_live_trading_enabled);
   const hasDrawdownBreach = Number.isFinite(drawdownPct) && drawdownPct > maxDrawdownLimitPct;
   if (hasDrawdownBreach) {
     botWarn("buyFlow", "drawdown_breach_block", {
@@ -474,12 +475,42 @@ export async function executeBuyFlow(params: {
       drawdownPct,
       maxDrawdownLimitPct,
       ghostMode,
+      isPaperOnly,
     });
     if (ghostMode) {
       return {
         action: "skip" as const,
         detail:
           `Ghost BUY skipped: drawdown ${drawdownPct.toFixed(2)}% would breach live safety (autopilot not changed).`,
+      };
+    }
+    if (isPaperOnly) {
+      // Paper / demo mode: never disable autopilot from a drawdown breach
+      // because there's no real capital at risk. Just skip this BUY so the bot
+      // can try again next cycle once demo balance recovers (or user resets it).
+      await safeInsertLog(
+        supabase,
+        {
+          user_id: userId,
+          symbol,
+          level: "info",
+          source: "safety",
+          message: "drawdown_breach_paper_skip",
+          meta: {
+            event: "drawdown_breach_paper_skip",
+            balance_at_breach: Number(currentBalance.toFixed(2)),
+            starting_balance: Number(resolvedStartingBalance.toFixed(2)),
+            drawdown_pct: Number(drawdownPct.toFixed(2)),
+            limit: Number(maxDrawdownLimitPct.toFixed(2)),
+            note: "Paper mode: autopilot intentionally NOT disabled.",
+          },
+          created_at: new Date().toISOString(),
+        },
+        "drawdown_breach_paper_skip",
+      );
+      return {
+        action: "skip" as const,
+        detail: `Paper BUY skipped: drawdown ${drawdownPct.toFixed(2)}% > ${maxDrawdownLimitPct.toFixed(2)}% (autopilot kept ON for demo).`,
       };
     }
     const nowIso = new Date().toISOString();
@@ -1001,7 +1032,12 @@ export async function executeBuyFlow(params: {
   }
 
   let reservationId: string | null = null;
-  if (!ghostMode) {
+  // Paper / demo mode (`is_live_trading_enabled=false`) doesn't need capital
+  // reservation — there's no real wallet to lock. Skipping the RPC also
+  // avoids "no reservation returned" phantom blocks when the user's
+  // `profiles.demo_balance` is stale or below open notional headroom.
+  const skipReservationForPaper = !ghostMode && isPaperOnly;
+  if (!ghostMode && !skipReservationForPaper) {
     const { data: reserved, error: reserveError } = await supabase.rpc("reserve_buy_capital", {
       p_user_id: userId,
       p_symbol: symbol,

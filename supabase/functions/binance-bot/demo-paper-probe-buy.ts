@@ -1,10 +1,14 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
 
-/** No BUY recorded for this long → eligible for one paper/demo probe buy (fake money). */
-const DEMO_PROBE_INACTIVITY_DAYS = 10;
+/**
+ * No BUY recorded for this long (in HOURS) → eligible for a paper/demo probe buy.
+ * Aggressive default for demo so the user can validate the BUY pipeline:
+ * if the bot has been silent for a few hours, try one paper trade.
+ */
+const DEMO_PROBE_INACTIVITY_HOURS = 6;
 /** Minimum gap between probe attempts (avoids BUY spam every cron tick while inactive). */
-const PROBE_COOLDOWN_MS = 2 * 60 * 60 * 1000;
+const PROBE_COOLDOWN_MS = 90 * 60 * 1000;
 
 export type DemoPaperProbeBuyResult = {
   apply: boolean;
@@ -70,13 +74,13 @@ export async function resolveDemoPaperProbeBuy(params: {
     lastBuyResult.data?.opened_at ?? lastBuyResult.data?.created_at ?? "",
   );
   const lastMs = Date.parse(lastTs);
-  const daysSinceLastBuy = Number.isFinite(lastMs)
-    ? Math.floor((Date.now() - lastMs) / (24 * 60 * 60 * 1000))
+  const hoursSinceLastBuy = Number.isFinite(lastMs)
+    ? Math.floor((Date.now() - lastMs) / (60 * 60 * 1000))
     : null;
 
   const neverBought = !Number.isFinite(lastMs);
   const inactiveLongEnough =
-    neverBought || (daysSinceLastBuy ?? 0) >= DEMO_PROBE_INACTIVITY_DAYS;
+    neverBought || (hoursSinceLastBuy ?? 0) >= DEMO_PROBE_INACTIVITY_HOURS;
 
   if (!inactiveLongEnough) {
     return { apply: false, reason: null };
@@ -86,6 +90,6 @@ export async function resolveDemoPaperProbeBuy(params: {
     apply: true,
     reason: neverBought
       ? "demo_inactivity_probe_buy_never_bought"
-      : `demo_inactivity_probe_buy_${daysSinceLastBuy}d`,
+      : `demo_inactivity_probe_buy_${hoursSinceLastBuy}h`,
   };
 }
