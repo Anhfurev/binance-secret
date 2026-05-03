@@ -60,24 +60,21 @@ async function addSentryBreadcrumb(scope: string, event: string, meta: DebugMeta
   }
 }
 
-/** War Room signals: breadcrumbs alone do not show in Sentry Issues; send a message + flush for serverless. */
+/**
+ * War Room signals — breadcrumbs only (no `captureMessage`). They were creating
+ * noisy "issues" in Sentry that overwhelmed real errors. They will still attach
+ * to any subsequent fatal event in the same scope as breadcrumb history.
+ */
 async function emitWarRoomSentryEvent(scope: string, event: string, meta: DebugMeta) {
   try {
     const Sentry = await loadSentry();
     if (!Sentry) return;
     Sentry.addBreadcrumb({
-      category: `bot.${scope}`,
+      category: `bot.${scope}.war_room`,
       message: event,
       level: "info",
       data: meta,
     });
-    Sentry.withScope((scope_) => {
-      scope_.setTag("binance_bot", "war_room");
-      scope_.setTag("event", event);
-      scope_.setContext("war_room", meta);
-      Sentry.captureMessage(`[binance-bot] ${scope}.${event}`, "info");
-    });
-    await Sentry.flush(2000);
   } catch (e) {
     console.warn(`[BOT DEBUG] sentry_war_room_emit_failed ${scope}.${event} ${String(e)}`);
   }
@@ -115,6 +112,30 @@ export function botError(scope: string, event: string, meta: DebugMeta = {}) {
   console.error(`[BOT ERROR] ${scope}.${event} ${safeJson(meta)}`);
 }
 
+/** Render any error into a useful message instead of "[object Object]". */
+function stringifyForSentry(error: unknown): string {
+  if (error instanceof Error) return error.message || error.name || "Error";
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const obj = error as Record<string, unknown>;
+    const msg = typeof obj.message === "string" ? obj.message.trim() : "";
+    const code = typeof obj.code === "string" ? obj.code.trim() : "";
+    const details = typeof obj.details === "string" ? obj.details.trim() : "";
+    if (msg || code || details) {
+      return [code ? `[${code}]` : "", msg, details ? `details=${details}` : ""]
+        .filter(Boolean)
+        .join(" ");
+    }
+    try {
+      const s = JSON.stringify(error);
+      if (s && s !== "{}") return s.slice(0, 1000);
+    } catch {
+      // fall through
+    }
+  }
+  return String(error);
+}
+
 /** Top-level fatal boundary: capture in Sentry (when DSN set) for serverless post-mortems. */
 export async function emitSentryFatalException(
   error: unknown,
@@ -124,12 +145,16 @@ export async function emitSentryFatalException(
     const Sentry = await loadSentry();
     if (!Sentry) return;
     const err =
-      error instanceof Error
-        ? error
-        : new Error(typeof error === "string" ? error : String(error));
+      error instanceof Error ? error : new Error(stringifyForSentry(error));
     Sentry.withScope((s) => {
       s.setTag("binance_bot", "fatal");
       s.setContext("fatal", { ...meta, ts: new Date().toISOString() });
+      if (!(error instanceof Error)) {
+        s.setContext("fatal_raw", {
+          raw_type: typeof error,
+          raw_preview: stringifyForSentry(error).slice(0, 500),
+        });
+      }
       Sentry.captureException(err);
     });
     await Sentry.flush(2000);

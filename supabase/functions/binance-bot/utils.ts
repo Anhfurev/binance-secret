@@ -132,6 +132,24 @@ export function safeJsonParseFromText(text: string): unknown {
   }
 }
 
+/** PostgREST sometimes returns Cloudflare HTML (522/524) as `message` — never log the full body. */
+export function normalizeGatewayOrHtmlError(text: string): string {
+  const s = String(text ?? "");
+  const looksHtml = /<!DOCTYPE/i.test(s) || /<html[\s>]/i.test(s);
+  if (!looksHtml) {
+    return s.length > 2000 ? `${s.slice(0, 2000)}…` : s;
+  }
+  if (/522|Connection timed out/i.test(s)) {
+    return "cloudflare_522_supabase_origin_timeout";
+  }
+  if (/524/i.test(s)) return "cloudflare_524_origin_timeout";
+  if (/502|Bad Gateway/i.test(s)) return "cloudflare_502_bad_gateway";
+  if (/503|Service (?:Unavailable|Temporarily)/i.test(s)) {
+    return "cloudflare_503_unavailable";
+  }
+  return "non_json_upstream_html_error";
+}
+
 export function formatUnknownError(error: unknown): string {
   if (error instanceof Error) {
     return error.message || error.name || "Unknown Error";

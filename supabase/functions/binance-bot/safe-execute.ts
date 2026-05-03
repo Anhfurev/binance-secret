@@ -5,9 +5,10 @@
  */
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { SERVICE_ROLE_KEY, SUPABASE_URL } from "./constants.ts";
+import { formatUnknownError, normalizeGatewayOrHtmlError } from "./utils.ts";
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return normalizeGatewayOrHtmlError(formatUnknownError(error));
 }
 
 const safeExecuteLogClient = SUPABASE_URL && SERVICE_ROLE_KEY

@@ -8,6 +8,47 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-03 — Paper/ghost “best defaults” (DB)
+
+**Summary**
+- For all rows with **paper + ghost** (`is_live_trading_enabled = false` and `is_ghost_execution = true`): set `is_aggressive_mode = true`, `max_drawdown_limit = COALESCE(..., 25)`, keep non-null `take_profit_pct` / `stop_loss_pct`, and keep `min_volume_24h_quote` at `0` (volume gate off unless you explicitly set a floor).
+- **Live** bots (`is_live_trading_enabled = true`) were not touched by that update — flip aggressive off manually when going live if you want stricter gates.
+
+---
+
+## 2026-05-03 — Cache + drawdown + Sentry hardening (multi-fix)
+
+**Summary**
+- **DB migration `20260503110000_ai_cache_score_breakdown`**: added the missing
+  `trend_score`, `momentum_score`, `volume_score`, `order_book_score`,
+  `sentiment_haircut_applied`, `sentiment_penalty_factor` columns to
+  `public.ai_cache` (root cause of `column ai_cache.trend_score does not exist`
+  spam + every cycle bypassing cache → +latency, +AI cost).
+- Reset paper drawdown wall: `profiles.starting_balance` resynced to current
+  `demo_balance`; `max_drawdown_limit` lifted from `5.00` → `25.00` (paper
+  account was 4.67% drawn at a 5% kill-switch, blocking new BUYs).
+- Backfilled `bot_settings.take_profit_pct = 1.5` and `stop_loss_pct = 1.0`
+  for the three bots whose values were `NULL` (violated project rule
+  "bot must use DB take_profit_pct for exits").
+- `emitSentryFatalException` no longer turns objects into `[object Object]`;
+  added a `stringifyForSentry` that extracts `code/message/details` and
+  attaches a `fatal_raw` context with the truncated payload preview.
+- War Room Sentry signals (`war_room_gate_passed`, `war_room_quorum_failed`)
+  downgraded from `captureMessage` to **breadcrumbs only** — they were
+  flooding Sentry Issues despite Seer marking them `super_low`.
+
+---
+
+## 2026-05-03 — debugger_health_only avoids Edge WORKER_RESOURCE_LIMIT
+
+**Summary**
+- `debugger_health_only` no longer runs forced retention deletes in parallel with snapshot/stale guard/debugger (that combo could exceed Supabase Edge memory/time and return `WORKER_RESOURCE_LIMIT`).
+- Optional body flag: `debugger_include_retention: true` runs the same forced retention **after** the parallel phase, sequentially.
+- Follow-up: run snapshot → stale guard → debugger **sequentially** (not `Promise.all`), shrink `war_room_audits` sample to 40 rows, and apply profile `starting_balance` resyncs **one row at a time** so Edge stays within limits.
+- When PostgREST returns a Cloudflare HTML page (e.g. **522** origin timeout), `safe-execute` and `stale_trade_guard` now log a **short code** (`cloudflare_522_supabase_origin_timeout`, etc.) instead of multi‑KB HTML in `public.logs`.
+
+---
+
 ## 2026-04-30 — Debugger health mode + auto-fixes
 
 **Summary**
@@ -17,7 +58,7 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 **Bot / stack**
 - Debugger writes a structured `logs` event with source `debugger-health` and includes issue/fix payloads for traceability.
-- `debugger_health_only` also runs snapshot, stale-trade guard, and retention cleanup to provide one full health report envelope.
+- `debugger_health_only` runs snapshot, stale-trade guard, and debugger; retention is optional via `debugger_include_retention` (see 2026-05-03 note).
 
 **Open risks / follow-ups**
 - `index.ts` remains oversized and should be split (`debugger` / `request-router` extraction) to match file-size policy.

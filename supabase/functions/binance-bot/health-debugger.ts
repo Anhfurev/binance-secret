@@ -93,7 +93,7 @@ export async function runDebuggerHealthAndFix(params: {
       .from("war_room_audits")
       .select("final_decision,veto_details")
       .order("created_at", { ascending: false })
-      .limit(120),
+      .limit(40),
   ]);
 
   const errorCount = asCount(errorLogs.count);
@@ -139,7 +139,7 @@ export async function runDebuggerHealthAndFix(params: {
       const reason = String(row?.veto_details?.reason ?? "").toLowerCase();
       return reason === "hold_no_strategy_buy";
     }).length;
-    if (holdNoBuyCount >= 80) {
+    if (holdNoBuyCount >= 28) {
       issues.push({
         code: "HOLD_NO_STRATEGY_DOMINANT",
         severity: "warn",
@@ -216,15 +216,14 @@ export async function runDebuggerHealthAndFix(params: {
     const driftRows = Array.isArray(driftedProfiles.data) ? driftedProfiles.data : [];
     if (driftRows.length > 0) {
       const now = new Date().toISOString();
-      const updates = await Promise.all(
-        driftRows.map((row: any) =>
-          supabase
-            .from("profiles")
-            .update({ starting_balance: row.demo_balance, updated_at: now } as any)
-            .eq("id", row.id),
-        ),
-      );
-      const failed = updates.filter((u) => u.error).length;
+      let failed = 0;
+      for (const row of driftRows) {
+        const u = await supabase
+          .from("profiles")
+          .update({ starting_balance: row.demo_balance, updated_at: now } as any)
+          .eq("id", row.id);
+        if (u.error) failed += 1;
+      }
       fixes.push({
         code: "RESYNC_PAPER_STARTING_BALANCE",
         applied: failed === 0,

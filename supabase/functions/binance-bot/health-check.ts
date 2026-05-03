@@ -13,6 +13,7 @@
  */
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { escapeHtml } from "./bot-shared.ts";
+import { normalizeGatewayOrHtmlError } from "./utils.ts";
 import { sendTelegramAlert } from "./notifier.ts";
 
 const STALE_TRADE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -62,7 +63,9 @@ export async function runStaleTradeGuard(params: {
     .order("updated_at", { ascending: true })
     .limit(300);
   if (error) {
-    throw new Error(`stale_trade_guard_query_failed:${error.message}`);
+    throw new Error(
+      `stale_trade_guard_query_failed:${normalizeGatewayOrHtmlError(error.message)}`,
+    );
   }
   const stale = Array.isArray(data) ? data : [];
   if (!stale.length) {

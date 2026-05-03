@@ -34,6 +34,7 @@ import {
 } from "./notifier.ts";
 import {
   collectHealthSnapshot,
+  type RetentionRunResult,
   runRetentionCleanup,
   runStaleTradeGuard,
 } from "./health-check.ts";
@@ -313,25 +314,42 @@ async function handleHealthCheckOnly(
 async function handleDebuggerHealthOnly(
   supabase: ReturnType<typeof createClient>,
   applyFixes: boolean,
+  includeRetention: boolean,
 ): Promise<Response> {
   const startedAtMs = Date.now();
   const batchId = `debug-${crypto.randomUUID().slice(0, 8)}`;
-  console.log("[DEBUGGER] starting debugger_health_only", { batchId, applyFixes });
+  console.log("[DEBUGGER] starting debugger_health_only", {
+    batchId,
+    applyFixes,
+    includeRetention,
+  });
 
-  const [snapshot, staleResult, retentionResult, debuggerResult] = await Promise.all([
-    safeExecute("debug_health_snapshot", () => collectHealthSnapshot({ supabase }), null),
-    safeExecute("debug_stale_guard", () => runStaleTradeGuard({ supabase, batchId }), null),
-    safeExecute(
+  // Serialized — parallel snapshot + stale guard + debugger still spikes CPU/RAM on
+  // Edge (WORKER_RESOURCE_LIMIT). Cron keeps normal throughput; this endpoint favors reliability.
+  const snapshot = await safeExecute(
+    "debug_health_snapshot",
+    () => collectHealthSnapshot({ supabase }),
+    null,
+  );
+  const staleResult = await safeExecute(
+    "debug_stale_guard",
+    () => runStaleTradeGuard({ supabase, batchId }),
+    null,
+  );
+  const debuggerResult = await safeExecute(
+    "debugger_health",
+    () => runDebuggerHealthAndFix({ supabase, batchId, applyFixes }),
+    null,
+  );
+
+  let retentionResult: RetentionRunResult | null = null;
+  if (includeRetention) {
+    retentionResult = await safeExecute(
       "debug_retention",
       () => runRetentionCleanup({ supabase, batchId, force: true }),
       null,
-    ),
-    safeExecute(
-      "debugger_health",
-      () => runDebuggerHealthAndFix({ supabase, batchId, applyFixes }),
-      null,
-    ),
-  ]);
+    );
+  }
 
   return jsonResponse({
     ok: true,
@@ -342,6 +360,7 @@ async function handleDebuggerHealthOnly(
     snapshot,
     stale_trade_guard: staleResult,
     retention_cleanup: retentionResult,
+    retention_included: includeRetention,
   });
 }
 
@@ -605,6 +624,7 @@ Deno.serve(async (req: Request) => {
     const healthCheckOnly = Boolean((parsedBody as any)?.health_check_only);
     const debuggerHealthOnly = Boolean((parsedBody as any)?.debugger_health_only);
     const debuggerApplyFixes = (parsedBody as any)?.debugger_apply_fixes !== false;
+    const debuggerIncludeRetention = Boolean((parsedBody as any)?.debugger_include_retention);
 
     botDebug("index", "function_started", {
       method: req.method,
@@ -613,6 +633,7 @@ Deno.serve(async (req: Request) => {
       health_check_only: healthCheckOnly,
       debugger_health_only: debuggerHealthOnly,
       debugger_apply_fixes: debuggerApplyFixes,
+      debugger_include_retention: debuggerIncludeRetention,
     });
     void emitSentryBootProbe({ method: req.method, symbol: probeSymbol });
 
@@ -634,7 +655,11 @@ Deno.serve(async (req: Request) => {
       return await handleHealthCheckOnly(sharedSupabase);
     }
     if (debuggerHealthOnly) {
-      return await handleDebuggerHealthOnly(sharedSupabase, debuggerApplyFixes);
+      return await handleDebuggerHealthOnly(
+        sharedSupabase,
+        debuggerApplyFixes,
+        debuggerIncludeRetention,
+      );
     }
 
     if (!symbols.length) {

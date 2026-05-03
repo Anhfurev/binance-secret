@@ -1,0 +1,11 @@
+---
+description: Prevent Edge bot DB schema drift (missing columns → runtime errors)
+globs: "supabase/functions/binance-bot/**/*.{ts,tsx}"
+alwaysApply: false
+---
+
+# Schema sync (bot)
+
+- **`public.ai_cache`**: `supabase/functions/binance-bot/ai-db.ts` `.select()` / `.insert()` must match real columns. If you add fields in code, add a migration under `supabase/migrations/` and apply before deploy (`apply_migration` or `supabase db push`).
+- **`public.bot_settings`**: `take_profit_pct` / `stop_loss_pct` must not be NULL for trading bots (exits read from DB).
+- After DDL: note RLS; Edge uses service role but app routes may not.
