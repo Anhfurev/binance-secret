@@ -1,4 +1,6 @@
 // @ts-nocheck
+import { isTransientPostgrestError } from "./postgrest-errors.ts";
+
 type DebugMeta = Record<string, unknown>;
 
 /** `botDebug` emits Sentry breadcrumbs for these events when `SENTRY_DSN` is set. */
@@ -141,6 +143,12 @@ export async function emitSentryFatalException(
   error: unknown,
   meta: DebugMeta = {},
 ) {
+  if (isTransientPostgrestError(error)) {
+    console.warn(
+      `[BOT DEBUG] sentry_fatal_skipped_transient ${stringifyForSentry(error)}`,
+    );
+    return;
+  }
   try {
     const Sentry = await loadSentry();
     if (!Sentry) return;

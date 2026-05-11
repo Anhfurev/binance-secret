@@ -44,6 +44,8 @@ function buildTunablePatchFromBody(body: Record<string, unknown>): Record<string
   if (slp !== undefined) patch.stop_loss_pct = slp;
   const tpp = readBodyNumber(body, "take_profit_pct", { min: 0.1, max: 100 });
   if (tpp !== undefined) patch.take_profit_pct = tpp;
+  const minNet = readBodyNumber(body, "min_profit_after_fees_pct", { min: 0, max: 25 });
+  if (minNet !== undefined) patch.min_profit_after_fees_pct = minNet;
   const tsp = readBodyNumber(body, "trailing_stop_pct", { min: 0.0001, max: 100 });
   if (tsp !== undefined) patch.trailing_stop_pct = tsp;
   const rsiBuy = readBodyNumber(body, "rsi_buy_threshold", { min: 1, max: 50 });

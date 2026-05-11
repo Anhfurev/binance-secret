@@ -3,5 +3,8 @@
     "ccxt": "npm:ccxt@^4.5.0",
     "@sentry/deno": "npm:@sentry/deno@^10.0.0",
     "@supabase/functions-js": "jsr:@supabase/functions-js@2"
+  },
+  "tasks": {
+    "test": "deno test --allow-env tests"
   }
 }

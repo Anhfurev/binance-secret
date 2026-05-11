@@ -1,4 +1,10 @@
 // @ts-nocheck
+/**
+ * Per-bot decision + execution. Market data is fetched once per symbol per cron
+ * (`run-symbol-batch.ts` → `getCachedSnapshot`); all autopilot rows for that
+ * symbol run in parallel via `Promise.allSettled`. Multi-symbol cron uses the
+ * same pattern in `index.ts`. Keep heavy parallel work there, not here.
+ */
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { sendTelegramAlert, sendTradeRowNotification } from "./notifier.ts";
 import { ensureProfileRow, loadOpenTrade } from "./trade-store.ts";
@@ -28,7 +34,12 @@ import {
   toUsdCents,
 } from "./bot-shared.ts";
 import { persistRunTelemetry } from "./bot-telemetry.ts";
-import { executeBuyFlow } from "./bot-buy.ts";
+import {
+  shouldPersistBotSkipLog,
+  shouldTelegramHoldHeartbeat,
+  shouldTelegramTrailingRowUpdate,
+} from "./log-policy.ts";
+import { executeBuyFlow } from "./bot-buy-v2.ts";
 import { applyBreakEvenTrigger, executeSellFlow } from "./bot-sell.ts";
 import { botDebug, botError } from "./bot-debug.ts";
 import { assertExpectedEgressIpOrThrow } from "./exchange-client.ts";
@@ -41,6 +52,7 @@ async function logSkipReason(params: {
   reason: string;
 }) {
   const { supabase, userId, symbol, reason } = params;
+  if (!shouldPersistBotSkipLog()) return;
   const result = await supabase.from("logs").insert([
     {
       user_id: userId,
@@ -138,9 +150,13 @@ export async function processBot(params: {
     const profile = (profileResult.data as ProfileRow | null) ?? null;
     if (!profile) await ensureProfileRow(supabase, userId, 10000);
 
-    const liveBalance = await getLatestRecordedBalance(supabase, userId);
-    const currentBalance =
-      liveBalance ?? toNumber(profile?.demo_balance, 10000);
+    const paperOrGhost = resolveExchangeSkipped(row);
+    const liveBalance = paperOrGhost
+      ? null
+      : await getLatestRecordedBalance(supabase, userId);
+    const currentBalance = paperOrGhost
+      ? toNumber(profile?.demo_balance, 10000)
+      : liveBalance ?? toNumber(profile?.demo_balance, 10000);
     const currentStartingBalance = toNumber(profile?.starting_balance, 0);
     const resolvedStartingBalance =
       currentStartingBalance > 0 ? currentStartingBalance : currentBalance;
@@ -216,26 +232,38 @@ export async function processBot(params: {
             },
           })
           .eq("id", toStringValue(openTrade.id) ?? "");
-        await sendTradeRowNotification({
-          event: "update",
-          trade: {
-            id: toStringValue(openTrade.id),
-            user_id: userId,
-            symbol: snapshot.symbol,
-            type: toStringValue(openTrade.type) ?? "buy",
-            status: toStringValue(openTrade.status) ?? "open",
-            entryPrice: toNumber(openTrade.entryPrice, 0),
-            value: toNumber(openTrade.value, 0),
-            notes: "Trailing stop / high watermark updated",
-          },
-          reason: "UPDATED: trailing stop/high watermark sync",
-        });
+        if (shouldTelegramTrailingRowUpdate()) {
+          await sendTradeRowNotification({
+            event: "update",
+            trade: {
+              id: toStringValue(openTrade.id),
+              user_id: userId,
+              symbol: snapshot.symbol,
+              type: toStringValue(openTrade.type) ?? "buy",
+              status: toStringValue(openTrade.status) ?? "open",
+              entryPrice: toNumber(openTrade.entryPrice, 0),
+              value: toNumber(openTrade.value, 0),
+              notes: "Trailing stop / high watermark updated",
+            },
+            reason: "UPDATED: trailing stop/high watermark sync",
+          });
+        }
       }
       if (trailingState.shouldExit) {
         effectiveDecision = "SELL";
         effectiveExitReason = "stoploss_hit";
         trailingStopTriggered = true;
       }
+    }
+
+    // Decision layer can request SELL while strategy exit remains "hold"
+    // (e.g., order-book imbalance / AI panic / hard SELL signal). Normalize
+    // this so closed trades never persist an ambiguous "hold" exit reason.
+    if (
+      effectiveDecision === "SELL" &&
+      (effectiveExitReason == null || effectiveExitReason === "hold")
+    ) {
+      effectiveExitReason = "signal_exit";
     }
 
     if (effectiveDecision === "HOLD") {
@@ -247,7 +275,10 @@ export async function processBot(params: {
       const accountPnl = fromUsdCents(
         toUsdCents(currentBalance) - toUsdCents(resolvedStartingBalance),
       );
-      if (shouldSendHeartbeat(`${userId}:${snapshot.symbol}`)) {
+      if (
+        shouldTelegramHoldHeartbeat() &&
+        shouldSendHeartbeat(`${userId}:${snapshot.symbol}`)
+      ) {
         await sendTelegramAlert(
           `🔍 <b>HEARTBEAT</b>\n` +
             `<b>Symbol:</b> ${escapeHtml(snapshot.symbol)}\n` +
@@ -433,6 +464,7 @@ export async function processBot(params: {
       trailingStopTriggered,
       cycleId,
       marketRegime: snapshot.marketRegime,
+      signal,
     });
     if (sellResult.action === "skip") {
       botDebug("processBot", "sell_skipped", {
@@ -445,6 +477,14 @@ export async function processBot(params: {
         userId,
         symbol: snapshot.symbol,
         reason: sellResult.detail,
+      });
+      await persistRunTelemetry({
+        supabase,
+        userId,
+        symbol: snapshot.symbol,
+        action: "skip",
+        detail: sellResult.detail,
+        balance: currentBalance,
       });
       return {
         userId,

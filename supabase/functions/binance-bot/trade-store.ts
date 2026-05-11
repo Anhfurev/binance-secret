@@ -7,14 +7,27 @@ import type {
   OpenTradeRow,
 } from "./types.ts";
 import { clamp, toNumber } from "./utils.ts";
-import { DEFAULT_RISK_PERCENT, PEPE_TEST_TRADE_USD } from "./constants.ts";
+import { DEFAULT_RISK_PERCENT } from "./constants.ts";
 import { sendTradeRowNotification } from "./notifier.ts";
+import { withPostgrestRetry } from "./postgrest-errors.ts";
 
 export async function loadOpenTrade(
   supabase: ReturnType<typeof createClient>,
   userId: string,
   symbol: string,
   /** When set, only rows with `extra.bot_id` match — isolates ghost vs live bots on the same symbol. */
+  botId?: string | null,
+): Promise<OpenTradeRow | null> {
+  return withPostgrestRetry(
+    `loadOpenTrade:${symbol}`,
+    () => loadOpenTradeOnce(supabase, userId, symbol, botId),
+  );
+}
+
+async function loadOpenTradeOnce(
+  supabase: ReturnType<typeof createClient>,
+  userId: string,
+  symbol: string,
   botId?: string | null,
 ): Promise<OpenTradeRow | null> {
   const bid = typeof botId === "string" && botId.trim().length > 0 ? botId.trim() : null;
@@ -68,6 +81,28 @@ export async function updateProfileBalance(
   if (result.error) throw result.error;
 }
 
+/** Paper/ghost: locked row update — avoids parallel cron batches corrupting demo_balance. */
+export async function adjustPaperDemoBalance(
+  supabase: ReturnType<typeof createClient>,
+  userId: string,
+  deltaUsd: number,
+): Promise<number> {
+  const { data, error } = await withPostgrestRetry(
+    `paper_adjust_demo_balance:${userId}`,
+    () =>
+      supabase.rpc("paper_adjust_demo_balance", {
+        p_user_id: userId,
+        p_delta_usd: deltaUsd,
+      }),
+  );
+  if (error) throw error;
+  const n = toNumber(data, NaN);
+  if (!Number.isFinite(n)) {
+    throw new Error("paper_adjust_demo_balance returned invalid balance");
+  }
+  return n;
+}
+
 export async function ensureProfileRow(
   supabase: ReturnType<typeof createClient>,
   userId: string,
@@ -89,6 +124,7 @@ export async function insertTrade(
   supabase: ReturnType<typeof createClient>,
   payload: JsonRecord,
   notifyReason?: string,
+  options?: { skipTradeRowTelegram?: boolean },
 ) {
   const normalized = { ...payload } as JsonRecord;
   const round8 = (value: unknown): number | null => {
@@ -149,25 +185,21 @@ export async function insertTrade(
     .select("*")
     .single();
   if (result.error) throw result.error;
-  await sendTradeRowNotification({
-    event: "insert",
-    trade: result.data as Record<string, unknown>,
-    reason: notifyReason,
-  });
+  if (!options?.skipTradeRowTelegram) {
+    await sendTradeRowNotification({
+      event: "insert",
+      trade: result.data as Record<string, unknown>,
+      reason: notifyReason,
+    });
+  }
 }
 
 export function resolveTradeSizeUsd(
   row: BotSettingsRow,
   currentBalance: number,
 ): number {
-  const symbol = String(row.symbol ?? "").toUpperCase();
   const fixedUsd = toNumber(row.trade_size_usd ?? row.fixed_trade_usd, 0);
   if (fixedUsd > 0) return Math.min(currentBalance, fixedUsd);
-
-  if (symbol === "PEPEUSDT") {
-    // Default meme cap when no fixed USD on the row; explicit trade_size_usd wins above.
-    return Math.min(currentBalance, PEPE_TEST_TRADE_USD);
-  }
 
   const riskPercent = clamp(
     toNumber(row.risk_percent, DEFAULT_RISK_PERCENT),

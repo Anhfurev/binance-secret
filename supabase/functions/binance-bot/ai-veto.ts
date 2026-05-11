@@ -1,13 +1,23 @@
 // @ts-nocheck
 import type { AiAnalysis, IndicatorSnapshot } from "./types.ts";
+import { envLlmTimeoutMs, mergeLlmAbortSignal } from "./ai-models.ts";
 import { safeJsonParseFromText } from "./utils.ts";
+import {
+  buildVetoTechnicalWindow,
+  evaluateStaleSignalVeto,
+  shouldFastTrackGroqBuyVeto,
+} from "./ai-veto-helpers.ts";
+import { withLlmConcurrency } from "./ai-llm-concurrency.ts";
 
 const DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant";
 const GROQ_TRAP_REVIEW_SYSTEM = [
   "You are a cynical Wall Street whale.",
   "Gemini wants to BUY this coin. Your job is to find the lie.",
+  "You are given veto_window: last five 1m OHLCV bars (oldest→newest), last five 15m bars, and computed short-horizon returns.",
+  "The primary BUY signal may be stale (seconds of latency). If recent 1m closes or ticker vs last 1m close clearly contradict a long, REJECT.",
   "Check for trap conditions: price rising while volume declines (bearish divergence), obvious blow-off moves, suspicious sell pressure.",
   "If symbol is PEPEUSDT, prioritize volume spikes and social sentiment risk signals over standard RSI/MACD.",
+  "Base your verdict on the provided numbers only — do not invent candle data.",
   'Return ONLY JSON: { "action": "APPROVE" | "REJECT", "reason": "<short reason>" }.',
 ].join(" ");
 
@@ -54,6 +64,43 @@ export async function applyGroqBuyVeto(params: {
     `[AI DEBUG] groq_path_selected symbol=${symbol} ai_action=${ai.action} groq_keys=${groqKeys.length}`,
   );
 
+  const stale = evaluateStaleSignalVeto(snapshot);
+  if (stale?.reject) {
+    await logGroqVeto(symbol, stale.reason);
+    return {
+      ai: {
+        ...ai,
+        action: "HOLD",
+        trend_alignment: false,
+        groq_verdict: "REJECT",
+        groq_reason: stale.reason,
+        raw_groq_veto_response: { action: "REJECT", reason: stale.reason, fast_path: true },
+      },
+      nextGroqKeyIndex,
+    };
+  }
+
+  if (shouldFastTrackGroqBuyVeto(ai)) {
+    const conf = Number(ai.ai_confidence);
+    console.log(
+      `[AI DEBUG] groq_veto_fast_track symbol=${symbol} confidence=${conf} path=high_conviction_skip_llm`,
+    );
+    return {
+      ai: {
+        ...ai,
+        groq_verdict: "SKIPPED",
+        groq_reason: `high_conviction_fast_track:${conf}`,
+        raw_groq_veto_response: {
+          action: "SKIP",
+          reason: "high_conviction_fast_track",
+          fast_path: true,
+          ai_confidence: conf,
+        },
+      },
+      nextGroqKeyIndex,
+    };
+  }
+
   nextGroqKeyIndex = (nextGroqKeyIndex + 1) % groqKeys.length;
   const startIndex = nextGroqKeyIndex;
   for (let attempt = 0; attempt < groqKeys.length; attempt += 1) {
@@ -69,14 +116,21 @@ export async function applyGroqBuyVeto(params: {
       console.log(
         `[AI DEBUG] groq_path_selected symbol=${symbol} key_index=${keyIndex + 1} attempt=${attempt + 1}`,
       );
-      const review = await groqTrapReview(key, {
-        symbol,
-        rsi: snapshot.rsi,
-        latestPrice: snapshot.latestPrice,
-        market_context: { imbalance_ratio: snapshot.imbalance_ratio },
-        symbol_strategy_hint: buildSymbolStrategyHint(symbol),
-        last15mPriceAction: snapshot.candles15.map((c) => ({ ...c })),
-      }, signal);
+      const vetoSignal = mergeLlmAbortSignal(
+        signal,
+        envLlmTimeoutMs("GROQ_VETO_TIMEOUT_MS", 8000),
+      );
+      const veto_window = buildVetoTechnicalWindow(snapshot);
+      const review = await withLlmConcurrency(() =>
+        groqTrapReview(key, {
+          symbol,
+          rsi: snapshot.rsi,
+          latestPrice: snapshot.latestPrice,
+          market_context: { imbalance_ratio: snapshot.imbalance_ratio },
+          symbol_strategy_hint: buildSymbolStrategyHint(symbol),
+          veto_window,
+        }, vetoSignal)
+      );
       await logGroqKeySuccess(keyIndex);
       if (review.action === "REJECT") {
         await logGroqVeto(symbol, review.reason);
@@ -103,10 +157,13 @@ export async function applyGroqBuyVeto(params: {
       };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes("QUOTA_EXHAUSTED")) {
-        console.warn(`[Groq Key #${keyIndex + 1}] LIMIT HIT - Rotating...`);
+      const rateLimited = msg.includes("QUOTA_EXHAUSTED") ||
+        msg.includes("429") ||
+        /rate limit/i.test(msg);
+      if (rateLimited) {
+        console.warn(`[Groq Key #${keyIndex + 1}] LIMIT HIT - fast-fail veto`);
         await logGroqKeyLimit(keyIndex);
-        continue;
+        return { ai, nextGroqKeyIndex: keyIndex };
       }
       console.warn(`[binance-bot] Groq veto check skipped: ${msg}`);
       return { ai, nextGroqKeyIndex };

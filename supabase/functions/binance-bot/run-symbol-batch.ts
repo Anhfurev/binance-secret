@@ -29,12 +29,11 @@ import {
   resolveSessionAwareMinAiConfidence,
   resolveVolumeSpikeMultiplier,
 } from "./decision-tuning.ts";
-import { logCycleSummary, logDecisionTrace } from "./index-logging.ts";
+import { logCycleSummary, logDecisionTrace, logExecutionOutcome } from "./index-logging.ts";
 import {
   getAiVerdict,
   getCachedSnapshot,
   isEmergencyAbortQuotaError,
-  resolveConfidenceTierRiskPercent,
   shouldRunAiCheck,
 } from "./index-ai.ts";
 import {
@@ -60,6 +59,7 @@ import {
   insertWarRoomAudit,
   tryMtfOnlyHighConfidenceHalfBuy,
 } from "./veto-transparency.ts";
+import { evaluateSmartNoiseFilter } from "./smart-filter.ts";
 
 export type SymbolBatchResult = {
   symbolFilter: string;
@@ -97,8 +97,9 @@ export async function runSymbolBatch(params: {
   supabase: ReturnType<typeof createClient>;
   symbolFilter: string;
   lastAiPriceBySymbol: Map<string, number>;
+  marketCache?: Map<string, import("./types.ts").IndicatorSnapshot>;
 }): Promise<SymbolBatchResult> {
-  const { supabase, symbolFilter, lastAiPriceBySymbol } = params;
+  const { supabase, symbolFilter, lastAiPriceBySymbol, marketCache } = params;
 
   const botsQuery = await safeExecute(
     "db_bot_settings_for_symbol",
@@ -132,7 +133,7 @@ export async function runSymbolBatch(params: {
     };
   }
 
-  const symbolCache = new Map();
+  const symbolCache = marketCache ?? new Map();
   const btcSnapshot = await safeExecute(
     "market_snapshot_BTCUSDT",
     () => getCachedSnapshot(symbolCache, "BTCUSDT", fetchIndicatorSnapshot),
@@ -315,6 +316,22 @@ export async function runSymbolBatch(params: {
         ? (snapshot.latestPrice - snapshot.bbLower) / bbRange
         : 0;
       const lastCandle = snapshot.candles5?.at(-1);
+      const smartNoise = evaluateSmartNoiseFilter({
+        snapshot,
+        lastCandleVolume: Number(lastCandle?.volume ?? 0),
+        hasOpenTrade: Boolean(openTrade),
+        isGhostExecution,
+      });
+      if (smartNoise.sleepAi) {
+        shouldInvokeAi = false;
+        console.log("[SMART_FILTER]", {
+          symbol,
+          userId,
+          sleep_ai: 1,
+          volume_1m: smartNoise.volume1m,
+          avg_1m_from_24h: smartNoise.avgVolume1mFrom24h,
+        });
+      }
       const volumeSpikeMultiplier = resolveVolumeSpikeMultiplier(symbol);
       const volumeSpike = Boolean(
         Number(snapshot.avgVolume1m) > 0 &&
@@ -370,6 +387,9 @@ export async function runSymbolBatch(params: {
           `NO_TRADE_FALLBACK_ACTIVE:${String(noTradeFallback.reason ?? "active")}`,
         );
       }
+      if (smartNoise.vetoReasons.length) {
+        preflight.veto_reasons.push(...smartNoise.vetoReasons);
+      }
       console.log(
         `[VETO_CHECK] Symbol: ${symbol} | Passed: ${preflight.passedCount}/${preflight.totalGates} | Fails: ${JSON.stringify(preflight.veto_reasons)}`,
       );
@@ -411,8 +431,8 @@ export async function runSymbolBatch(params: {
         { ai: safetyAi, aiQuotaFallback: false },
       );
       const aiVerdictMs = Math.round(performance.now() - aiVerdictStarted);
-      const perfAiWarnMs = Number(Deno.env.get("PERF_AI_VERDICT_WARN_MS") ?? "6000");
-      const warnMs = Number.isFinite(perfAiWarnMs) && perfAiWarnMs >= 1500 ? perfAiWarnMs : 6000;
+      const perfAiWarnMs = Number(Deno.env.get("PERF_AI_VERDICT_WARN_MS") ?? "18000");
+      const warnMs = Number.isFinite(perfAiWarnMs) && perfAiWarnMs >= 1500 ? perfAiWarnMs : 18_000;
       if (aiVerdictMs > warnMs) {
         console.warn(
           `[PERF] ai_verdict slow ${aiVerdictMs}ms symbol=${symbol} user=${userId} (warn_if>${warnMs}ms)`,
@@ -474,6 +494,14 @@ export async function runSymbolBatch(params: {
         const ms = Date.parse(raw);
         return Number.isFinite(ms) ? ms : null;
       })();
+      const orderBookImbalanceExitBelow = (() => {
+        const n = Number(Deno.env.get("ORDER_BOOK_IMBALANCE_EXIT_BELOW") ?? "");
+        return Number.isFinite(n) && n > 0.05 && n < 0.99 ? n : 0.32;
+      })();
+      const orderBookImbalanceMinHoldMs = (() => {
+        const n = Number(Deno.env.get("ORDER_BOOK_IMBALANCE_MIN_HOLD_MS") ?? "");
+        return Number.isFinite(n) && n >= 0 && n <= 30 * 60 * 1000 ? n : 90_000;
+      })();
 
       let { decision, reason } = decideHybridMatrix({
         strategySignal,
@@ -496,6 +524,11 @@ export async function runSymbolBatch(params: {
         volumeSpike,
         memeSentimentSupport,
         orderBookImbalanceExitDisabledUntilMs,
+        orderBookImbalanceExitBelow,
+        orderBookImbalanceMinHoldMs,
+        openTradeOpenedAt: openTrade?.opened_at
+          ? String((openTrade as any).opened_at)
+          : null,
       });
       const aiConfidence = Number(ai.ai_confidence);
       const groqRejected = groqVerdictUpper === "REJECT";
@@ -572,6 +605,12 @@ export async function runSymbolBatch(params: {
           reason = "mtf_misaligned_high_conf_half_position_override";
           executionUsdScale = mtfHalf.executionUsdScale;
         }
+      }
+
+      if (smartNoise.blockBuy && decision === "BUY" && !openTrade) {
+        decision = "HOLD";
+        reason = smartNoise.blockReason ?? "hold_smart_filter_wide_spread";
+        executionUsdScale = undefined;
       }
 
       const maxOpenTradesRaw = toNumber((row as any).max_open_trades, 0);
@@ -737,17 +776,9 @@ export async function runSymbolBatch(params: {
           `${combinedStrategyReason}|execution_usd_scale=${executionUsdScale}`;
       }
 
-      const dynamicRiskPercentOverride = resolveConfidenceTierRiskPercent(
-        ai.ai_confidence,
-        row,
-      );
-      const executionRow = dynamicRiskPercentOverride
-        ? { ...row, risk_percent: dynamicRiskPercentOverride }
-        : row;
-
       const result = await processBot({
         supabase,
-        row: executionRow,
+        row,
         snapshot,
         technical,
         ai,
@@ -758,6 +789,17 @@ export async function runSymbolBatch(params: {
         executionUsdScale,
         signal,
         demoProbeBuy: demoProbeBuyFlag,
+      });
+
+      await logExecutionOutcome({
+        supabase,
+        row,
+        symbol,
+        intendedDecision: decision,
+        reason,
+        resultAction: (result as any)?.action,
+        resultDetail: (result as any)?.detail,
+        exitReason: (result as any)?.exit_reason,
       });
 
       await logCycleSummary({
@@ -852,6 +894,27 @@ export async function runSymbolBatch(params: {
         BOT_CYCLE_TIMEOUT_MS,
         row,
         symbolFilter,
+        ({ userId, symbol, timeoutMs, detail }) => {
+          return safeExecute(
+            "late_completion_after_timeout_log",
+            () =>
+              supabase.from("logs").insert([{
+                user_id: userId !== "unknown" ? userId : null,
+                symbol,
+                level: "warn",
+                source: "bot-timeout-race",
+                message: "late_completion_after_timeout",
+                meta: {
+                  event: "late_completion_after_timeout",
+                  timeout_ms: timeoutMs,
+                  detail,
+                  cycle_id: cycleId,
+                },
+                created_at: new Date().toISOString(),
+              }]),
+            undefined,
+          );
+        },
       )
     );
     const settled = await Promise.allSettled(cycleRuns);
@@ -925,14 +988,18 @@ export async function runSymbolBatch(params: {
       });
     });
     allSettledElapsedMs = Math.round(performance.now() - allSettledStarted);
-    if (allSettledElapsedMs > 10_000) {
+    const loopLatencyWarnMs = (() => {
+      const n = Number(Deno.env.get("BOT_LOOP_LATENCY_WARN_MS") ?? "");
+      return Number.isFinite(n) && n >= 5000 ? n : 30_000;
+    })();
+    if (allSettledElapsedMs > loopLatencyWarnMs) {
       console.warn(
-        `[binance-bot] Latency Warning: bot loop took ${allSettledElapsedMs}ms (threshold 10000ms) cycle_id=${cycleId}`,
+        `[binance-bot] Latency Warning: bot loop took ${allSettledElapsedMs}ms (threshold ${loopLatencyWarnMs}ms) cycle_id=${cycleId}`,
       );
       botDebug("index", "latency_warning", {
         elapsedMs: allSettledElapsedMs,
         cycleId,
-        thresholdMs: 10_000,
+        thresholdMs: loopLatencyWarnMs,
         phase: "parallel_bots_all_settled",
       });
     }
@@ -965,6 +1032,12 @@ async function runSingleBotCycleWithTimeout(
   timeoutMs: number,
   row: { user_id?: unknown; symbol?: unknown },
   symbolFallback: string,
+  onLateCompletion?: (params: {
+    userId: string;
+    symbol: string;
+    timeoutMs: number;
+    detail: string;
+  }) => void | Promise<void>,
 ): Promise<
   | { tag: "ok"; result: BotActionResult; symbol: string; lastPrice: number }
   | { tag: "emergency"; userId: string; symbol: string; detail: string }
@@ -975,18 +1048,44 @@ async function runSingleBotCycleWithTimeout(
   const signal = AbortSignal.timeout(timeoutMs);
   const userId = toStringValue(row.user_id) ?? "unknown";
   const symbol = normalizeSymbol(row.symbol, symbolFallback);
+  let timeoutFired = false;
+  const taskPromise = task(signal);
+  void taskPromise.then(
+    () => {
+      if (!timeoutFired) return;
+      void onLateCompletion?.({
+        userId,
+        symbol,
+        timeoutMs,
+        detail: "task_resolved_after_timeout",
+      });
+    },
+    (error) => {
+      if (!timeoutFired) return;
+      void onLateCompletion?.({
+        userId,
+        symbol,
+        timeoutMs,
+        detail: `task_rejected_after_timeout:${formatUnknownError(error)}`,
+      });
+    },
+  );
   const timeoutPromise = new Promise<{ tag: "timeout"; userId: string; symbol: string; timeoutMs: number }>((resolve) => {
     if (signal.aborted) {
+      timeoutFired = true;
       resolve({ tag: "timeout", userId, symbol, timeoutMs });
       return;
     }
     signal.addEventListener(
       "abort",
-      () => resolve({ tag: "timeout", userId, symbol, timeoutMs }),
+      () => {
+        timeoutFired = true;
+        resolve({ tag: "timeout", userId, symbol, timeoutMs });
+      },
       { once: true },
     );
   });
-  return await Promise.race([task(signal), timeoutPromise]);
+  return await Promise.race([taskPromise, timeoutPromise]);
 }
 
 function buildDebugRawAiResponse(params: {

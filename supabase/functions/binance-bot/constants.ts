@@ -55,3 +55,30 @@ export const corsHeaders = {
   "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
 };
 
+/**
+ * Simulated spot taker fee per leg (decimal) for paper fills + net-TP gate.
+ * Clamps to **0.1%–0.2%** per leg (Binance taker band; stress up to 0.2%).
+ */
+export function resolvePaperTakerFeeSimulationPct(): number {
+  const raw = String(Deno.env.get("PAPER_TAKER_FEE_PCT") ?? "0.001").trim();
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0.001;
+  return Math.min(0.002, Math.max(0.001, n));
+}
+
+/** @deprecated alias — use `resolvePaperTakerFeeSimulationPct` */
+export function resolveSpotTakerFeePctEachLeg(): number {
+  return resolvePaperTakerFeeSimulationPct();
+}
+
+/** Two legs (buy + sell) at taker — used for net TP floor vs `min_profit_after_fees_pct`. */
+export function resolveSpotRoundTripTakerFeePct(): number {
+  return 2 * resolvePaperTakerFeeSimulationPct();
+}
+
+/** Extra adverse bps on paper fills after bid/ask baseline (default 5 = 0.05%). */
+export function resolvePaperSpreadExtraSimBps(): number {
+  const n = Number(String(Deno.env.get("PAPER_SPREAD_EXTRA_SIM_BPS") ?? "5").trim());
+  return Number.isFinite(n) && n >= 0 && n <= 50 ? Math.floor(n) : 5;
+}
+

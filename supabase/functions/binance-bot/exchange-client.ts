@@ -1,5 +1,13 @@
 // @ts-nocheck
 import ccxt from "ccxt";
+import {
+  ccxtBinanceOptionsForRestGateway,
+  shouldSkipEgressIpCheck,
+} from "./binance-rest-base.ts";
+import {
+  readSmartLimitMaxChasePct,
+  readSmartLimitMaxSlippagePct,
+} from "./smart-limit-chase-config.ts";
 
 export function toCcxtSymbol(symbol: string) {
   if (symbol.includes("/")) return symbol;
@@ -25,6 +33,7 @@ export function createBinanceExchange() {
       defaultType: "spot",
       recvWindow: 60_000,
     },
+    ...ccxtBinanceOptionsForRestGateway(),
   });
 }
 
@@ -57,6 +66,7 @@ const EGRESS_IP_CACHE_MS = 8000;
  * Supabase / platform egress and set `BINANCE_REQUIRED_EGRESS_IP` to match.
  */
 export async function assertExpectedEgressIpOrThrow(): Promise<void> {
+  if (shouldSkipEgressIpCheck()) return;
   const raw = Deno.env.get("BINANCE_REQUIRED_EGRESS_IP")?.trim() ??
     Deno.env.get("BINANCE_STATIC_IP_WHITELIST")?.trim();
   if (!raw) return;
@@ -433,7 +443,10 @@ export async function executeSmartLimitChaser(params: {
     signalPrice,
     marketRegime,
   } = params;
-  const maxSlippageFrac = (params.maxSlippagePct ?? 0.2) / 100;
+  const maxChasePct = readSmartLimitMaxChasePct(symbol);
+  const maxSlippagePct = params.maxSlippagePct ?? readSmartLimitMaxSlippagePct(symbol);
+  const maxChaseFrac = maxChasePct / 100;
+  const maxSlippageFrac = maxSlippagePct / 100;
   if (!Number.isFinite(signalPrice) || signalPrice <= 0) {
     throw new Error("smart_limit_invalid_signal_price");
   }
@@ -451,7 +464,8 @@ export async function executeSmartLimitChaser(params: {
   const meta: Record<string, unknown> = {
     rounds: [] as unknown[],
     signal_price: signalPrice,
-    max_slippage_pct: params.maxSlippagePct ?? 0.2,
+    max_chase_pct: maxChasePct,
+    max_slippage_pct: maxSlippagePct,
     initial_target_base: initialAmount,
   };
 
@@ -470,6 +484,19 @@ export async function executeSmartLimitChaser(params: {
   let lastOrderId: string | undefined;
   let execution_type: SmartLimitExecutionResult["execution_type"] = "limit_chase";
 
+  function adverseMoveFrac(refPrice: number): number {
+    if (!Number.isFinite(refPrice) || refPrice <= 0 || !Number.isFinite(signalPrice) || signalPrice <= 0) {
+      return 0;
+    }
+    // Slippage guard should only react to adverse drift:
+    // - BUY adverse: ref > signal
+    // - SELL adverse (closing long): ref < signal
+    if (side === "buy") {
+      return Math.max(0, (refPrice - signalPrice) / signalPrice);
+    }
+    return Math.max(0, (signalPrice - refPrice) / signalPrice);
+  }
+
   for (let round = 0; round < SMART_LIMIT_MAX_ROUNDS; round++) {
     if (remaining <= 1e-12) break;
 
@@ -482,6 +509,12 @@ export async function executeSmartLimitChaser(params: {
       throw new Error("smart_limit_empty_order_book");
     }
     const limitPrice = roundPriceToMarketPrecision(exchange, ccxtSymbol, market, rawLimit);
+    const chaseMove = adverseMoveFrac(limitPrice);
+    if (chaseMove > maxChaseFrac) {
+      meta.chase_cap_abort_ref = limitPrice;
+      meta.chase_cap_frac = chaseMove;
+      throw new Error("smart_limit_max_chase_exceeded");
+    }
     const amtStr = floorAmountToLotStep(exchange, ccxtSymbol, market, remaining);
     const orderAmount = Number(exchange.amountToPrecision(ccxtSymbol, Number(amtStr)));
     if (!Number.isFinite(orderAmount) || orderAmount <= 0) break;
@@ -590,7 +623,7 @@ export async function executeSmartLimitChaser(params: {
     const mid = tb > 0 && ta > 0 ? (tb + ta) / 2 : last;
     const ref = Number.isFinite(mid) && mid > 0 ? mid : last;
     if (Number.isFinite(ref) && ref > 0) {
-      const slipMove = Math.abs(ref - signalPrice) / signalPrice;
+      const slipMove = adverseMoveFrac(ref);
       if (slipMove > maxSlippageFrac) {
         meta.slippage_abort_ref = ref;
         throw new Error("slippage_limit_exceeded");
@@ -604,6 +637,16 @@ export async function executeSmartLimitChaser(params: {
   if (remaining > 1e-8) {
     if (String(marketRegime).toUpperCase() === "TRENDING") {
       await applyBinanceJitter();
+      const ticker = await exchange.fetchTicker(ccxtSymbol);
+      const last = Number(ticker?.last ?? 0);
+      const tb = Number(ticker?.bid ?? 0);
+      const ta = Number(ticker?.ask ?? 0);
+      const mid = tb > 0 && ta > 0 ? (tb + ta) / 2 : last;
+      const ref = Number.isFinite(mid) && mid > 0 ? mid : last;
+      if (Number.isFinite(ref) && ref > 0 && adverseMoveFrac(ref) > maxChaseFrac) {
+        meta.market_fallback_blocked_ref = ref;
+        throw new Error("smart_limit_max_chase_exceeded");
+      }
       const m = await createMarketOrderWithStpRetry(exchange, ccxtSymbol, side, remaining);
       execution_type = "market_fallback";
       const mf = Number((m as any)?.filled ?? remaining);

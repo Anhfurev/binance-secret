@@ -1,153 +1,69 @@
 -- =============================================================================
--- Supabase 24/7 Bot Heartbeat Setup
--- Run this ONCE in: Supabase Dashboard > SQL Editor
+-- Supabase 24/7 Bot — SINGLE consolidated cron (recommended)
+-- =============================================================================
+-- Legacy setups used SIX jobs per minute (per-symbol × staggered pg_sleep),
+-- which overloaded Edge + Postgres and caused "connection timeout".
+-- This version sends ONE request per minute with all symbols.
+--
+-- Run once in: Supabase Dashboard → SQL Editor
+-- Replace YOUR_PROJECT_REF in the URL below. Secret must match Edge secret BOT_SECRET.
+-- NOTE: `alter database ... set app.cron_secret` often fails with 42501 on Supabase — use
+--       migration `20260516120000_cron_bot_secret_table.sql` + INSERT into bot_cron_http_secret.
 -- =============================================================================
 
--- Step 1: Enable required extensions (safe to run multiple times)
 create extension if not exists pg_cron;
 create extension if not exists pg_net;
 
--- Step 2: Store a shared secret (must match Edge Function secret BOT_SECRET).
---         pg_cron sends it as header x-binance-bot-secret (no user JWT).
-alter database postgres
-  set app.cron_secret = 'REPLACE_WITH_YOUR_BOT_SECRET';
+-- Optional legacy (requires superuser — usually skip on Supabase hosted):
+-- alter database postgres set app.cron_secret = 'REPLACE_WITH_YOUR_BOT_SECRET';
 
--- Step 3: Schedule symbol-specific staggered heartbeats.
---         Each symbol runs every 30s, but offset across the minute to spread load:
---         BTC: 0s / 30s
---         SOL: 10s / 40s
---         PEPE: 20s / 50s
---         IMPORTANT: index.ts must support body {"symbol":"..."} filtering
---         (this repo does).
---         Replace YOUR_SUPABASE_PROJECT_REF with your project ref
---         (visible in: Supabase Dashboard > Settings > General, e.g. "emviaygygylosvmtsvlq").
-select cron.schedule(
-  '24-7-binance-btc-0s',     -- job name (must be unique)
-  '* * * * *',               -- every minute
-  $$
-  select net.http_post(
-    url     := 'https://emviaygygylosvmtsvlq.supabase.co/functions/v1/binance-bot',
-    headers := jsonb_build_object(
-      'Content-Type',            'application/json',
-      'x-binance-bot-secret',   current_setting('app.cron_secret', true)
-    ),
-    body    := '{"symbol":"BTCUSDT"}'::jsonb
-  ) as request_id;
-  $$
-);
+-- Preferred on Supabase: after migration cron_bot_secret_table exists, set the secret once:
+-- insert into public.bot_cron_http_secret (id, secret)
+-- values (1, 'REPLACE_WITH_YOUR_BOT_SECRET')
+-- on conflict (id) do update set secret = excluded.secret, updated_at = now();
 
-select cron.schedule(
-  '24-7-binance-btc-30s',    -- second heartbeat offset by 30s
-  '* * * * *',               -- every minute
-  $$
-  select pg_sleep(30);
-  select net.http_post(
-    url     := 'https://emviaygygylosvmtsvlq.supabase.co/functions/v1/binance-bot',
-    headers := jsonb_build_object(
-      'Content-Type',            'application/json',
-      'x-binance-bot-secret',   current_setting('app.cron_secret', true)
-    ),
-    body    := '{"symbol":"BTCUSDT"}'::jsonb
-  ) as request_id;
-  $$
-);
+-- Remove old fan-out jobs if present (ignore errors if names differ).
+do $$
+declare
+  job_name text;
+  names text[] := array[
+    '24-7-binance-btc-0s',
+    '24-7-binance-btc-30s',
+    '24-7-binance-sol-10s',
+    '24-7-binance-sol-40s',
+    '24-7-binance-pepe-20s',
+    '24-7-binance-pepe-50s'
+  ];
+begin
+  foreach job_name in array names
+  loop
+    begin
+      perform cron.unschedule(job_name);
+    exception when others then null;
+    end;
+  end loop;
+end $$;
 
+do $x$
+begin
+  perform cron.unschedule('bot-heartbeat-all-symbols');
+exception when others then null;
+end $x$;
+
+-- Cron calls wrapper (URL + header live in function; secret from bot_cron_http_secret).
+-- Run the INSERT above first, or edit migration function URL for YOUR_PROJECT_REF.
 select cron.schedule(
-  '24-7-binance-sol-10s',
+  'bot-heartbeat-all-symbols',
   '* * * * *',
-  $$
-  select pg_sleep(10);
-  select net.http_post(
-    url     := 'https://emviaygygylosvmtsvlq.supabase.co/functions/v1/binance-bot',
-    headers := jsonb_build_object(
-      'Content-Type',            'application/json',
-      'x-binance-bot-secret',   current_setting('app.cron_secret', true)
-    ),
-    body    := '{"symbol":"SOLUSDT"}'::jsonb
-  ) as request_id;
-  $$
+  $$select public.invoke_binance_bot_edge_heartbeat();$$
 );
 
-select cron.schedule(
-  '24-7-binance-sol-40s',
-  '* * * * *',
-  $$
-  select pg_sleep(40);
-  select net.http_post(
-    url     := 'https://emviaygygylosvmtsvlq.supabase.co/functions/v1/binance-bot',
-    headers := jsonb_build_object(
-      'Content-Type',            'application/json',
-      'x-binance-bot-secret',   current_setting('app.cron_secret', true)
-    ),
-    body    := '{"symbol":"SOLUSDT"}'::jsonb
-  ) as request_id;
-  $$
-);
+-- Optional: Sunday summary (unchanged URL pattern).
+-- select cron.schedule(
+--   'sunday-summary-2359',
+--   '59 23 * * 0',
+--   $$ ... sunday-summary ... $$
+-- );
 
-select cron.schedule(
-  '24-7-binance-pepe-20s',
-  '* * * * *',
-  $$
-  select pg_sleep(20);
-  select net.http_post(
-    url     := 'https://emviaygygylosvmtsvlq.supabase.co/functions/v1/binance-bot',
-    headers := jsonb_build_object(
-      'Content-Type',            'application/json',
-      'x-binance-bot-secret',   current_setting('app.cron_secret', true)
-    ),
-    body    := '{"symbol":"PEPEUSDT"}'::jsonb
-  ) as request_id;
-  $$
-);
-
-select cron.schedule(
-  '24-7-binance-pepe-50s',
-  '* * * * *',
-  $$
-  select pg_sleep(50);
-  select net.http_post(
-    url     := 'https://emviaygygylosvmtsvlq.supabase.co/functions/v1/binance-bot',
-    headers := jsonb_build_object(
-      'Content-Type',            'application/json',
-      'x-binance-bot-secret',   current_setting('app.cron_secret', true)
-    ),
-    body    := '{"symbol":"PEPEUSDT"}'::jsonb
-  ) as request_id;
-  $$
-);
-
--- Step 4: Weekly Sunday summary job (23:59 UTC every Sunday).
---         Writes weekly stats into public.sunday_summaries.
-select cron.schedule(
-  'sunday-summary-2359',
-  '59 23 * * 0',
-  $$
-  select net.http_post(
-    url     := 'https://emviaygygylosvmtsvlq.supabase.co/functions/v1/sunday-summary',
-    headers := jsonb_build_object(
-      'Content-Type',            'application/json',
-      'x-binance-bot-secret',   current_setting('app.cron_secret', true)
-    ),
-    body    := '{}'::jsonb
-  ) as request_id;
-  $$
-);
-
--- =============================================================================
--- Useful maintenance queries
--- =============================================================================
-
--- View all scheduled jobs:
--- select * from cron.job;
-
--- View recent run history (pass/fail + output):
--- select * from cron.job_run_details order by start_time desc limit 20;
-
--- Remove jobs if you want to pause them:
--- select cron.unschedule('24-7-binance-btc-0s');
--- select cron.unschedule('24-7-binance-btc-30s');
--- select cron.unschedule('24-7-binance-sol-10s');
--- select cron.unschedule('24-7-binance-sol-40s');
--- select cron.unschedule('24-7-binance-pepe-20s');
--- select cron.unschedule('24-7-binance-pepe-50s');
--- select cron.unschedule('sunday-summary-2359');
+-- verify:
+-- select jobid, jobname, schedule, command from cron.job order by jobname;

@@ -19,6 +19,11 @@ export type BotSettingsRow = JsonRecord & {
   rsi_sell_threshold?: number;
   stop_loss_pct?: number;
   take_profit_pct?: number;
+  /**
+   * Minimum net take-profit % (take_profit_pct minus est. round-trip taker fees) to allow BUY.
+   * Null → Edge default; 0 disables the extra gate.
+   */
+  min_profit_after_fees_pct?: number | null;
   trailing_stop_pct?: number;
   min_ai_confidence?: number;
   /** Optional BUY floor when `marketRegime === "TRENDING"`; null → use `min_ai_confidence`. */
@@ -127,6 +132,10 @@ export type IndicatorSnapshot = {
   dayLow24h: number;
   /** CCXT ticker quote volume (24h) when present — War Room whale context. */
   volume24hQuote?: number | null;
+  /** CCXT ticker base volume (24h) when present — smart-filter vs 1m volume. */
+  volume24hBase?: number | null;
+  /** Top-of-book spread in basis points when bid/ask are available. */
+  spreadBps?: number | null;
   avgVolume1m: number;
   rsi: number;
   rsi15m: number;
@@ -198,7 +207,7 @@ export type AiAnalysis = {
   order_book_score?: number;
   /** ≤15 words; surfaced in Telegram + `trades.ai_reasoning` JSON. */
   pro_tip?: string;
-  groq_verdict?: "APPROVE" | "REJECT";
+  groq_verdict?: "APPROVE" | "REJECT" | "SKIPPED";
   groq_reason?: string;
   raw_ai_response?: unknown;
   raw_groq_veto_response?: unknown;

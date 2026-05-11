@@ -4,7 +4,7 @@
  * scorecard ×0.7 haircut in `applySentimentVibeCheck` (`ai-core.ts`). Persisted
  * audit of pre- vs post-haircut weighted scores lives in `trades.ai_reasoning`
  * (`weighted_pre_sentiment_vibe`, `raw_weighted_confidence`, `effective_confidence`)
- * from `executeBuyFlow` → `buildAiReasoningJson` in `bot-buy.ts`.
+ * from `executeBuyFlow` → `buildAiReasoningJson` in `bot-buy-v2.ts`.
  */
 import { createClient } from "npm:@supabase/supabase-js@2";
 import type { AiAnalysis, BotSettingsRow, IndicatorSnapshot } from "./types.ts";
@@ -12,34 +12,24 @@ import {
   activateGeminiQuotaCooldown,
   applySentimentVibeCheck,
   getAiAnalysis,
-  getGeminiCooldownMsRemaining,
   getRecentAiCacheForSymbol,
   isGeminiInQuotaCooldown,
 } from "./ai-core.ts";
-import { getAiQuotaState, patchAiQuotaState } from "./ai-db.ts";
+import { patchAiQuotaState } from "./ai-db.ts";
 import { formatUnknownError, toNumber, toStringValue } from "./utils.ts";
+import {
+  markAiQuotaFallback,
+  registerGeminiFailureAndAbortIfNeeded,
+} from "./index-ai-quota-writes.ts";
 import { getResolvedScoreWeightsPack } from "./ai-scoring.ts";
 import { safeExecute } from "./safe-execute.ts";
+import { withLlmConcurrency } from "./ai-llm-concurrency.ts";
 
 // Only invoke Gemini when the price has moved at least this much since the
 // previous AI check for this symbol. Lower values burn key quota on micro
 // wiggles; higher values risk missing fast moves. 0.4% is a practical balance
 // for BTC / SOL / PEPE on a 1m heartbeat cadence.
 export const AI_PRICE_MOVE_THRESHOLD_PERCENT = 0.4;
-const MAX_CONSECUTIVE_GEMINI_FAILURES = 3;
-const EMERGENCY_ABORT_MESSAGE = "Emergency Abort: Quota Limit Hit";
-
-export class EmergencyAbortQuotaError extends Error {
-  constructor() {
-    super("EMERGENCY_ABORT_QUOTA_LIMIT_HIT");
-    this.name = "EmergencyAbortQuotaError";
-  }
-}
-
-export function isEmergencyAbortQuotaError(error: unknown): boolean {
-  return error instanceof EmergencyAbortQuotaError ||
-    (error instanceof Error && error.message === "EMERGENCY_ABORT_QUOTA_LIMIT_HIT");
-}
 
 export function resetAiCycleGuards() {
   // State moved to DB-backed ai_quota_state.
@@ -66,8 +56,8 @@ export function shouldBypassAiCacheFromSettings(row: BotSettingsRow): boolean {
 }
 
 /**
- * Tier bump for `risk_percent` only when no fixed USD size is set (> 0).
- * Caller must not null out `trade_size_usd` / `fixed_trade_usd` when applying the override.
+ * Legacy tier bump for `risk_percent` (superseded by `trade-size-confidence.ts` sizing).
+ * Kept for tests / callers that still read tier tables.
  */
 export function resolveConfidenceTierRiskPercent(
   aiConfidence: number,
@@ -80,93 +70,6 @@ export function resolveConfidenceTierRiskPercent(
   if (aiConfidence > 85) return 5;
   if (aiConfidence >= 65) return 2;
   return null;
-}
-
-export async function markAiQuotaFallback(params: {
-  supabase: ReturnType<typeof createClient>;
-  row: BotSettingsRow;
-  symbol: string;
-  detail: string;
-}) {
-  const { supabase, row, symbol, detail } = params;
-  const botId = toStringValue((row as any)?.id);
-  const userId = toStringValue((row as any)?.user_id);
-  const cooldownMs = await getGeminiCooldownMsRemaining();
-  const cooldownUntil = new Date(Date.now() + cooldownMs).toISOString();
-  const nowIso = new Date().toISOString();
-  const logResult = await supabase.from("logs").insert([{
-    user_id: userId ?? null,
-    symbol,
-    level: "warn",
-    source: "ai",
-    message: "rate_limit_hit",
-    meta: {
-      event: "rate_limit_hit",
-      provider: "gemini",
-      use_fallback: true,
-      bot_id: botId ?? null,
-      cooldown_ms: cooldownMs,
-      cooldown_until: cooldownUntil,
-      detail,
-    },
-  }]);
-  if (logResult.error) {
-    console.error(`[binance-bot] failed to log rate_limit_hit: ${logResult.error.message}`);
-  }
-  const statusResult = await supabase.from("bot_settings").update({
-    model_status: "OpenAI-Only",
-    model_status_until: cooldownUntil,
-    updated_at: nowIso,
-    ai_cache_invalidate_until: cooldownUntil,
-  } as any).eq("id", botId ?? "");
-  if (statusResult.error) {
-    console.warn(`[binance-bot] bot_settings model_status update skipped: ${statusResult.error.message}`);
-  }
-}
-
-async function logEmergencyAbort(params: {
-  supabase: ReturnType<typeof createClient>;
-  row: BotSettingsRow;
-  symbol: string;
-  detail: string;
-}) {
-  const { supabase, row, symbol, detail } = params;
-  const userId = toStringValue((row as any)?.user_id);
-  const botId = toStringValue((row as any)?.id);
-  const logResult = await supabase.from("logs").insert([{
-    user_id: userId ?? null,
-    symbol,
-    level: "error",
-    source: "ai",
-    message: EMERGENCY_ABORT_MESSAGE,
-    meta: {
-      event: "emergency_abort_quota_limit_hit",
-      provider: "gemini",
-      bot_id: botId ?? null,
-      consecutive_failures: (await getAiQuotaState())?.consecutive_gemini_failures ?? 0,
-      detail,
-    },
-  }]);
-  if (logResult.error) {
-    console.error(`[binance-bot] failed to log emergency quota abort: ${logResult.error.message}`);
-  }
-}
-
-async function registerGeminiFailureAndAbortIfNeeded(params: {
-  supabase: ReturnType<typeof createClient>;
-  row: BotSettingsRow;
-  symbol: string;
-  detail: string;
-}) {
-  const quota = await getAiQuotaState();
-  const nextFailures = Number(quota?.consecutive_gemini_failures ?? 0) + 1;
-  await patchAiQuotaState({
-    consecutive_gemini_failures: nextFailures,
-    last_failure_at: new Date().toISOString(),
-  });
-  if (nextFailures < MAX_CONSECUTIVE_GEMINI_FAILURES) return;
-  await logEmergencyAbort(params);
-  throw new EmergencyAbortQuotaError();
 }
 
 export async function getCachedSnapshot(
@@ -227,13 +130,15 @@ export async function getAiVerdict(params: {
     };
   }
   try {
-    ai = await getAiAnalysis(snapshot, {
-      skipCache: shouldBypassCache,
-      cacheBypassReason: shouldBypassCache ? "settings_recently_changed" : undefined,
-      scoreWeights,
-      botSettingsRow: row as Record<string, unknown>,
-      signal,
-    });
+    ai = await withLlmConcurrency(() =>
+      getAiAnalysis(snapshot, {
+        skipCache: shouldBypassCache,
+        cacheBypassReason: shouldBypassCache ? "settings_recently_changed" : undefined,
+        scoreWeights,
+        botSettingsRow: row as Record<string, unknown>,
+        signal,
+      })
+    );
     await patchAiQuotaState({ consecutive_gemini_failures: 0, last_failure_at: null });
     if (shouldBypassCache) {
       console.warn(`[AI DEBUG] Cache bypass for ${symbol}: ai_cache_invalidate_until is active`);
@@ -296,3 +201,5 @@ function withAiDebugTrace(
     ai_cache_status: bypassed ? "bypassed" : "miss",
   };
 }
+
+export { EmergencyAbortQuotaError, isEmergencyAbortQuotaError } from "./index-ai-quota-writes.ts";

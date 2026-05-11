@@ -39,6 +39,23 @@ const GEMINI_BASE_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/";
 const RATE_LIMIT_RETRY_MS = 2000;
 
+/** Merge cycle `AbortSignal` with a hard cap so hung LLM HTTP never blocks the bot for minutes. */
+export function mergeLlmAbortSignal(
+  cycleSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): AbortSignal {
+  const ms = Math.min(Math.max(timeoutMs, 2000), 120_000);
+  const deadline = AbortSignal.timeout(ms);
+  if (!cycleSignal) return deadline;
+  return AbortSignal.any([cycleSignal, deadline]);
+}
+
+export function envLlmTimeoutMs(envKey: string, defaultMs: number): number {
+  const n = Number(Deno.env.get(envKey) ?? "");
+  if (!Number.isFinite(n) || n < 2000) return defaultMs;
+  return Math.min(n, 120_000);
+}
+
 export async function geminiAnalyze(
   geminiKey: string,
   data: unknown,
@@ -46,7 +63,11 @@ export async function geminiAnalyze(
 ): Promise<AiAnalysis> {
   const url = `${GEMINI_BASE_URL}${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(geminiKey)}`;
   const userText = `${AI_USER_DATA_PREFIX}${JSON.stringify(data)}`;
-  const response = await fetchGemini(url, userText, signal);
+  const reqSignal = mergeLlmAbortSignal(
+    signal,
+    envLlmTimeoutMs("GEMINI_REQUEST_TIMEOUT_MS", 12_000),
+  );
+  const response = await fetchGemini(url, userText, reqSignal);
   if (!response.ok) {
     const text = await response.text();
     console.error(`Gemini error: ${response.status} ${text.slice(0, 300)}`);
@@ -87,6 +108,10 @@ export async function openAiAnalyze(
   signal?: AbortSignal,
 ): Promise<AiAnalysis> {
   const userText = `${AI_USER_DATA_PREFIX}${JSON.stringify(data)}`;
+  const reqSignal = mergeLlmAbortSignal(
+    signal,
+    envLlmTimeoutMs("OPENAI_REQUEST_TIMEOUT_MS", 14_000),
+  );
   const response = await fetchWithOne429Retry(
     "https://api.openai.com/v1/chat/completions",
     {
@@ -106,7 +131,7 @@ export async function openAiAnalyze(
         max_tokens: 512,
       }),
     },
-    signal,
+    reqSignal,
   );
   if (!response.ok) {
     throw new Error(`OpenAI error: ${response.status}`);
@@ -122,6 +147,10 @@ export async function groqAnalyze(
 ): Promise<AiAnalysis> {
   const groqModel = (Deno.env.get("GROQ_MODEL") ?? "").trim() || DEFAULT_GROQ_MODEL;
   const userText = `${AI_USER_DATA_PREFIX}${JSON.stringify(data)}`;
+  const reqSignal = mergeLlmAbortSignal(
+    signal,
+    envLlmTimeoutMs("GROQ_REQUEST_TIMEOUT_MS", 10_000),
+  );
   const response = await fetchWithExponentialBackoff(
     "https://api.groq.com/openai/v1/chat/completions",
     {
@@ -142,7 +171,7 @@ export async function groqAnalyze(
       }),
     },
     2,
-    signal,
+    reqSignal,
   );
   if (response.status === 429) {
     throw new Error("QUOTA_EXHAUSTED: Groq returned 429 after retries");

@@ -19,6 +19,7 @@ out/
 .env.test.local
 .env.production.local
 .env.sentry-build-plugin
+scripts/.oracle-gateway.env
 
 # Supabase local dev
 supabase/.branches/

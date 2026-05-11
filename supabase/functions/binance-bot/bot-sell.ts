@@ -1,134 +1,18 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import type { AiAnalysis, BotSettingsRow, ExitReason, MarketRegime, OpenTradeRow, SignalDecision } from "./types.ts";
-import { coinIdFromSymbol, toNumber, toStringValue } from "./utils.ts";
+import { toNumber, toStringValue } from "./utils.ts";
 import { normalizePriceForSymbol } from "./exchange-client.ts";
 import { createOrder } from "./binance.ts";
-import { insertTrade, updateProfileBalance, upsertBotPerformance } from "./trade-store.ts";
-import {
-  sendTelegramAlert,
-  sendTradeRowNotification,
-  sendTrailingStopAlert,
-} from "./notifier.ts";
-import {
-  escapeHtml,
-  formatTelegramPrice,
-  fromUsdCents,
-  resolveExchangeSkipped,
-  resolveGhostMode,
-  resolveTestMode,
-  toUsdCents,
-} from "./bot-shared.ts";
-import { persistRunTelemetry } from "./bot-telemetry.ts";
+import { handlePartialSellAndKeepOpen } from "./sell-partial.ts";
+import { closeTradeRowAfterSell } from "./sell-close.ts";
+import { resolveExchangeSkipped, resolveGhostMode, resolveTestMode } from "./bot-shared.ts";
+import { resolveSellFillFinancials } from "./sell-financials.ts";
+import { insertSellFillQualityLog } from "./sell-fill-quality.ts";
+import { notifyFullSellClose } from "./sell-notify-full-close.ts";
 import { botDebug, botError, botWarn } from "./bot-debug.ts";
-
-const BREAK_EVEN_TRIGGER_PCT = 1.5;
-
-export async function applyBreakEvenTrigger(params: {
-  supabase: ReturnType<typeof createClient>;
-  userId: string;
-  symbol: string;
-  openTrade: OpenTradeRow;
-  currentPrice: number;
-}) {
-  const { supabase, userId, symbol, openTrade, currentPrice } = params;
-  const openId = toStringValue(openTrade.id);
-  if (!openId) return { triggered: false, pnlPercent: 0 };
-
-  const entryPrice = toNumber(openTrade.entryPrice, 0);
-  const amount = toNumber(openTrade.amount, 0);
-  const initialValue = toNumber(
-    openTrade.value,
-    amount > 0 && entryPrice > 0 ? amount * entryPrice : 0,
-  );
-  if (entryPrice <= 0 || amount <= 0 || initialValue < 0.01) {
-    return { triggered: false, pnlPercent: 0 };
-  }
-
-  const pnl = (currentPrice - entryPrice) * amount;
-  const pnlPercentRaw = (pnl / initialValue) * 100;
-  const pnlPercent = Number.isFinite(pnlPercentRaw)
-    ? Number(pnlPercentRaw.toFixed(2))
-    : 0;
-  if (pnlPercent < BREAK_EVEN_TRIGGER_PCT) {
-    return { triggered: false, pnlPercent };
-  }
-
-  const currentStopLoss = toNumber((openTrade as any)?.stopLoss, 0);
-  const epsilon = 0.00000001;
-  if (currentStopLoss >= entryPrice - epsilon) {
-    return { triggered: false, pnlPercent };
-  }
-
-  const nowIso = new Date().toISOString();
-  const currentExtra = ((openTrade.extra as Record<string, unknown> | undefined) ?? {});
-  const stopLossTick = await normalizePriceForSymbol(symbol, entryPrice);
-  const updateResult = await supabase
-    .from("trades")
-    .update({
-      stopLoss: stopLossTick,
-      extra: {
-        ...currentExtra,
-        break_even_triggered: true,
-        break_even_triggered_at: nowIso,
-        break_even_trigger_pnl_pct: pnlPercent,
-      },
-    })
-    .eq("id", openId)
-    .select("id");
-
-  if (updateResult.error) {
-    throw new Error(
-      `Failed to arm break-even stopLoss (${openId}): ${updateResult.error.message}`,
-    );
-  }
-  const beRows = Array.isArray(updateResult.data) ? updateResult.data : [];
-  if (beRows.length !== 1) {
-    throw new Error(
-      `break_even update expected exactly 1 row for ${openId}, got ${beRows.length}`,
-    );
-  }
-  await sendTradeRowNotification({
-    event: "update",
-    trade: {
-      id: openId,
-      user_id: userId,
-      symbol,
-      type: toStringValue(openTrade.type) ?? "buy",
-      status: toStringValue(openTrade.status) ?? "open",
-      entryPrice,
-      value: initialValue,
-      notes: "Break-even stopLoss armed",
-      exit_reason: "break_even_stoploss_armed",
-    },
-    reason: `UPDATED: break-even armed at +${pnlPercent.toFixed(2)}%`,
-  });
-
-  await supabase.from("logs").insert([{
-    user_id: userId,
-    symbol,
-    level: "info",
-    source: "safety",
-    message: "break_even_stoploss_armed",
-    meta: {
-      event: "break_even_stoploss_armed",
-      open_trade_id: openId,
-      trigger_pnl_percent: pnlPercent,
-      stop_loss_set_to: stopLossTick,
-      market_price: Number(currentPrice.toFixed(8)),
-    },
-    created_at: nowIso,
-  }]);
-
-  botDebug("sellFlow", "break_even_armed", {
-    userId,
-    symbol,
-    openId,
-    triggerPnlPercent: pnlPercent,
-    stopLoss: stopLossTick,
-  });
-  return { triggered: true, pnlPercent };
-}
+import { releaseTradeExecutionLock } from "./trade-execution-lock.ts";
+export { applyBreakEvenTrigger } from "./sell-break-even.ts";
 
 export async function executeSellFlow(params: {
   supabase: ReturnType<typeof createClient>;
@@ -148,6 +32,7 @@ export async function executeSellFlow(params: {
   trailingStopTriggered: boolean;
   cycleId: string;
   marketRegime: MarketRegime;
+  signal?: AbortSignal;
 }) {
   const {
     supabase, row, userId, symbol, openTrade, snapshotPrice, technical, ai,
@@ -155,6 +40,7 @@ export async function executeSellFlow(params: {
     resolvedStartingBalance, shouldInitializeStartingBalance, trailingStopTriggered,
     cycleId,
     marketRegime,
+    signal,
   } = params;
   const openId = toStringValue(openTrade.id);
   const entryPrice = toNumber(openTrade.entryPrice, snapshotPrice);
@@ -235,8 +121,8 @@ export async function executeSellFlow(params: {
     amount,
     referencePrice: snapshotPrice,
     marketRegime,
-    maxSlippagePct: 0.2,
     isTestMode: createOrderTestShortCircuit,
+    signal,
   });
   if ((sellOrder as any)?.idempotent) {
     botWarn("sellFlow", "idempotent_duplicate_block", { userId, symbol, botId, cycleId });
@@ -246,11 +132,11 @@ export async function executeSellFlow(params: {
     };
   }
   const sellOrderId = toStringValue((sellOrder as any)?.exchange_order_id);
-  if (!exchangeSkipped) {
-    const fillPx = Number((sellOrder as any)?.average ?? (sellOrder as any)?.price);
-    if (Number.isFinite(fillPx) && fillPx > 0) {
-      exitPx = Number(fillPx.toFixed(8));
-    }
+  // Live (CCXT) and paper (`simulatePaperFill`) return the same `average`/`price`
+  // shape — read both so paper PnL includes the same fee/slippage haircut as live.
+  const fillPx = Number((sellOrder as any)?.average ?? (sellOrder as any)?.price);
+  if (Number.isFinite(fillPx) && fillPx > 0) {
+    exitPx = Number(fillPx.toFixed(8));
   }
 
   const bridgeResult = await supabase
@@ -271,153 +157,120 @@ export async function executeSellFlow(params: {
     );
   }
 
-  const soldBase = toNumber((sellOrder as any)?.amount, amount);
-  if (!Number.isFinite(soldBase) || soldBase <= 0) {
-    throw new Error(`sellFlow: invalid filled base qty after SELL for ${symbol}`);
-  }
-  if (soldBase < amount * 0.999) {
-    botWarn("sellFlow", "partial_sell_vs_open_row", {
-      userId,
-      symbol,
-      openAmount: amount,
-      soldBase,
-    });
-  }
-
-  const exitNotional = soldBase * exitPx;
-  const entryCost = soldBase * entryPrice;
-  const pnl = fromUsdCents(toUsdCents(exitNotional) - toUsdCents(entryCost));
-  const notionalForPct = soldBase * entryPrice;
-  const pnlPercentRaw = Number.isFinite(notionalForPct) && notionalForPct >= 0.01
-    ? (pnl / notionalForPct) * 100
-    : 0;
-  const pnlPercent = Number.isFinite(pnlPercentRaw)
-    ? Number(pnlPercentRaw.toFixed(2))
-    : 0;
-  const nextBalance = ghostMode
-    ? currentBalance
-    : fromUsdCents(toUsdCents(currentBalance) + toUsdCents(exitNotional));
-  const accountPnl = fromUsdCents(toUsdCents(nextBalance) - toUsdCents(resolvedStartingBalance));
-  const soldValueUsd = Number((soldBase * entryPrice).toFixed(2));
-
-  {
-    const closeResult = await supabase.from("trades").update({
-      status: pnl >= 0 ? "closed" : "stopped",
-      exitPrice: Number(exitPx.toFixed(8)),
-      pnl,
-      pnlPercent,
-      closed_at: closedAt,
-      exchange_order_id: sellOrderId,
-      exit_reason: effectiveExitReason ?? "signal_exit",
-      extra: {
-        ...(((openTrade as any)?.extra as Record<string, unknown> | undefined) ?? {}),
-        is_paper: isTestMode && !ghostMode,
-        is_ghost: ghostMode,
-        trade_mode: ghostMode ? "ghost" : isTestMode ? "paper" : "live",
-        execution_type: (sellOrder as any)?.execution_type ?? null,
-        actual_slippage_pct: (sellOrder as any)?.actual_slippage_pct ?? null,
-        smart_execution_meta: (sellOrder as any)?.smart_execution_meta ?? null,
-      },
-      notes: `Closed by Edge SELL | strategy=${strategyNotes} | tech=${technical} ai=${ai.trend}(${ai.ai_confidence})`,
-    })
-      .eq("id", openId)
-      .ilike("status", "open")
-      .select("id");
-    if (closeResult.error) {
-      throw new Error(`Failed to close open trade (${openId}): ${closeResult.error.message}`);
-    }
-    const updatedRows = Array.isArray(closeResult.data) ? closeResult.data : [];
-    if (updatedRows.length !== 1) {
-      throw new Error(
-        `sellFlow: close update expected exactly 1 row for open trade ${openId}, got ${updatedRows.length} — aborting SELL ledger insert (zombie risk: exchange may be flat while DB still open)`,
-      );
-    }
-    await sendTradeRowNotification({
-      event: "update",
-      trade: {
-        id: openId,
-        user_id: userId,
-        symbol,
-        type: "sell",
-        status: pnl >= 0 ? "closed" : "stopped",
-        entryPrice,
-        exitPrice: exitPx,
-        pnl,
-        value: soldValueUsd,
-        exit_reason: effectiveExitReason ?? "signal_exit",
-        notes: `Closed by Edge SELL | strategy=${strategyNotes}`,
-      },
-      reason: `SOLD: ${effectiveExitReason ?? "signal_exit"}`,
-    });
-  }
-
-  await insertTrade(supabase, {
-    user_id: userId,
-    signalId: `edge-sell-${Date.now()}`,
-    exchange_order_id: sellOrderId,
-    coinId: coinIdFromSymbol(symbol),
-    symbol,
-    type: "sell",
-    entryPrice: Number(entryPrice.toFixed(8)),
-    exitPrice: Number(exitPx.toFixed(8)),
-    amount: soldBase,
-    value: soldValueUsd,
-    status: pnl >= 0 ? "closed" : "stopped",
-    pnl,
-    pnlPercent,
-    opened_at: toStringValue(openTrade.opened_at) ?? closedAt,
-    closed_at: closedAt,
-    exit_reason: effectiveExitReason ?? "signal_exit",
-    extra: {
-      bot_id: botId ?? null,
-      cycle_id: cycleId,
-      is_paper: isTestMode && !ghostMode,
-      is_ghost: ghostMode,
-      trade_mode: ghostMode ? "ghost" : isTestMode ? "paper" : "live",
-      execution_type: (sellOrder as any)?.execution_type ?? null,
-      actual_slippage_pct: (sellOrder as any)?.actual_slippage_pct ?? null,
-      smart_execution_meta: (sellOrder as any)?.smart_execution_meta ?? null,
-    },
-    followedSignal: true,
-    notes: `Edge SELL | strategy=${strategyNotes} | tech=${technical} ai=${ai.trend}(${ai.ai_confidence})`,
-  }, `SOLD: ${effectiveExitReason ?? "signal_exit"} | ${strategyNotes}`);
-  if (!ghostMode) {
-    await updateProfileBalance(
-      supabase,
-      userId,
-      nextBalance,
-      shouldInitializeStartingBalance ? resolvedStartingBalance : undefined,
-    );
-    await upsertBotPerformance(supabase, { userId, symbol, pnl });
-  }
-  await persistRunTelemetry({
-    supabase,
-    userId,
-    symbol,
-    action: "sell",
-    detail: `SELL ${soldBase} @ ${exitPx.toFixed(8)} | pnl ${pnl.toFixed(2)}`,
-    balance: nextBalance,
-  });
-  if (trailingStopTriggered) {
-    await sendTrailingStopAlert({ symbol, pnlPercent });
-  }
-  await sendTelegramAlert(
-    (ghostMode ? `👻 <b>GHOST SELL</b> (DB only, no Binance)\n` : `🔴 <b>SELL ORDER</b>\n`) +
-      `<b>Symbol:</b> ${escapeHtml(symbol)}\n` +
-      `<b>Price:</b> ${formatTelegramPrice(exitPx)}\n` +
-      `<b>Trade PnL:</b> ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDT (${pnlPercent.toFixed(2)}%)\n` +
-      `<b>Balance After:</b> ${nextBalance.toFixed(2)} USDT\n` +
-      `<b>Total PnL:</b> ${accountPnl >= 0 ? "+" : ""}${accountPnl.toFixed(2)} USDT\n` +
-      `<b>Strategy:</b> ${escapeHtml(strategyNotes)}`,
-  );
-  botDebug("sellFlow", "sell_completed", {
-    userId,
-    symbol,
-    amount: soldBase,
+  const {
+    soldBase,
+    partialFill,
     pnl,
     pnlPercent,
     nextBalance,
-    orderId: sellOrderId ?? "n/a",
+    accountPnl,
+    soldValueUsd,
+  } = await resolveSellFillFinancials({
+    supabase,
+    userId,
+    symbol,
+    amount,
+    entryPrice,
+    exitPx,
+    sellOrder: sellOrder as any,
+    isTestMode,
+    ghostMode,
+    currentBalance,
+    resolvedStartingBalance,
+  });
+
+  await insertSellFillQualityLog({
+    supabase,
+    userId,
+    symbol,
+    amount,
+    soldBase,
+    snapshotPrice,
+    exitPx,
+    sellOrder: sellOrder as any,
+    ghostMode,
+    isTestMode,
+    partialFill,
+  });
+
+  if (partialFill) {
+    const partialResult = await handlePartialSellAndKeepOpen({
+      supabase,
+      userId,
+      symbol,
+      openId,
+      openTrade: openTrade as any,
+      amount,
+      soldBase,
+      entryPrice,
+      exitPx,
+      sellOrderId,
+      sellOrder: sellOrder as any,
+      isTestMode,
+      ghostMode,
+      shouldInitializeStartingBalance,
+      resolvedStartingBalance,
+      strategyNotes,
+      technical,
+      aiTrend: ai.trend,
+      aiConfidence: ai.ai_confidence,
+      effectiveExitReason,
+      currentBalance,
+      pnl,
+      pnlPercent,
+      botId,
+      cycleId,
+    });
+    return partialResult;
+  }
+
+  await closeTradeRowAfterSell({
+    supabase,
+    openId,
+    openTrade: openTrade as any,
+    userId,
+    symbol,
+    isTestMode,
+    ghostMode,
+    sellOrder: sellOrder as any,
+    strategyNotes,
+    technical,
+    aiTrend: ai.trend,
+    aiConfidence: ai.ai_confidence,
+    pnl,
+    pnlPercent,
+    closedAt,
+    sellOrderId,
+    exitPx,
+    entryPrice,
+    soldValueUsd,
+    effectiveExitReason,
+    skipTradeRowTelegram: true,
+  });
+
+  if (botId && cycleId) {
+    await releaseTradeExecutionLock({ supabase, botId, cycleId, side: "sell" });
+  }
+
+  // NOTE: We deliberately DO NOT insert a separate `type='sell'` ledger row.
+  // The buy row was already UPDATEd above with `status`, `exitPrice`, `pnl`,
+  // `pnlPercent`, `closed_at`, `exit_reason`, and the extra payload — that is
+  // the canonical record of the closed position. Inserting a paired sell row
+  // double-counted PnL and inflated win/loss/turnover metrics 2x.
+  await notifyFullSellClose({
+    supabase,
+    userId,
+    symbol,
+    strategyNotes,
+    ghostMode,
+    pnl,
+    pnlPercent,
+    nextBalance,
+    accountPnl,
+    exitPx,
+    soldBase,
+    trailingStopTriggered,
+    sellOrderId,
   });
   return {
     action: "sell" as const,

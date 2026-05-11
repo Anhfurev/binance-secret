@@ -152,12 +152,13 @@ export async function runRetentionCleanup(params: {
   const logsCutoffIso = new Date(now - logsRetentionDays * 24 * 60 * 60 * 1000).toISOString();
   const aiCacheCutoffIso = new Date(now - aiCacheRetentionHours * 60 * 60 * 1000).toISOString();
   const capitalReservationsCutoffIso = new Date(now - 5 * 60 * 1000).toISOString();
+  const logsAgeHours = Math.min(
+    24 * 120,
+    Math.max(24, Math.floor(logsRetentionDays * 24)),
+  );
 
-  const [logsDel, aiCacheDel, capitalDel, tracesDel, warRoomDel] = await Promise.all([
-    supabase
-      .from("logs")
-      .delete({ count: "exact" })
-      .lt("created_at", logsCutoffIso),
+  const [logsPrune, aiCacheDel, capitalDel, tracesDel, warRoomDel] = await Promise.all([
+    supabase.rpc("prune_logs_non_essential", { p_min_age_hours: logsAgeHours }),
     supabase
       .from("ai_cache")
       .delete({ count: "exact" })
@@ -176,6 +177,18 @@ export async function runRetentionCleanup(params: {
       .lt("created_at", logsCutoffIso),
   ]);
 
+  let logsPruneResult = logsPrune;
+  if (logsPrune.error) {
+    const fallback = await supabase
+      .from("logs")
+      .delete({ count: "exact" })
+      .lt("created_at", logsCutoffIso);
+    logsPruneResult = {
+      data: fallback.count ?? null,
+      error: fallback.error ?? logsPrune.error,
+    };
+  }
+
   await supabase.from("logs").insert([{
     level: "info",
     source: "health-check",
@@ -185,12 +198,15 @@ export async function runRetentionCleanup(params: {
       batch_id: batchId,
       logs_retention_days: logsRetentionDays,
       ai_cache_retention_hours: aiCacheRetentionHours,
-      logs_deleted: logsDel.count ?? null,
+      logs_deleted: logsPruneResult.error ? null : Number(logsPruneResult.data ?? 0),
+      logs_prune_mode: logsPrune.error && !logsPruneResult.error
+        ? "legacy_full_age_delete"
+        : (logsPrune.error ? "prune_failed" : "prune_logs_non_essential"),
       ai_cache_deleted: aiCacheDel.count ?? null,
       capital_reservations_deleted: capitalDel.count ?? null,
       bot_debug_traces_deleted: tracesDel.count ?? null,
       war_room_audits_deleted: warRoomDel.count ?? null,
-      logs_error: logsDel.error?.message ?? null,
+      logs_error: logsPruneResult.error?.message ?? null,
       ai_cache_error: aiCacheDel.error?.message ?? null,
       capital_reservations_error: capitalDel.error?.message ?? null,
       bot_debug_traces_error: tracesDel.error?.message ?? null,
@@ -202,7 +218,7 @@ export async function runRetentionCleanup(params: {
 
   return {
     ran: true,
-    logsDeleted: logsDel.error ? null : (logsDel.count ?? 0),
+    logsDeleted: logsPruneResult.error ? null : Number(logsPruneResult.data ?? 0),
     aiCacheDeleted: aiCacheDel.error ? null : (aiCacheDel.count ?? 0),
     capitalReservationsDeleted: capitalDel.error ? null : (capitalDel.count ?? 0),
     botDebugTracesDeleted: tracesDel.error ? null : (tracesDel.count ?? 0),

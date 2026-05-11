@@ -138,7 +138,8 @@ create table if not exists public.bot_settings (
 alter table if exists public.bot_settings
   add column if not exists trailing_stop_pct numeric(10, 2),
   add column if not exists model_status text,
-  add column if not exists model_status_until timestamptz;
+  add column if not exists model_status_until timestamptz,
+  add column if not exists min_profit_after_fees_pct numeric(10, 4);
 
 alter table if exists public.bot_settings
   alter column trailing_stop_pct set default 0.01;

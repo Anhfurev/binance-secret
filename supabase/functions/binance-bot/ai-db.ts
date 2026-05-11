@@ -4,6 +4,10 @@ import { SERVICE_ROLE_KEY, SUPABASE_URL } from "./constants.ts";
 import type { AiAnalysis } from "./types.ts";
 import { toNumber } from "./utils.ts";
 import { computeWeightedConfidence } from "./ai-scoring.ts";
+import {
+  shouldPersistAiCacheHitLog,
+  shouldPersistAiKeySuccessLog,
+} from "./log-policy.ts";
 
 export function getAiCacheClient() {
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) return null;
@@ -306,7 +310,7 @@ export async function patchAiQuotaState(
 
 export async function logAiCacheHit(symbol: string, ageMs: number) {
   const supabase = getAiCacheClient();
-  if (!supabase) return;
+  if (!supabase || !shouldPersistAiCacheHitLog()) return;
   const ageSeconds = Math.max(0, Math.round(ageMs / 1000));
   const result = await supabase.from("logs").insert([
     {
@@ -324,28 +328,87 @@ export async function logAiCacheHit(symbol: string, ageMs: number) {
   }
 }
 
-export async function logGeminiKeyLimit(index: number, totalKeys: number) {
+/**
+ * Per-process throttle for AI key rotation logs. We were inserting ~16k rows /
+ * day per provider into `public.logs`, dwarfing useful telemetry. Now we keep
+ * a per-key counter in memory and flush at most one row per provider+key per
+ * window with the aggregated count.
+ */
+const KEY_ROTATION_LOG_WINDOW_MS = 60_000;
+type KeyRotationStats = {
+  /** Wall-clock ms of the most recent flushed insert. */
+  lastEmitMs: number;
+  /** Hits suppressed since the last flush — included in the next flush's meta. */
+  suppressedSinceEmit: number;
+  totalKeys: number;
+};
+const keyRotationStats = new Map<string, KeyRotationStats>();
+
+/**
+ * Emit at most one `*_key_rotated` log per provider+keyIndex per
+ * `KEY_ROTATION_LOG_WINDOW_MS`. Hits inside the active window are counted and
+ * surfaced as `suppressed_in_prev_window` on the next emission so we don't
+ * lose the rotation rate signal.
+ */
+async function emitThrottledKeyRotation(params: {
+  provider: "gemini" | "groq";
+  index: number;
+  totalKeys: number;
+  message: string;
+  event: string;
+}) {
+  const { provider, index, totalKeys, message, event } = params;
   const supabase = getAiCacheClient();
   if (!supabase) return;
+  const now = Date.now();
+  const key = `${provider}:${index}`;
+  const prev = keyRotationStats.get(key);
+  if (prev && now - prev.lastEmitMs < KEY_ROTATION_LOG_WINDOW_MS) {
+    prev.suppressedSinceEmit += 1;
+    prev.totalKeys = totalKeys;
+    return;
+  }
+  const suppressedFromLastWindow = prev?.suppressedSinceEmit ?? 0;
+  keyRotationStats.set(key, {
+    lastEmitMs: now,
+    suppressedSinceEmit: 0,
+    totalKeys,
+  });
   const result = await supabase.from("logs").insert([
     {
       user_id: null,
       symbol: null,
       level: "warn",
       source: "ai",
-      message: `Key [${index}] hit limit, rotating to next key`,
-      meta: { event: "gemini_key_rotated", key_index: index, total_keys: totalKeys },
+      message,
+      meta: {
+        event,
+        key_index: index,
+        total_keys: totalKeys,
+        suppressed_in_prev_window: suppressedFromLastWindow,
+        window_ms: KEY_ROTATION_LOG_WINDOW_MS,
+      },
       created_at: new Date().toISOString(),
     },
   ]);
   if (result.error) {
-    console.warn(`[binance-bot] failed to log key rotation: ${result.error.message}`);
+    console.warn(`[binance-bot] failed to log ${provider} key rotation: ${result.error.message}`);
   }
+}
+
+export async function logGeminiKeyLimit(index: number, totalKeys: number) {
+  await emitThrottledKeyRotation({
+    provider: "gemini",
+    index,
+    totalKeys,
+    message: `Key [${index}] hit limit, rotating to next key`,
+    event: "gemini_key_rotated",
+  });
 }
 
 export async function logGeminiKeySuccess(index: number, totalKeys: number) {
   const supabase = getAiCacheClient();
-  if (!supabase) return;
+  if (!supabase || !shouldPersistAiKeySuccessLog()) return;
   const result = await supabase.from("logs").insert([
     {
       user_id: null,
@@ -363,27 +426,18 @@ export async function logGeminiKeySuccess(index: number, totalKeys: number) {
 }
 
 export async function logGroqKeyLimit(index: number, totalKeys: number) {
-  const supabase = getAiCacheClient();
-  if (!supabase) return;
-  const result = await supabase.from("logs").insert([
-    {
-      user_id: null,
-      symbol: null,
-      level: "warn",
-      source: "ai",
-      message: `[Groq Key #${index + 1}] LIMIT HIT - Rotating...`,
-      meta: { event: "groq_key_rotated", key_index: index, total_keys: totalKeys },
-      created_at: new Date().toISOString(),
-    },
-  ]);
-  if (result.error) {
-    console.warn(`[binance-bot] failed to log groq key rotation: ${result.error.message}`);
-  }
+  await emitThrottledKeyRotation({
+    provider: "groq",
+    index,
+    totalKeys,
+    message: `[Groq Key #${index + 1}] LIMIT HIT - Rotating...`,
+    event: "groq_key_rotated",
+  });
 }
 
 export async function logGroqKeySuccess(index: number, totalKeys: number) {
   const supabase = getAiCacheClient();
-  if (!supabase) return;
+  if (!supabase || !shouldPersistAiKeySuccessLog()) return;
   const result = await supabase.from("logs").insert([
     {
       user_id: null,

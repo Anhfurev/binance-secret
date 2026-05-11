@@ -8,12 +8,200 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-11 — PostgREST transient retries + `min_profit_after_fees_pct` DDL
+
+**Summary**
+
+- **`postgrest-errors.ts`:** classifies `PGRST002` / schema-cache outages; **`withPostgrestRetry`** on hot DB paths; Sentry fatals skip transients.
+- **`trade-store.ts`:** `loadOpenTrade` + `paper_adjust_demo_balance` retry on transient PostgREST.
+- **`index.ts`:** fatal boundary logs transients as `warn` (not `error`).
+- **DB:** applied `bot_settings.min_profit_after_fees_pct` on `emviaygygylosvmtsvlq` (API + Edge gate already wired).
+
+---
+
+## 2026-05-11 — Confidence-scaled BUY size (risk % base)
+
+**Summary**
+
+- **`trade-size-confidence.ts`:** scales BUY notional from blended AI + weighted confidence between **`CONFIDENCE_SIZE_MIN_SCALE`** (default `0.75`) and **`CONFIDENCE_SIZE_MAX_SCALE`** (default `1.4`) above the regime `min_ai_confidence` floor; fixed `trade_size_usd` / `TRADING_AMOUNT` bypass scaling.
+- **`buy-context.ts`:** applies confidence sizing after `risk_percent` base; MTF half-size still stacks via `executionUsdScale`.
+- **`trade-store.ts`:** PEPE no longer hard-capped at **`PEPE_TEST_TRADE_USD`** when size is unset — uses **`risk_percent`** like other symbols.
+- **`run-symbol-batch.ts`:** removed legacy `resolveConfidenceTierRiskPercent` row override (avoid double-sizing).
+
+---
+
+## 2026-05-11 — Telegram wallet on cron digest + reliable `/status`
+
+**Summary**
+
+- **`telegram-wallet-summary.ts`:** shared balance / PnL loader and digest formatting.
+- **`cron-telegram-digest.ts`:** each cron digest prepends balance, account PnL, and realized PnL (disable with **`TELEGRAM_CRON_DIGEST_WALLET=0`**).
+- **`telegram-poll.ts`:** Telegram **`getUpdates`** uses persisted **`poll_offset`** so **`/status`** / **`/wallet`** are not dropped from the 10-update window.
+- **`index.ts`:** wallet command handling runs at batch start and end (before digest).
+- **Tests:** digest section + status message formatting in **`tests/telegram_wallet_status_test.ts`**.
+
+---
+
+## 2026-05-11 — Edge ops bundle (locks RLS, observe, tests, binance split)
+
+**Summary**
+
+- **`trade_execution_locks`:** migration `20260518120000_trade_execution_locks_rls.sql` — RLS on; revoke `anon`/`authenticated` (service-role Edge only).
+- **`exec-observe.ts`:** opt-in `EXEC_OBSERVE=1` structured logs for locks, paper ticker null, sell fill qty mismatch, create-order idempotent skips.
+- **`binance-create-preflight.ts` / `binance-paper-order.ts`:** idempotency + lock claim and paper `createOrder` path split out of `binance.ts`.
+- **`market-data-timeout.ts`:** bounded CCXT timeout per snapshot fetch with restore on shared public exchange instance.
+- **`trade-execution-lock-config.ts`:** tunable stale/prune parsing + Deno unit tests; **`paper-fill-baseline.ts`** for paper book baseline tests.
+- **`docs/EDGE_OPERATIONS.md`**, **`npm run check`**, **`.github/workflows/ci.yml`** (lint + tsc + Deno tests).
+
+---
+
+## 2026-05-10 — Telegram: one alert per action, less trailing noise
+
+**Summary**
+
+- **BUY / full SELL:** Prefer **one** human-readable Telegram per fill (`buy-finalize`, `bot-sell` + `closeTradeRowAfterSell({ skipTradeRowTelegram: true })`); **`insertTrade`** supports **`skipTradeRowTelegram`** so the DB insert path does not also fire **`sendTradeRowNotification`**.
+- **PARTIAL SELL:** **`sell-partial.ts`** no longer sends a separate **`sendTradeRowNotification`** before the main partial-sell Telegram (one message only).
+- **Trailing high-watermark DB sync:** **`sendTradeRowNotification`** on every trailing persist is **off by default** (was very noisy). Opt in with **`TELEGRAM_TRAILING_ROW_UPDATE=1`** or **`VERBOSE_DB_LOGS=1`** (`log-policy.ts` + `bot.ts`).
+- **HOLD heartbeats:** Per-symbol HOLD Telegram remains behind **`TELEGRAM_HOLD_HEARTBEAT=1`** (see earlier **`log-policy`** work).
+- **Cron digest:** **`maybeSendCronDigestTelegram`** can be **fire-and-forget** from **`index.ts`** so Telegram RTT does not extend the Edge response as much; throttle with **`TELEGRAM_CRON_DIGEST_MS`** if needed.
+
+---
+
+## 2026-05-10 — Veto freshness + net TP after fees
+
+**Summary**
+
+- **`ai-veto.ts` + `ai-veto-helpers.ts`:** Groq veto payload is **`veto_window`**: last five **1m** and **15m** OHLCV bars plus computed short-horizon returns. **Fast path** (on by default, **`VETO_STALE_SIGNAL=0`** to disable) rejects before Groq on sharp 1m deterioration (`VETO_FAST_1M_5BAR_RETURN_PCT`, **`VETO_FAST_GAP_FROM_LAST_1M_CLOSE_PCT`**, three red 1m bars).
+- **`bot_settings.min_profit_after_fees_pct`:** migration `20260510180000_bot_settings_min_profit_after_fees.sql` — BUY blocked when estimated net TP (`take_profit_pct` minus round-trip taker %) is below the floor (null → **`DEFAULT_MIN_PROFIT_AFTER_FEES_PCT`** default `0.15`; column **`0`** disables). Gate off with **`MIN_PROFIT_AFTER_FEES_GATE=0`**.
+- **`constants.ts` / `paper-fill.ts`:** **`PAPER_TAKER_FEE_PCT`** env drives per-leg taker fee (default `0.001`) so paper round-trip matches the net-TP gate.
+- **`ai-llm-concurrency.ts`:** Gemini + Groq veto share **`withLlmConcurrency`** — **`LLM_MAX_CONCURRENT`** (default **2**, clamp 1–8).
+- **`index.ts`:** Multi-symbol path uses **`Promise.allSettled`** per symbol; TradingView webhook auth via **`TRADINGVIEW_WEBHOOK_SECRET`** + **`tv_webhook`/`tv_secret`** + symbol (see bullets in repo `index.ts`); **`lite_cycle`** skips stale-trade + retention for a shorter hot path.
+- **`bot.ts`:** Comment points parallel work to **`run-symbol-batch.ts`** / **`index.ts`**.
+
+---
+
+## 2026-05-18 — Paper/live execution parity (fees, bid/ask, locks)
+
+**Summary**
+
+- **`constants.ts`:** **`resolvePaperTakerFeeSimulationPct`** clamps **`PAPER_TAKER_FEE_PCT`** to **0.1%–0.2% per leg** (paper + net-TP math). Extra spread sim: **`PAPER_SPREAD_EXTRA_SIM_BPS`** (default **5** = 0.05%).
+- **`public-ticker.ts` + `paper-fill.ts`:** Paper/ghost fills use **public `fetchTicker` bid/ask** (buy → ask, sell → bid), then regime slippage + extra bps; metadata records `book_baseline_source`.
+- **`binance.ts`:** **`trade_execution_locks`** claim before exchange/paper order (with **`bot_id` + `cycle_id`**); release on paper/live order failure; buy lock released after **`insertTrade`** in **`buy-finalize.ts`**; sell lock after fill-quality log in **`bot-sell.ts`**. **`bot-buy-v2`** catch releases if finalize fails after a non-idempotent fill.
+- **Migration:** `20260517120000_trade_execution_locks.sql`.
+- **`strategy.ts`:** Comment clarifies indicator price vs execution layer.
+
+---
+
+## 2026-05-17 — Smaller `public.logs` writes (Edge)
+
+**Summary**
+
+- New **`log-policy.ts`**: by default **stop** high-volume inserts — **`decision-trace`** + **`cycle-summary`** (enable with **`DECISION_TRACE_DB_LOGS=1`** or **`VERBOSE_DB_LOGS=1`**), **`bot-cycle`** hold/skip rows from telemetry (**`TELEMETRY_BOT_CYCLE_LOG_ON_HOLD=1`** or verbose), **`bot-skip`** (**`BOT_SKIP_DB_LOGS=1`**), **`cron_batch_start`** (**`LOG_CRON_BATCH_START=1`**, default now **off**), **`ai` cache-hit** (**`AI_CACHE_HIT_DB_LOGS=1`**), **Gemini/Groq key success** info rows (**`AI_KEY_SUCCESS_DB_LOGS=1`**). **`execution-outcome`** stays on unless **`EXECUTION_OUTCOME_DB_LOGS=0`**. Errors / execution-quality / rate limits / key rotation (warn) unchanged.
+
+---
+
+## 2026-05-16 — Cron auth without `ALTER DATABASE`
+
+**Summary**
+
+- **42501:** Supabase SQL Editor often cannot run `alter database … set app.cron_secret`. Migration `20260516120000_cron_bot_secret_table.sql` adds **`public.bot_cron_http_secret`** (single row) + **`invoke_binance_bot_edge_heartbeat()`** (`SECURITY DEFINER`) and reschedules **`bot-heartbeat-all-symbols`** to call it. **One-time:** `insert into public.bot_cron_http_secret (id, secret) values (1, '<same as Edge BOT_SECRET>') on conflict (id) do update set secret = excluded.secret, updated_at = now();`
+
+---
+
+## 2026-05-15 — Telegram diagnostics
+
+**Summary**
+
+- **Cron gate:** `handleAuthenticatedCron` no longer requires **`TELEGRAM_BOT_TOKEN`** to run the bot — only **`GEMINI_API_KEY`** is mandatory. Missing Telegram only disables alerts (was blocking the whole cycle if token was unset in Edge).
+- **`notifier.ts`:** Accept **`TELEGRAM_BOT_CHAT_ID`** as alias for chat id; on Telegram **400 parse errors**, retry **plain text** (no `parse_mode`); failures also write **`logs`** (`source=telegram`, `message=telegram_send_failed`) for dashboard visibility.
+- **Manual test:** POST body **`{"telegram_ping":true}`** with valid **`x-binance-bot-secret`** sends one test message (no symbols required).
+- **Cron digest:** New module `cron-telegram-digest.ts` — default **`TELEGRAM_CRON_DIGEST=1`** sends a short **multi-symbol summary** Telegram at most every **`TELEGRAM_CRON_DIGEST_MS`** (default **10 min**) when the cron run actually scanned bots, so you see activity beyond `telegram_ping` / rare trade alerts. Set **`TELEGRAM_CRON_DIGEST=0`** to disable.
+
+---
+
+## 2026-05-13 — Paper equity race fix (parallel symbols)
+
+**Summary**
+
+- **Bug:** Cron runs **one Edge invocation per symbol in parallel** (`Promise.all` in `index.ts`). Paper mode **skipped** `reserve_buy_capital`, and `currentBalance` preferred **`account_balances`** telemetry rows over **`profiles.demo_balance`** — so concurrent BTC/SOL/PEPE batches could **double-count** wallet cash or drift vs realized `trades.pnl`.
+- **Fix:** Paper/live routing — **`resolveExchangeSkipped(row)`** uses **`profiles.demo_balance` only** for paper/ghost balance reads. **`reserve_buy_capital`** gains **`p_use_profile_demo_only`** (true for paper buys). **`paper_adjust_demo_balance`** RPC applies **locked atomic deltas** to `demo_balance` on paper/ghost BUY/SELL (replacing last-write-wins absolute updates). Migration `20260513120000_paper_balance_atomic.sql`.
+- **Live parity:** `buy-prep.ts` uses **`resolveTestMode(row)`** (from **`is_live_trading_enabled`**) instead of legacy **`is_test_mode`** for **`getUsdtBalance`** and returned **`isTestMode`**, so enabling live Binance routes real spot USDT for the same buy pipeline as paper routes simulated wallet + `demo_balance`.
+- **Deploy / ops:** Remote DB updated with **`reserve_buy_capital` (5-arg)** + **`paper_adjust_demo_balance`**; **`binance-bot`** deployed with **`--no-verify-jwt`**. **`logs`:** one-shot delete of rows **not** matching the `prune_logs_non_essential` keep-list (~3106 rows removed); errors/warns and execution/cycle traces retained.
+- **DB load:** `persistRunTelemetry` skips **`account_balances`** inserts on **HOLD/SKIP** by default (minute cron × symbols was flooding rows). Edge secret **`TELEMETRY_ACCOUNT_BALANCE_ON_HOLD=1`** restores old behavior. **`VACUUM ANALYZE logs`** + **`purge_internal_cron_and_net_http_retention()`** run when relieving pressure.
+
+---
+
+## 2026-05-12 — Cron fan-out fix (connection timeouts)
+
+**Summary**
+
+- **Root cause of SQL timeouts:** Legacy `setup-cron.sql` scheduled **six** `pg_cron` jobs every minute (two per symbol with `pg_sleep`), hammering Edge + Postgres. Migration `20260512100000_consolidate_cron_batch_prune.sql` **unschedules** those six jobs and adds **one** job `bot-heartbeat-all-symbols` posting `{"symbols":["BTCUSDT","SOLUSDT","PEPEUSDT"]}` once per minute (same behavior Edge already supports).
+- **Prune hardening:** `prune_logs_non_essential` rewritten as **batched deletes** (8000 rows per loop) with `statement_timeout = 600s` locally so a huge `logs` table cannot wedge the database in one transaction.
+
+---
+
+## 2026-05-10 — Selective log retention, cron overlap guard
+
+**Summary**
+
+- **DB:** New migration `20260510180000_prune_logs_non_essential.sql` adds `public.prune_logs_non_essential(p_min_age_hours)` (keeps errors/warns, execution-quality, decision/cycle summary, war-room, fills, health, stale-trade alerts; drops aged noise such as per-tick `runtime` spam). Daily pg_cron `daily-prune-noisy-logs` at 03:25 UTC. Edge retention (`health-check.ts`) now calls this RPC instead of deleting **all** logs older than N days.
+- **Edge:** One `cron_batch_start` row per batch instead of three `function_started` rows per cron. **Overlap guard fixed:** `inFlightCycleStartedAt` clears only when `handleAuthenticatedCron` finishes (not when the 90s timeout response is returned), so overlapping crons do not pile up while work is still running.
+- **DB load (2026-05-11):** `runStaleTradeGuard` throttled to default **15 min** per warm isolate (`STALE_TRADE_GUARD_INTERVAL_MS`). Optional `LOG_CRON_BATCH_START=0` disables the per-batch `cron_row` insert. Migration `idx_logs_created_at` for faster prunes. `scripts/emergency-db-relief.sql` for manual relief when the project is resource-bound.
+
+---
+
+## 2026-05-06 (afternoon) — Modular split, paper-fill exit-px bug, throttle bug
+
+**Summary**
+
+- **Paper-fill exit price bug (real money issue).** `bot-sell.ts` was reading the simulated fill `average`/`price` only when `!exchangeSkipped`. In paper mode `exchangeSkipped=true`, so the new `simulatePaperFill` fee + slippage was created but **discarded** — `exitPx` stayed at the snapshot price. Paper PnL was still optimistic vs live. Fixed: read `(sellOrder).average ?? .price` in both branches (paper and live return the same shape now).
+- **Key-rotation throttle bug.** `emitThrottledKeyRotation` reset `count` to `0` after every flush, so the next hit's `count` rose to `1`, the `count > 1` guard never tripped, and **every rotation still emitted** (defeating the throttle). Rewrote around a `lastEmitMs` lock with `suppressed_in_prev_window` carried into the next flush — at most one row per `provider:keyIndex` per 60s now.
+- **Modular split (300-line rule).** `bot-sell.ts` 404 → 298 lines (extracted `applyBreakEvenTrigger` to `sell-break-even.ts`, re-exported for callers). `bot-buy.ts` 1465 → 1099 lines (extracted helpers/MTF/logging into `buy-helpers.ts`, `buy-mtf.ts`, `buy-logging.ts`). The remaining `executeBuyFlow` is one logical unit (gates → sizing → order → record); splitting further would require threading 30+ closures through helper signatures and is left as logged tech debt.
+- **Deploy verified.** Edge function deployed at 07:03 UTC — new modules resolved cleanly. Post-deploy DB scan shows zero `*_key_rotated` rows in 5min (throttle holding) and the gates from earlier today still firing (`bot-skip`, `war-room-ghost`).
+- **Known minor issue (not fixed).** `effectiveExitReason` stays at the strategy `exit_reason` (often `"hold"`) when `decideHybridMatrix` triggers SELL via AI panic / order-book imbalance / strategy-signal-sell — recorded `exit_reason` is misleading in those cases. Cosmetic only (no PnL impact); fix requires extending the `ExitReason` enum.
+
+---
+
+## 2026-05-06 — Money-machine hygiene: paper === live, ATR TP/SL, log diet
+
+**Summary**
+
+- **Killed double-row bug.** `bot-sell.ts` no longer inserts a sibling `type='sell'` ledger row on close — the BUY row's UPDATE (status / exitPrice / pnl / pnlPercent / closed_at / exit_reason) is the canonical record. Old per-trade pairs in `trades` inflated PnL/turnover ~2x and `total_trades` in dashboards.
+- **Paper === Live.** New `paper-fill.ts` (`simulatePaperFill`) returns the same shape as `executeSmartLimitChaser` and applies real Binance behavior to test orders: Spot taker fee 0.1%, regime-keyed slippage (TRENDING 4 bps / NEUTRAL 6 / RANGING 8), `formatAmount` lot precision, `normalizePriceForSymbol` tick precision. `binance.ts createOrder` test branch now routes through it; flipping `is_live_trading_enabled=true` only changes the routing target (CCXT instead of mock).
+- **ATR-based TP + R:R floor.** `bot-buy.ts` adds `takeProfitDistanceUp(...)` so TP distance = `max(2.5×ATR, take_profit_pct × entry, 2.0 × SL_distance)`. With static `take_profit_pct=1.5` and `stop_loss_pct=1.0`, only 2 of 186 closed trades hit ROI in 14d; the new floor guarantees ≥2:1 reward:risk.
+- **Regime/ADX entry gate.** New `MIN_ADX_FOR_NON_TRENDING_BUY=18` skip in `bot-buy.ts`: refuse BUY when `regime != TRENDING` AND `adx14 < 18`. Backtest showed avg loss ~2× avg win in low-ADX windows.
+- **Settings tightened (DB).** `bot_settings`: `min_ai_confidence` 60→**70**, `min_ai_confidence_trending` **65**, `min_ai_confidence_ranging` **75**, `min_tech_score` 4→**6**, `take_profit_pct` 1.5→**3.0** (fallback only; ATR is primary), `max_open_trades` 3→**2**.
+- **Log diet.** `ai-db.ts` `logGeminiKeyLimit` / `logGroqKeyLimit` now share `emitThrottledKeyRotation(...)` with a 60s in-memory window per `provider:key`, emitting one aggregated row instead of every rotation. Last run had ~34k key-rotation rows in 7d (~35% of `public.logs`).
+- **DB hygiene.** `DROP INDEX ai_cache_symbol_created_at_idx` (duplicate). All 16 `auth_rls_initplan` policies on `account_balances` / `bot_settings` / `logs` / `profiles` / `trades` / `user_demo_workspaces` / `war_room_audits` rewritten with `(select auth.uid())` / `(select auth.role())`. New `pg_cron` job `daily-bot-log-cleanup` (`15 3 * * *`): logs >7d, `bot_debug_traces` >3d, `war_room_audits` >14d, `account_balances` >30d.
+- **Cleanup pass.** Manual delete of 33,856 Groq key-limit warn rows + 2,351 stale `bot_debug_traces` (>3d) + `VACUUM ANALYZE`.
+- **Risk note.** All changes are paper-mode safe (`is_live_trading_enabled=false`). Flip live only after seeing positive PnL ≥3 days with the new gates active.
+
+---
+
+## 2026-05-03 — AI verdict latency (Gemini queue + LLM timeouts)
+
+**Summary**
+- **Root cause**: `ai_verdict` time included (a) a **global queue** around the whole Gemini path **including Groq BUY veto**, so N parallel symbols stacked wall-clock; (b) **unbounded `fetch`** to Gemini/Groq/OpenAI on slow/hung responses.
+- **Fix**: Serialize only **`geminiAnalyze` HTTP** (`withGeminiHttpSerialized` in `ai-core.ts`); Groq veto, Groq primary, and OpenAI run **outside** that mutex. Per-request caps via **`mergeLlmAbortSignal`** + env: **`GEMINI_REQUEST_TIMEOUT_MS`** (default 12s), **`GROQ_REQUEST_TIMEOUT_MS`** (10s), **`GROQ_VETO_TIMEOUT_MS`** (8s), **`OPENAI_REQUEST_TIMEOUT_MS`** (14s) in `ai-models.ts` / `ai-veto.ts`. Gemini **AbortError** / timeout → try next key instead of hard stop.
+- **Logging**: `[PERF] ai_verdict slow` default warn moved **6s → 18s** (`PERF_AI_VERDICT_WARN_MS`); bot loop latency warn default **10s → 30s** (`BOT_LOOP_LATENCY_WARN_MS`).
+
+---
+
+## 2026-05-03 — Order-book imbalance exit + ghost `demo_balance`
+
+**Summary**
+- **Order Book Imbalance Exit** was firing when `imbalanceRatio < 0.4` with no minimum hold → noisy book could close a position almost immediately. Defaults are now **`imbalanceRatio < 0.32`**, **`90s`** minimum time after `opened_at`, and Edge env overrides **`ORDER_BOOK_IMBALANCE_EXIT_BELOW`**, **`ORDER_BOOK_IMBALANCE_MIN_HOLD_MS`** (wired in `run-symbol-batch.ts` → `decideHybridMatrix` in `index-decision.ts`).
+- **`formatCycleReason`** moved to **`index-decision-format.ts`** so `index-decision.ts` stays under the line limit.
+- Ghost/paper: **`profiles.demo_balance`** is updated on BUY/SELL when **`isTestMode || ghostMode`** (`bot-buy.ts` / `bot-sell.ts`); ghost BUY/SELL **`nextBalance`** uses the same cent-based debit/credit as non-ghost paths.
+
+---
+
 ## 2026-05-03 — Gemini 429 / duplicate cooldown logs (multi-symbol)
 
 **Summary**
-- Serialized **Gemini / Groq / OpenAI** provider calls per isolate (`ai-core.ts`
-  `withLlmProviderSerialized`) so parallel symbol batches no longer hit the same
-  API key at once → fewer duplicate **429 → key #N cooldown** lines.
+- Serialized **Gemini HTTP** per isolate (`ai-core.ts` `withGeminiHttpSerialized`;
+  later refined — see **AI verdict latency** entry) so parallel batches do not
+  hammer the same Gemini key → fewer duplicate **429 → key #N cooldown** lines.
 - `[PERF] ai_verdict slow` now warns only above **6s** by default (override with
   Edge env **`PERF_AI_VERDICT_WARN_MS`**, min 1500).
 

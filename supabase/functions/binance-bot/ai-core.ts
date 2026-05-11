@@ -31,23 +31,19 @@ import {
 import { resolvePortfolioBasketHint } from "./portfolio-basket.ts";
 
 export const GEMINI_QUOTA_COOLDOWN_MS = 10 * 60 * 1000;
-/**
- * One Gemini/Groq/OpenAI flight at a time per warm isolate. Parallel
- * `runSymbolBatch` (multi-symbol cron) used to hammer the same key → triple 429
- * and duplicate "moved to cooldown" logs.
- */
-let llmProviderChain = Promise.resolve();
-function withLlmProviderSerialized<T>(fn: () => Promise<T>): Promise<T> {
-  const run = () => fn();
-  const next = llmProviderChain.then(run, run);
-  llmProviderChain = next.then(
-    () => undefined,
-    () => undefined,
-  );
-  return next;
+
+function isAbortOrTimeoutError(error: unknown): boolean {
+  if (error instanceof Error && error.name === "AbortError") return true;
+  const m = String((error as Error)?.message ?? error).toLowerCase();
+  return m.includes("abort") || m.includes("timeout");
 }
 
-const AI_CACHE_WINDOW_MS = 60 * 1000;
+function readAiCacheWindowMs(): number {
+  const raw = String(Deno.env.get("AI_CACHE_WINDOW_MS") ?? "").trim();
+  const n = raw.length ? Number(raw) : NaN;
+  if (!Number.isFinite(n)) return 90 * 1000;
+  return Math.min(5 * 60 * 1000, Math.max(30_000, Math.floor(n)));
+}
 const AI_STALE_CACHE_FALLBACK_MS = 10 * 60 * 1000;
 const AI_UNAVAILABLE_LOG = "AI currently unavailable - switching to Technical-Only mode.";
 const SAFETY_LIMIT_FALLBACK = { signal: "HOLD", confidence: 100, reason: "limit_fallback" } as const;
@@ -90,9 +86,10 @@ export async function applySentimentVibeCheck(
   ai: AiAnalysis,
   snapshot: IndicatorSnapshot,
   scoreWeightsPack?: { tf: ScoreWeightsRecord; mr: ScoreWeightsRecord } | null,
+  prefetchedMeta?: Awaited<ReturnType<typeof collectSentimentVibe>>,
 ): Promise<AiAnalysis> {
   const rw = regimeResolvedWeights(snapshot.marketRegime, scoreWeightsPack);
-  const meta = await collectSentimentVibe(snapshot.symbol);
+  const meta = prefetchedMeta ?? await collectSentimentVibe(snapshot.symbol);
   const attachOnly = (penalty: boolean, factor: number): AiAnalysis => {
     const next: AiAnalysis = {
       ...ai,
@@ -174,7 +171,7 @@ export async function getAiAnalysis(
   const sw = options?.scoreWeights ?? null;
 
   if (!shouldBypassCache) {
-    const cached = await getRecentAiCache(symbol, AI_CACHE_WINDOW_MS);
+    const cached = await getRecentAiCache(symbol, readAiCacheWindowMs());
     if (cached) {
       const ageSeconds = Math.max(0, Math.round(cached.ageMs / 1000));
       await logAiCacheHit(symbol, cached.ageMs);
@@ -193,20 +190,29 @@ export async function getAiAnalysis(
     console.log(`[Cache Bypass] ${symbol} reason=${options?.cacheBypassReason ?? "manual_bypass"}`);
   }
 
-  const geminiResult = await withLlmProviderSerialized(() =>
-    tryGeminiFlow(geminiKeys, groqKeys, snapshot, payload, symbol, options?.signal)
+  const sentimentPrefetch = collectSentimentVibe(snapshot.symbol);
+  const geminiResult = await tryGeminiFlow(
+    geminiKeys,
+    groqKeys,
+    snapshot,
+    payload,
+    symbol,
+    options?.signal,
   );
-  if (geminiResult) return await applySentimentVibeCheck(geminiResult, snapshot, sw);
-  const groqResult = await withLlmProviderSerialized(() =>
-    tryGroqFlow(groqKeys, payload, symbol, options?.signal)
-  );
+  if (geminiResult) {
+    return await applySentimentVibeCheck(
+      geminiResult,
+      snapshot,
+      sw,
+      await sentimentPrefetch,
+    );
+  }
+  const groqResult = await tryGroqFlow(groqKeys, payload, symbol, options?.signal);
   if (groqResult) return await applySentimentVibeCheck(groqResult, snapshot, sw);
 
   if (openaiKey) {
     try {
-      const openAiResult = await withLlmProviderSerialized(() =>
-        openAiAnalyze(openaiKey, payload, options?.signal)
-      );
+      const openAiResult = await openAiAnalyze(openaiKey, payload, options?.signal);
       return await applySentimentVibeCheck(
         withAiTrace(openAiResult, {
           provider: "openai",
@@ -226,7 +232,7 @@ export async function getAiAnalysis(
 }
 
 export async function getRecentAiCacheForSymbol(symbol: string): Promise<AiAnalysis | null> {
-  const cached = await getRecentAiCache(symbol.toUpperCase(), AI_CACHE_WINDOW_MS);
+  const cached = await getRecentAiCache(symbol.toUpperCase(), readAiCacheWindowMs());
   if (!cached) return null;
   const ageSeconds = Math.max(0, Math.round(cached.ageMs / 1000));
   return withAiTrace(cached.analysis, {
@@ -264,17 +270,19 @@ async function tryGeminiFlow(
     const key = selected.key;
     try {
       const fresh = await geminiAnalyze(key, payload, signal);
-      const reviewed = await applyGroqBuyVeto({
-        groqKeys,
-        snapshot,
-        ai: fresh,
-        symbol,
-        currentGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0),
-        logGroqKeySuccess: (index) => logGroqKeySuccess(index, groqKeys.length),
-        logGroqKeyLimit: (index) => logGroqKeyLimit(index, groqKeys.length),
-        logGroqVeto,
-        signal,
-      });
+      const reviewed = fresh.action === "BUY"
+        ? await applyGroqBuyVeto({
+          groqKeys,
+          snapshot,
+          ai: fresh,
+          symbol,
+          currentGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0),
+          logGroqKeySuccess: (index) => logGroqKeySuccess(index, groqKeys.length),
+          logGroqKeyLimit: (index) => logGroqKeyLimit(index, groqKeys.length),
+          logGroqVeto,
+          signal,
+        })
+        : { ai: fresh, nextGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0) };
       await patchAiQuotaState({
         current_gemini_key_index: keyIndex,
         current_groq_key_index: reviewed.nextGroqKeyIndex,
@@ -311,6 +319,12 @@ async function tryGeminiFlow(
           });
         }
         return null;
+      }
+      if (isAbortOrTimeoutError(error)) {
+        console.warn(
+          `[AI DEBUG] Gemini timeout/abort key #${keyIndex + 1} for ${symbol} — trying next key`,
+        );
+        continue;
       }
       console.error("Gemini Failure:", msg);
       break;

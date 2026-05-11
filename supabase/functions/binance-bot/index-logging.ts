@@ -6,7 +6,11 @@ import {
   resolveMinTechScore,
   toStringValue,
 } from "./utils.ts";
-import { formatCycleReason } from "./index-decision.ts";
+import { formatCycleReason } from "./index-decision-format.ts";
+import {
+  shouldPersistDecisionAuditLogs,
+  shouldPersistExecutionOutcomeLog,
+} from "./log-policy.ts";
 
 const DECISION_REASON_MAP: Record<string, string> = {
   hold_low_conf: "AI Confidence too low",
@@ -86,6 +90,7 @@ export async function logDecisionTrace(params: {
   const mappedReason = safeFinalDecision === "BUY" && snapshot.imbalance_ratio > 2.5
     ? `${baseReason} (Order Book Imbalance Boost)`
     : baseReason;
+  if (!shouldPersistDecisionAuditLogs()) return;
   const result = await supabase.from("logs").insert([{
     user_id: userId ?? null,
     symbol,
@@ -155,6 +160,7 @@ export async function logCycleSummary(params: {
   console.log(
     `[AI FLOW] symbol=${symbol} provider=${aiProvider} path=${aiProviderPath} cache=${aiCacheStatus} final=${finalDecision}`,
   );
+  if (!shouldPersistDecisionAuditLogs()) return;
   const result = await supabase.from("logs").insert([{
     user_id: userId ?? null,
     symbol,
@@ -177,5 +183,52 @@ export async function logCycleSummary(params: {
   }]);
   if (result.error) {
     console.warn(`[binance-bot] cycle summary log skipped: ${result.error.message}`);
+  }
+}
+
+export async function logExecutionOutcome(params: {
+  supabase: ReturnType<typeof createClient>;
+  row: BotSettingsRow;
+  symbol: string;
+  intendedDecision: SignalDecision;
+  reason?: string;
+  resultAction?: string;
+  resultDetail?: string;
+  exitReason?: string;
+}) {
+  const {
+    supabase,
+    row,
+    symbol,
+    intendedDecision,
+    reason,
+    resultAction,
+    resultDetail,
+    exitReason,
+  } = params;
+  const userId = toStringValue((row as any)?.user_id);
+  const action = String(resultAction ?? "unknown");
+  if (!shouldPersistExecutionOutcomeLog()) return;
+  const result = await supabase.from("logs").insert([{
+    user_id: userId ?? null,
+    symbol,
+    level: "info",
+    source: "execution-outcome",
+    message: `execution_${action}`,
+    meta: {
+      intended_decision: intendedDecision,
+      reason: reason ?? "no_reason",
+      action,
+      detail: resultDetail ?? null,
+      exit_reason: exitReason ?? null,
+      matched_intent:
+        (intendedDecision === "BUY" && action === "buy") ||
+        (intendedDecision === "SELL" && action === "sell") ||
+        (intendedDecision === "HOLD" && (action === "hold" || action === "skip")),
+    },
+    created_at: new Date().toISOString(),
+  }]);
+  if (result.error) {
+    console.warn(`[binance-bot] execution outcome log skipped: ${result.error.message}`);
   }
 }

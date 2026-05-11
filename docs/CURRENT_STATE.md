@@ -49,6 +49,11 @@ These appear in `app/api/bot-settings/route.ts`, `supabase/functions/binance-bot
 - `is_aggressive_mode` (`boolean`)
 - `min_ai_confidence` (numeric; clamped in bot)
 - `max_open_trades` (integer)
+- `min_profit_after_fees_pct` (`numeric(10,4)`): minimum net TP % after estimated 2×taker fees before BUY; `0` disables; `NULL` uses Edge default (`DEFAULT_MIN_PROFIT_AFTER_FEES_PCT`, typically `0.15`). Migration `20260510180000_bot_settings_min_profit_after_fees.sql`.
+
+**Edge (optional, `binance-bot`):** `TRADINGVIEW_WEBHOOK_SECRET` — TradingView alert auth with `tv_webhook` + `tv_secret` (see `index.ts`). `LLM_MAX_CONCURRENT` — cap parallel Gemini/Groq calls (default 2).
+
+**DB (`trade_execution_locks`):** migration `20260517120000_trade_execution_locks.sql` — unique `(bot_id, cycle_id, side)` prevents duplicate `createOrder` when Edge retries before a `trades` row exists. Stale rows: `TRADE_EXEC_LOCK_STALE_MS` (default 180000); disable with `TRADE_EXEC_LOCK_DISABLE=1`.
 
 The API **upserts** with `onConflict: "user_id,symbol"`, which implies a **unique constraint on `(user_id, symbol)`** in the database you run against. That constraint is not created in `setup-trading-schema.sql` as checked into this repo—add it if upserts should match production.
 

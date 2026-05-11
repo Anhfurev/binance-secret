@@ -54,11 +54,13 @@ export async function runDebuggerHealthAndFix(params: {
     "BOT_SECRET",
     "GEMINI_API_KEY",
     "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_CHAT_ID",
     "BINANCE_API_KEY",
     "BINANCE_SECRET_KEY",
   ];
   const missingEnv = requiredEnv.filter((name) => !hasEnv(name));
+  if (!hasEnv("TELEGRAM_CHAT_ID") && !hasEnv("TELEGRAM_BOT_CHAT_ID")) {
+    missingEnv.push("TELEGRAM_CHAT_ID (or TELEGRAM_BOT_CHAT_ID)");
+  }
   if (missingEnv.length > 0) {
     issues.push({
       code: "MISSING_REQUIRED_ENV",

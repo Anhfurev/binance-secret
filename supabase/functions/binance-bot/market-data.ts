@@ -1,7 +1,7 @@
 // @ts-nocheck
 import ccxt from "ccxt";
 import { ATR_PERIOD, KLINE_INTERVAL, KLINE_LIMIT } from "./constants.ts";
-import type { Candle, IndicatorSnapshot } from "./types.ts";
+import type { IndicatorSnapshot } from "./types.ts";
 import { formatUnknownError, toNumber } from "./utils.ts";
 import {
   calculateAtrLast,
@@ -11,70 +11,31 @@ import {
   calculateRsi,
   computeEmaPair,
 } from "./indicators.ts";
+import { ccxtBinanceOptionsForRestGateway } from "./binance-rest-base.ts";
 import { toCcxtSymbol } from "./exchange-client.ts";
 import { sanitizeOhlcvCandles } from "./ohlcv-sanitizer.ts";
 import { getRegimeDiagnostics } from "./strategy.ts";
 import { computeVolatilityBurstGuard } from "./volatility-burst-predictor.ts";
 import { botError } from "./bot-debug.ts";
+import {
+  applyLatestZeroVolumeCarryForward,
+  normalizeCcxtTimeframe,
+  resolveLatestPrice,
+  trendFromCloses,
+  validateIndicatorsOrThrow,
+} from "./market-data-helpers.ts";
+import { withBoundedPublicExchangeTimeout } from "./market-data-timeout.ts";
 
 let sharedPublicBinance: InstanceType<typeof ccxt.binance> | null = null;
 
 function getSharedPublicBinance(): InstanceType<typeof ccxt.binance> {
   if (!sharedPublicBinance) {
-    sharedPublicBinance = new ccxt.binance({ enableRateLimit: true });
+    sharedPublicBinance = new ccxt.binance({
+      enableRateLimit: true,
+      ...ccxtBinanceOptionsForRestGateway(),
+    });
   }
   return sharedPublicBinance;
-}
-
-const INDICATOR_ZERO_EPSILON = 0;
-
-function applyLatestZeroVolumeCarryForward(candles: Candle[]): Candle[] {
-  if (!Array.isArray(candles) || candles.length < 2) return candles;
-  const patched = [...candles];
-  const latest = patched[patched.length - 1];
-  if (!latest || !Number.isFinite(latest.volume) || latest.volume !== 0) {
-    return patched;
-  }
-  const previous = patched[patched.length - 2];
-  if (!previous || !Number.isFinite(previous.close) || previous.close <= 0) {
-    return patched;
-  }
-  const lastThreeVolumes = patched
-    .slice(Math.max(0, patched.length - 4), patched.length - 1)
-    .map((c) => toNumber(c?.volume, 0))
-    .filter((v) => Number.isFinite(v) && v >= 0);
-  const avgLastThreeVolume = lastThreeVolumes.length
-    ? lastThreeVolumes.reduce((sum, v) => sum + v, 0) / lastThreeVolumes.length
-    : 0;
-  patched[patched.length - 1] = {
-    ...latest,
-    open: previous.close,
-    high: Math.max(previous.close, latest.high, latest.low, latest.close),
-    low: Math.min(previous.close, latest.high, latest.low, latest.close),
-    close: previous.close,
-    volume: Number(avgLastThreeVolume.toFixed(12)),
-  };
-  return patched;
-}
-
-function validateIndicatorsOrThrow(params: {
-  symbol: string;
-  latestPrice: number;
-  emaFast: number;
-  emaSlow: number;
-  ema200: number;
-}) {
-  const { symbol, latestPrice, emaFast, emaSlow, ema200 } = params;
-  const checks = [
-    { key: "latestPrice", value: latestPrice },
-    { key: "emaFast", value: emaFast },
-    { key: "emaSlow", value: emaSlow },
-    { key: "ema200", value: ema200 },
-  ];
-  const bad = checks.find((c) => !Number.isFinite(c.value) || c.value <= INDICATOR_ZERO_EPSILON);
-  if (bad) {
-    throw new Error(`CRITICAL_INDICATOR_ZERO:${symbol}:${bad.key}`);
-  }
 }
 
 export async function fetchIndicatorSnapshotFromMarket(
@@ -86,10 +47,6 @@ export async function fetchIndicatorSnapshotFromMarket(
     throw new Error(`CYCLE_ABORTED:${symbol}`);
   }
   const exchange = getSharedPublicBinance();
-  if (signal) {
-    // Respect outer cycle abort by bounding CCXT request timeout.
-    exchange.timeout = Math.min(exchange.timeout ?? 10000, 8_000);
-  }
   const ccxtSymbol = toCcxtSymbol(symbol);
   const ohlcvLimit = Math.max(KLINE_LIMIT, 220);
   const [
@@ -99,34 +56,35 @@ export async function fetchIndicatorSnapshotFromMarket(
     ohlcv4h,
     orderBook,
     ticker,
-  ] = await Promise.all([
-    exchange.fetchOHLCV(
-      ccxtSymbol,
-      normalizeCcxtTimeframe(KLINE_INTERVAL),
-      undefined,
-      ohlcvLimit,
-    ),
-    exchange.fetchOHLCV(
-      ccxtSymbol,
-      "15m",
-      undefined,
-      Math.max(100, Math.floor(ohlcvLimit / 2)),
-    ),
-    exchange.fetchOHLCV(
-      ccxtSymbol,
-      "1h",
-      undefined,
-      80,
-    ),
-    exchange.fetchOHLCV(
-      ccxtSymbol,
-      "4h",
-      undefined,
-      48,
-    ),
-    exchange.fetchOrderBook(ccxtSymbol, 5),
-    exchange.fetchTicker(ccxtSymbol),
-  ]);
+  ] = await withBoundedPublicExchangeTimeout(exchange, signal, () =>
+    Promise.all([
+      exchange.fetchOHLCV(
+        ccxtSymbol,
+        normalizeCcxtTimeframe(KLINE_INTERVAL),
+        undefined,
+        ohlcvLimit,
+      ),
+      exchange.fetchOHLCV(
+        ccxtSymbol,
+        "15m",
+        undefined,
+        Math.max(100, Math.floor(ohlcvLimit / 2)),
+      ),
+      exchange.fetchOHLCV(
+        ccxtSymbol,
+        "1h",
+        undefined,
+        80,
+      ),
+      exchange.fetchOHLCV(
+        ccxtSymbol,
+        "4h",
+        undefined,
+        48,
+      ),
+      exchange.fetchOrderBook(ccxtSymbol, 5),
+      exchange.fetchTicker(ccxtSymbol),
+    ]));
   if (signal?.aborted) throw new Error(`CYCLE_ABORTED:${symbol}`);
 
   const candles = applyLatestZeroVolumeCarryForward(
@@ -155,6 +113,8 @@ export async function fetchIndicatorSnapshotFromMarket(
     ccxtSymbol,
     tickerLast: ticker?.last,
     fallbackClose: closes[closes.length - 1] ?? 0,
+    streamSymbol: symbol,
+    signal,
   });
   const rsi = calculateRsi(closes);
   const rsi15m = calculateRsi(closes15m);
@@ -213,6 +173,18 @@ export async function fetchIndicatorSnapshotFromMarket(
     (ticker as { quoteVolume?: unknown })?.quoteVolume,
     NaN,
   );
+  const volume24hBase = toNumber(
+    (ticker as { baseVolume?: unknown })?.baseVolume ?? (ticker as { volume?: unknown })?.volume,
+    NaN,
+  );
+  const bestBid = toNumber(orderBook?.bids?.[0]?.[0], 0);
+  const bestAsk = toNumber(orderBook?.asks?.[0]?.[0], 0);
+  const spreadMid = bestBid > 0 && bestAsk > 0
+    ? (bestBid + bestAsk) / 2
+    : 0;
+  const spreadBps = spreadMid > 0 && bestAsk >= bestBid
+    ? Number((((bestAsk - bestBid) / spreadMid) * 10_000).toFixed(4))
+    : null;
   const totalBidVolume = (orderBook?.bids ?? [])
     .slice(0, 5)
     .reduce((sum, level) => sum + Math.max(0, toNumber(level?.[1], 0)), 0);
@@ -251,6 +223,10 @@ export async function fetchIndicatorSnapshotFromMarket(
     volume24hQuote: Number.isFinite(volume24hQuote) && volume24hQuote >= 0
       ? volume24hQuote
       : null,
+    volume24hBase: Number.isFinite(volume24hBase) && volume24hBase >= 0
+      ? volume24hBase
+      : null,
+    spreadBps,
     avgVolume1m,
     rsi,
     rsi15m,
@@ -273,42 +249,3 @@ export async function fetchIndicatorSnapshotFromMarket(
     throw e;
   }
 }
-
-function trendFromCloses(
-  closes: number[],
-  emaPeriod: number,
-): "bull" | "bear" | "flat" {
-  if (closes.length < Math.max(emaPeriod + 2, 8)) return "flat";
-  const p = Math.min(emaPeriod, closes.length - 1);
-  const ema = calculateEma(closes, p);
-  const c = closes[closes.length - 1];
-  const tol = Math.max(c * 0.0005, ema * 0.0005);
-  if (c > ema + tol) return "bull";
-  if (c < ema - tol) return "bear";
-  return "flat";
-}
-
-function normalizeCcxtTimeframe(timeframe: string) {
-  if (!timeframe) return "1m";
-  return timeframe;
-}
-
-async function resolveLatestPrice(params: {
-  exchange: ccxt.binance;
-  ccxtSymbol: string;
-  tickerLast: unknown;
-  fallbackClose: number;
-}) {
-  const { exchange, ccxtSymbol, tickerLast, fallbackClose } = params;
-  const fromTicker = toNumber(tickerLast, 0);
-  if (fromTicker > 0) return fromTicker;
-
-  const fromRecentClose = toNumber(fallbackClose, 0);
-  if (fromRecentClose > 0) return fromRecentClose;
-
-  // Fallback path for rare ticker=0 glitches on fast-moving symbols.
-  const lastCandle = await exchange.fetchOHLCV(ccxtSymbol, "1m", undefined, 1);
-  const lastClose = toNumber(lastCandle?.[0]?.[4], 0);
-  return lastClose > 0 ? lastClose : 0;
-}
-
