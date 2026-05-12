@@ -212,6 +212,7 @@ export async function processBot(params: {
         snapshot.latestPrice,
         trailingStopPct,
         snapshot.atr14,
+        snapshot.symbol,
       );
       if (trailingState.shouldPersistHigh && toStringValue(openTrade.id)) {
         await supabase
@@ -252,7 +253,7 @@ export async function processBot(params: {
       }
       if (trailingState.shouldExit && canFireDbStopLoss(openTrade)) {
         effectiveDecision = "SELL";
-        effectiveExitReason = "stoploss_hit";
+        effectiveExitReason = "trailing_stop_hit";
         trailingStopTriggered = true;
       }
     }

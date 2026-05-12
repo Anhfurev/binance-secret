@@ -3,6 +3,7 @@ import type { createClient } from "npm:@supabase/supabase-js@2";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BotSettingsRow, OpenTradeRow } from "./types.ts";
 import { ATR_STOP_TRAIL_MULTIPLIER } from "./constants.ts";
+import { widenTrailingStopBelowHigh } from "./buy-helpers.ts";
 import { clamp, toNumber } from "./utils.ts";
 
 export const DEFAULT_STRATEGY_NOTES = "unknown_strategy|no_reason";
@@ -143,6 +144,7 @@ export function buildTrailingStopState(
   trailingStopPct: number,
   /** When > 0, trail distance below high = `ATR_STOP_TRAIL_MULTIPLIER × atr14` (volatility-adjusted). */
   atr14?: number,
+  symbol = "",
 ) {
   const extra = (openTrade.extra as Record<string, unknown> | undefined) ?? {};
   const entryPrice = toNumber(openTrade.entryPrice, currentPrice);
@@ -163,14 +165,20 @@ export function buildTrailingStopState(
   const rawTrailingStop = useAtr
     ? highestPrice - atrTrailMult * Number(atr14)
     : highestPrice * (1 - trailingStopPct);
+  const widenedTrailingStop = widenTrailingStopBelowHigh(
+    highestPrice,
+    rawTrailingStop,
+    trailingStopPct,
+    symbol,
+  );
   const currentPnlPct = entryPrice > 0
     ? ((currentPrice - entryPrice) / entryPrice) * 100
     : 0;
   const breakEvenFloor = entryPrice * 1.001;
   const breakEvenGuardActive = currentPnlPct >= 1;
   const stopPrice = breakEvenGuardActive
-    ? Math.max(rawTrailingStop, breakEvenFloor)
-    : rawTrailingStop;
+    ? Math.max(widenedTrailingStop, breakEvenFloor)
+    : widenedTrailingStop;
   const storedStopPrice = toNumber(extra.trailing_stop_price, 0);
   const shouldExit = currentPrice <= stopPrice && currentPrice < highestPrice;
   const shouldPersistStop = Math.abs(stopPrice - storedStopPrice) > 0.0000001;

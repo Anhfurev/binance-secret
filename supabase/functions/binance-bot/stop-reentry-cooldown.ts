@@ -71,7 +71,7 @@ export async function blockedByPostStoplossCooldown(params: {
     .eq("user_id", params.userId)
     .eq("symbol", params.symbol)
     .in("status", ["closed", "stopped"])
-    .eq("exit_reason", "stoploss_hit")
+    .in("exit_reason", ["stoploss_hit", "trailing_stop_hit"])
     .gte("closed_at", sinceIso)
     .order("closed_at", { ascending: false })
     .limit(1)
@@ -134,7 +134,7 @@ export async function blockedByRecentStopChurn(params: {
     .eq("user_id", params.userId)
     .eq("symbol", params.symbol)
     .in("status", ["closed", "stopped"])
-    .eq("exit_reason", "stoploss_hit")
+    .in("exit_reason", ["stoploss_hit", "trailing_stop_hit"])
     .gte("closed_at", sinceIso);
   if (error) throw error;
   if ((count ?? 0) >= maxStops) {

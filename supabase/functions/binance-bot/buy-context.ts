@@ -13,7 +13,7 @@ import { botWarn } from "./bot-debug.ts";
 import { computeWeightedConfidenceForRegime, getResolvedScoreWeightsPack } from "./ai-scoring.ts";
 import { passesMeanReversionBuyGate } from "./regime-detection.ts";
 import { resolveBuyFlowMtfContext } from "./buy-mtf.ts";
-import { MIN_ADX_FOR_NON_TRENDING_BUY, ONE_H_BEARISH_MAX_CONFIDENCE } from "./buy-helpers.ts";
+import { MIN_ADX_FOR_NON_TRENDING_BUY, ONE_H_BEARISH_MAX_CONFIDENCE, readGrinderMinWeightedEntry } from "./buy-helpers.ts";
 import { safeInsertLog } from "./buy-logging.ts";
 import { applySymbolTradeUsdFloor } from "./trade-size-floor.ts";
 import { resolveGhostMode, resolveTestMode } from "./bot-shared.ts";
@@ -60,6 +60,37 @@ export async function resolveBuyContextAndSizing(params: {
     : 0;
   const ghostMode = resolveGhostMode(row);
   const isPaperOnly = !Boolean((row as any)?.is_live_trading_enabled);
+  const minWeightedEntry = readGrinderMinWeightedEntry();
+  if (!demoProbePaper && rawWeighted < minWeightedEntry) {
+    return {
+      skipDetail:
+        `BUY blocked: weighted conviction ${rawWeighted.toFixed(2)}% < grinder floor ${minWeightedEntry}%`,
+      rawWeighted,
+      resolvedWeights,
+      regime,
+      scoreWeightProfile,
+      ghostMode,
+      isPaperOnly,
+      demoProbePaper,
+    };
+  }
+  if (
+    !demoProbePaper &&
+    String(ai.action ?? "").toUpperCase() === "HOLD" &&
+    rawWeighted < minWeightedEntry + 5
+  ) {
+    return {
+      skipDetail:
+        `BUY blocked: model action HOLD with weighted conviction ${rawWeighted.toFixed(2)}% below ${minWeightedEntry + 5}%`,
+      rawWeighted,
+      resolvedWeights,
+      regime,
+      scoreWeightProfile,
+      ghostMode,
+      isPaperOnly,
+      demoProbePaper,
+    };
+  }
   const hasDrawdownBreach = Number.isFinite(drawdownPct) && drawdownPct > maxDrawdownLimitPct;
   if (hasDrawdownBreach) {
     botWarn("buyFlow", "drawdown_breach_block", {

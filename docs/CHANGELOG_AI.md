@@ -8,7 +8,15 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
-## 2026-05-12 — Senior trader activity (paper)
+## 2026-05-12 — Grinder trail floor + entry conviction
+
+**Summary**
+
+- **`buy-helpers.ts` / `bot-shared.ts`:** meme trailing cannot be tighter than **1.5%** below the high; ATR trails widen to DB/pct floor.
+- **`bot.ts`:** trailing exits persist as **`trailing_stop_hit`** (not `stoploss_hit`).
+- **`buy-context.ts`:** BUY blocked when weighted conviction is below grinder floor (default **62**, env `GRINDER_MIN_WEIGHTED_CONFIDENCE`); HOLD model action blocked unless conviction clears floor + 5.
+
+---
 
 **Summary**
 

@@ -11,6 +11,41 @@ export const MIN_1H_BARS_FOR_LIVE_MTF = 201;
 /** When 1h is bearish (close < EMA200 on 1h series), weighted score cannot exceed this before War Room. */
 export const ONE_H_BEARISH_MAX_CONFIDENCE = 55;
 
+/** Default minimum weighted score to open a BUY (override via `GRINDER_MIN_WEIGHTED_CONFIDENCE`). */
+export const DEFAULT_GRINDER_MIN_WEIGHTED_ENTRY = 62;
+
+/** Meme symbols: trailing stop cannot be tighter than this fraction below the high. */
+export const DEFAULT_MEME_MIN_TRAILING_PCT = 0.015;
+
+export function readGrinderMinWeightedEntry(): number {
+  const raw = String(Deno.env.get("GRINDER_MIN_WEIGHTED_CONFIDENCE") ?? "").trim();
+  const n = raw.length ? Number(raw) : DEFAULT_GRINDER_MIN_WEIGHTED_ENTRY;
+  if (!Number.isFinite(n)) return DEFAULT_GRINDER_MIN_WEIGHTED_ENTRY;
+  return clamp(n, 50, 95);
+}
+
+export function readMemeTrailingPctFloor(symbol: string): number {
+  const sym = String(symbol ?? "").toUpperCase();
+  if (!/PEPE|BONK|WIF|FLOKI|MEME/.test(sym)) return 0;
+  const raw = String(Deno.env.get("MEME_MIN_TRAILING_PCT") ?? "").trim();
+  const n = raw.length ? Number(raw) : DEFAULT_MEME_MIN_TRAILING_PCT * 100;
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_MEME_MIN_TRAILING_PCT;
+  return clamp(n > 1 ? n / 100 : n, 0.005, 0.2);
+}
+
+/** Long: never trail tighter than the configured percent floor below the high. */
+export function widenTrailingStopBelowHigh(
+  highestPrice: number,
+  candidateStop: number,
+  trailingStopPct: number,
+  symbol: string,
+): number {
+  if (!(highestPrice > 0) || !Number.isFinite(candidateStop)) return candidateStop;
+  const floorPct = Math.max(trailingStopPct, readMemeTrailingPctFloor(symbol));
+  const floorPrice = Number((highestPrice * (1 - floorPct)).toFixed(8));
+  return Math.min(candidateStop, floorPrice);
+}
+
 /** Skip BUY when ADX(14) below this AND regime != TRENDING — chop bleeds via tight SLs. */
 export const MIN_ADX_FOR_NON_TRENDING_BUY = 18;
 /** TP must be >= this multiple of the stop-loss distance (positive R:R). */
