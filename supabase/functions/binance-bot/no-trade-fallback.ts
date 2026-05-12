@@ -4,9 +4,9 @@ import type { createClient } from "npm:@supabase/supabase-js@2";
 const NO_TRADE_FALLBACK_AFTER_DAYS = 10;
 
 function readPaperNoTradeFallbackHours(): number {
-  const raw = String(Deno.env.get("PAPER_NO_TRADE_FALLBACK_HOURS") ?? "4").trim();
+  const raw = String(Deno.env.get("PAPER_NO_TRADE_FALLBACK_HOURS") ?? "2").trim();
   const n = Number(raw);
-  if (!Number.isFinite(n) || n < 1) return 4;
+  if (!Number.isFinite(n) || n < 1) return 2;
   return Math.min(72, Math.floor(n));
 }
 
@@ -108,8 +108,8 @@ export async function resolveNoTradeFallback(params: {
   // Controlled relaxation:
   // - confidence floor: at most -10 points, hard floor 55
   // - technical floor: at most -2 points, hard floor 3
-  const adjustedMinAiConfidence = clamp(minAiConfidence - 10, 55, 95);
-  const adjustedMinTechScore = clamp(minTechScore - 2, 3, 10);
+  const adjustedMinAiConfidence = clamp(minAiConfidence - 12, 48, 95);
+  const adjustedMinTechScore = clamp(minTechScore - 2, 4, 10);
 
   return {
     active: true,

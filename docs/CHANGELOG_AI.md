@@ -8,6 +8,19 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-12 — Aggressive paper entry unblock (sleepy bot)
+
+**Summary**
+
+- **`cycle-decider.ts`:** aggressive/sandbox runs invoke AI without micro-move gating; smart-filter low-volume no longer sleeps AI in aggressive paper; ranging regime no longer raises confidence above global `min_ai_confidence`.
+- **`index-decision.ts`:** softer aggressive AI/tech floors for `aggressive_buy_confirmed` paths.
+- **`strategy.ts`:** EMA50 tolerance + ranging pullback BUY when micro structure aligns.
+- **`no-trade-fallback.ts`:** paper inactivity fallback after 2h (was 4h); relaxed floors to 48 / tech 4.
+- **DB (`bot_settings`):** `min_ai_confidence` 55, ranging 54, trending 52, `min_tech_score` 5 for autopilot rows.
+- **Deploy:** `binance-bot` edge function redeployed (`--no-verify-jwt`).
+
+---
+
 ## 2026-05-12 — Paper wallet reconcile + entry quality gates
 
 **Summary**

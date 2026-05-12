@@ -57,16 +57,31 @@ export function checkEntryConditions(snapshot: IndicatorSnapshot): EntryCheckRes
   const lastVolume = Number(c.at(-1)?.volume ?? 0);
   const avgVolume1m = Number(snapshot.avgVolume1m ?? 0);
   const volumeConfirmed = avgVolume1m > 0 && lastVolume > avgVolume1m * 1.2;
+  const priceNearEma50 =
+    snapshot.ema50 > 0 &&
+    snapshot.latestPrice >= snapshot.ema50 * 0.992;
   const bullishMomentum =
     snapshot.rsi >= 36 &&
     snapshot.rsi <= 72 &&
     snapshot.rsi15m >= 42 &&
     gtWithTolerance(snapshot.emaFast, snapshot.emaSlow) &&
-    gteWithTolerance(snapshot.latestPrice, snapshot.ema50) &&
+    (gteWithTolerance(snapshot.latestPrice, snapshot.ema50) || priceNearEma50) &&
     risingMicro &&
     volumeConfirmed;
   if (bullishMomentum) {
     return { signal: "BUY", strategy_reason: "strategy_trend_momentum_entry" };
+  }
+
+  const rangingPullback =
+    snapshot.marketRegime === "RANGING" &&
+    snapshot.rsi >= 30 &&
+    snapshot.rsi <= 50 &&
+    risingMicro &&
+    snapshot.bbLower > 0 &&
+    snapshot.latestPrice <= snapshot.bbLower * 1.015 &&
+    gtWithTolerance(snapshot.emaFast, snapshot.emaSlow * 0.998);
+  if (rangingPullback) {
+    return { signal: "BUY", strategy_reason: "strategy_ranging_pullback_entry" };
   }
 
   // Freqtrade BbandRsi populate_exit_trend:

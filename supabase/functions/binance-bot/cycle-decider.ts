@@ -52,13 +52,15 @@ export async function decideSymbolCycleOutcome(params: {
   const minVolume24hQuote = resolveMinVolume24hQuote(row as Record<string, unknown>);
   const isGhostExecution = resolveGhostMode(row);
   const isSandboxMode = isTestMode || isGhostExecution;
-  let shouldInvokeAi = (aggressiveModeEnabled ? true : technicalScore >= 3) && shouldRunAiCheck(snapshot, lastAiPriceBySymbol);
+  let shouldInvokeAi =
+    (aggressiveModeEnabled || technicalScore >= 3) &&
+    (aggressiveModeEnabled || shouldRunAiCheck(snapshot, lastAiPriceBySymbol));
   if (mm.skipAi) shouldInvokeAi = false;
   const bbRange = snapshot.bbUpper - snapshot.bbLower;
   const bbPosition = Number.isFinite(bbRange) && bbRange > 0 ? (snapshot.latestPrice - snapshot.bbLower) / bbRange : 0;
   const lastCandle = snapshot.candles5?.at(-1);
   const smartNoise = evaluateSmartNoiseFilter({ snapshot, lastCandleVolume: Number(lastCandle?.volume ?? 0), hasOpenTrade: Boolean(openTrade), isGhostExecution });
-  if (smartNoise.sleepAi) {
+  if (smartNoise.sleepAi && !aggressiveModeEnabled && !isSandboxMode) {
     shouldInvokeAi = false;
     console.log("[SMART_FILTER]", { symbol, userId, sleep_ai: 1, volume_1m: smartNoise.volume1m, avg_1m_from_24h: smartNoise.avgVolume1mFrom24h });
   }
@@ -67,6 +69,10 @@ export async function decideSymbolCycleOutcome(params: {
   const volumeSpike = Boolean(Number(snapshot.avgVolume1m) > 0 && Number(lastCandle?.volume ?? 0) >= Number(snapshot.avgVolume1m) * volumeSpikeMultiplier);
   const sessionAware = resolveSessionAwareMinAiConfidence({ baseMinAiConfidence: minAiConfidence, avgVolume1m: Number(snapshot.avgVolume1m), lastCandleVolume: Number(lastCandle?.volume ?? 0) });
   minAiConfidence = sessionAware.adjustedMinAiConfidence;
+  if (aggressiveModeEnabled) {
+    const baseMin = toNumber(row.min_ai_confidence, minAiConfidence);
+    minAiConfidence = Math.min(minAiConfidence, baseMin);
+  }
   const noTradeFallback = await resolveNoTradeFallback({ supabase, userId, symbol, hasOpenTrade: Boolean(openTrade), minAiConfidence, minTechScore: minTech, paperOnly: isSandboxMode && !Boolean((row as any)?.is_live_trading_enabled) });
   if (noTradeFallback.active) {
     minAiConfidence = noTradeFallback.adjustedMinAiConfidence;

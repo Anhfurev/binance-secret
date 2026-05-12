@@ -100,9 +100,12 @@ export function decideHybridMatrix(params: {
     };
   };
   const aiConf = Number(ai.ai_confidence);
+  const aggressiveAiFloor = aggressiveModeEnabled
+    ? Math.max(42, minAiConfidence - 15)
+    : minAiConfidence;
   const hasAggressiveConfidence =
     Number.isFinite(aiConf) &&
-    aiConf >= minAiConfidence &&
+    aiConf >= aggressiveAiFloor &&
     ai.trend !== "bearish" &&
     ai.groq_verdict !== "REJECT";
   const hasExtremeAggressiveException =
@@ -111,7 +114,7 @@ export function decideHybridMatrix(params: {
     Number.isFinite(imbalanceRatio) &&
     imbalanceRatio > 0.8;
   const aggressiveTechFloor = aggressiveModeEnabled
-    ? Math.max(7, minTechnicalScore + 2)
+    ? Math.max(5, minTechnicalScore + 1)
     : Math.max(6, minTechnicalScore + 1);
   const passesAggressiveTechGate =
     technicalScore >= aggressiveTechFloor || hasExtremeAggressiveException;
