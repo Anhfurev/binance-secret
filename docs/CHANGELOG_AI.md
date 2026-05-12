@@ -8,7 +8,15 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
-## 2026-05-12 — Grinder trail floor + entry conviction
+## 2026-05-12 — Daily salary audit (00:00 UTC)
+
+**Summary**
+
+- **`scripts/daily-salary-audit/`:** Node audit (24h PnL, win rate, hold time, blockers, symbol rollup) + Telegram ITHM report.
+- **`.github/workflows/daily-salary-audit.yml`:** GitHub Actions schedule at 00:00 UTC.
+- **`supabase/functions/daily-salary-audit`:** Edge entry + migration `20260520120000_daily_salary_audit_cron.sql` for pg_cron.
+
+---
 
 **Summary**
 
