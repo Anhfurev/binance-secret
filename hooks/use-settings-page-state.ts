@@ -70,6 +70,7 @@ export function useSettingsPageState(t: TFn) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...(authUser?.id ? { user_id: authUser.id } : {}),
+          symbol: scalpingSettings.symbol,
           min_ai_confidence: scalpingSettings.minAiConfidence,
           max_open_trades: scalpingSettings.maxOpenTrades,
           risk_percent: scalpingSettings.maxPositionSizePct,

@@ -24,6 +24,7 @@ export interface AppSettings {
 }
 
 export const defaultScalpingSettings: ScalpingSettings = {
+  symbol: "BTCUSDT",
   timeframe: "3m",
   minAiConfidence: 58,
   rsiBuyThreshold: 30,

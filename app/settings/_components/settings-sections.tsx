@@ -149,6 +149,20 @@ export function ScalpingPresetControls(props: {
   return (
     <>
       <Select
+        value={scalpingSettings.symbol}
+        onValueChange={(value) => {
+          setScalpingSettings((prev) => ({ ...prev, symbol: value }));
+          markChanged();
+        }}
+      >
+        <SelectTrigger><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="BTCUSDT">BTCUSDT</SelectItem>
+          <SelectItem value="PEPEUSDT">PEPEUSDT</SelectItem>
+          <SelectItem value="SOLUSDT">SOLUSDT</SelectItem>
+        </SelectContent>
+      </Select>
+      <Select
         value={scalpingSettings.timeframe}
         onValueChange={(value) => {
           setScalpingSettings((prev) => ({ ...prev, timeframe: value as typeof prev.timeframe }));

@@ -176,6 +176,8 @@ export type ScalpingTimeframe = "1m" | "3m" | "5m";
 export type ScalpingDirection = "long" | "short";
 
 export interface ScalpingSettings {
+  /** `bot_settings.symbol` row updated when syncing scalping tunables. */
+  symbol: string;
   timeframe: ScalpingTimeframe;
   minAiConfidence: number;
   /** RSI below this favors long entries (bot `rsi_buy_threshold`). */

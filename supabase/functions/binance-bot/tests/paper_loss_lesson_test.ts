@@ -15,9 +15,6 @@ Deno.test("paper loss lesson bumps confidence after recent losses", async () => 
           in() {
             return this;
           },
-          eq() {
-            return this;
-          },
           gte() {
             return Promise.resolve({ count: 2, error: null });
           },
