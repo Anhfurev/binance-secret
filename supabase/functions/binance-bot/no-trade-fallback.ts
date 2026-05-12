@@ -4,9 +4,9 @@ import type { createClient } from "npm:@supabase/supabase-js@2";
 const NO_TRADE_FALLBACK_AFTER_DAYS = 10;
 
 function readPaperNoTradeFallbackHours(): number {
-  const raw = String(Deno.env.get("PAPER_NO_TRADE_FALLBACK_HOURS") ?? "2").trim();
+  const raw = String(Deno.env.get("PAPER_NO_TRADE_FALLBACK_HOURS") ?? "1").trim();
   const n = Number(raw);
-  if (!Number.isFinite(n) || n < 1) return 2;
+  if (!Number.isFinite(n) || n < 1) return 1;
   return Math.min(72, Math.floor(n));
 }
 

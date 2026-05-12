@@ -6,7 +6,7 @@ Deno.test("money machine hard stop fires on deep drawdown", () => {
   const hint = evaluateMoneyMachineExits({
     openTrade: {
       entryPrice: 100,
-      opened_at: new Date(now - 200_000).toISOString(),
+      opened_at: new Date(now - 250_000).toISOString(),
       extra: {},
     } as any,
     price: 99.4,

@@ -18,7 +18,7 @@ import { safeExecute } from "./safe-execute.ts";
 import { formatUnknownError, resolveMinAiConfidenceForRegime, resolveMinTechScore, resolveMinVolume24hQuote, toNumber, toStringValue } from "./utils.ts";
 import { collectPreflightVetoChecks, formatVetoDetailsPayload, tryMtfOnlyHighConfidenceHalfBuy } from "./veto-transparency.ts";
 import { evaluateSmartNoiseFilter } from "./smart-filter.ts";
-import { buildPaperScenarioAiStub } from "./paper-scenario-snapshot.ts";
+import { resolvePaperLossLesson } from "./paper-loss-lesson.ts";
 
 export async function decideSymbolCycleOutcome(params: {
   row: any;
@@ -74,11 +74,30 @@ export async function decideSymbolCycleOutcome(params: {
     minAiConfidence = Math.min(minAiConfidence, baseMin);
   }
   const noTradeFallback = await resolveNoTradeFallback({ supabase, userId, symbol, hasOpenTrade: Boolean(openTrade), minAiConfidence, minTechScore: minTech, paperOnly: isSandboxMode && !Boolean((row as any)?.is_live_trading_enabled) });
+  const isPaperTrading = isSandboxMode && !Boolean((row as any)?.is_live_trading_enabled);
   if (noTradeFallback.active) {
     minAiConfidence = noTradeFallback.adjustedMinAiConfidence;
     minTech = noTradeFallback.adjustedMinTechScore;
     aggressiveModeEnabled = aggressiveModeEnabled || noTradeFallback.forceAggressiveMode;
     console.log("[NO_TRADE_FALLBACK]", { symbol, userId, days_since_last_buy: noTradeFallback.daysSinceLastBuy, adjusted_min_ai_confidence: minAiConfidence, adjusted_min_tech_score: minTech, force_aggressive: noTradeFallback.forceAggressiveMode ? 1 : 0 });
+  }
+  let paperLossLesson: Awaited<ReturnType<typeof resolvePaperLossLesson>> | null = null;
+  if (isPaperTrading && !openTrade && userId !== "unknown") {
+    paperLossLesson = await resolvePaperLossLesson({
+      supabase,
+      userId,
+      symbol,
+      regime: String(snapshot.marketRegime ?? "NEUTRAL"),
+      rsi: Number(snapshot.rsi),
+      latestPrice: Number(snapshot.latestPrice),
+      bbLower: Number(snapshot.bbLower),
+    });
+    if (paperLossLesson.confidenceBump > 0) {
+      minAiConfidence = Math.min(95, minAiConfidence + paperLossLesson.confidenceBump);
+    }
+    if (paperLossLesson.reason) {
+      console.log("[PAPER_LOSS_LESSON]", { symbol, userId, ...paperLossLesson });
+    }
   }
   const strategySignal = !openTrade && strategyEntry.signal === "SELL" ? "HOLD" : strategyEntry.signal;
   const strategyFailDetail = strategyEntry.signal === "BUY" ? null : `FAIL_STRATEGY:${String(strategyEntry.strategy_fail_detail ?? "NO_BUY")}`;
@@ -137,13 +156,17 @@ export async function decideSymbolCycleOutcome(params: {
   let buyReentryBlocked = false;
   let buyReentryReason: string | undefined;
   if (!openTrade && userId !== "unknown" && !paperScenario) {
-    const guard = await blockedByBuyReentryGuards({ supabase, userId, symbol });
+    const guard = await blockedByBuyReentryGuards({ supabase, userId, symbol, paperOnly: isPaperTrading });
     buyReentryBlocked = guard.blocked;
     buyReentryReason = guard.reason;
   }
   const aiConfidence = Number(ai.ai_confidence);
-  const forceBuyTechFloor = Math.max(7, minTech + 2);
-  const forceBuyConfidenceFloor = minAiConfidence + readForceBuyConfidenceDelta() + 5;
+  const forceBuyTechFloor = isPaperTrading && aggressiveModeEnabled
+    ? Math.max(minTech, 5)
+    : Math.max(7, minTech + 2);
+  const forceBuyConfidenceFloor = isPaperTrading && aggressiveModeEnabled
+    ? minAiConfidence + 2
+    : minAiConfidence + readForceBuyConfidenceDelta() + 5;
   const shouldForceBuy = !buyReentryBlocked && strategySignal === "BUY" && groqVerdictUpper !== "REJECT" && ai.action === "BUY" && Number.isFinite(aiConfidence) && aiConfidence >= forceBuyConfidenceFloor && technicalScore >= forceBuyTechFloor && ai.trend !== "bearish";
   const forceBuyReason = shouldForceBuy ? `force_buy_override: ai_confidence=${Number.isFinite(aiConfidence) ? aiConfidence : "n/a"}, tech_score=${technicalScore} (ai>=${forceBuyConfidenceFloor} && tech>=${forceBuyTechFloor} && groq!=REJECT && trend!=bearish && action=BUY)` : null;
   if (shouldForceBuy) {
@@ -158,6 +181,10 @@ export async function decideSymbolCycleOutcome(params: {
       decision = "BUY";
       reason = forceBuyReason ?? reason;
     }
+  }
+  if (paperLossLesson?.blockBuy && decision === "BUY") {
+    decision = "HOLD";
+    reason = paperLossLesson.reason ?? "hold_paper_loss_lesson";
   }
   if (btcOverbought && symbol !== "BTCUSDT" && decision === "BUY") {
     if (technicalScore > 8) reason = `${reason ?? "buy"}|btc_overbought_strong_buy_override`;

@@ -8,7 +8,15 @@ export function readSymbolCooldownMinutes(): number {
   return Math.min(24 * 60, Math.floor(n));
 }
 
-export function readPostStoplossReentryCooldownMs(): number {
+export function readPostStoplossReentryCooldownMs(paperOnly = false): number {
+  if (paperOnly) {
+    const raw = String(Deno.env.get("PAPER_POST_STOP_REENTRY_COOLDOWN_MS") ?? "480000").trim();
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) {
+      return Math.min(24 * 60 * 60 * 1000, Math.floor(n));
+    }
+    return 8 * 60 * 1000;
+  }
   const raw = String(Deno.env.get("POST_STOPLOSS_REENTRY_COOLDOWN_MS") ?? "").trim();
   if (raw.length) {
     const n = Number(raw);
@@ -37,8 +45,9 @@ export async function blockedByPostStoplossCooldown(params: {
   supabase: ReturnType<typeof createClient>;
   userId: string;
   symbol: string;
+  paperOnly?: boolean;
 }): Promise<{ blocked: boolean; reason?: string }> {
-  const cooldownMs = readPostStoplossReentryCooldownMs();
+  const cooldownMs = readPostStoplossReentryCooldownMs(Boolean(params.paperOnly));
   if (cooldownMs <= 0) return { blocked: false };
   const sinceIso = new Date(Date.now() - cooldownMs).toISOString();
   const { data, error } = await params.supabase
@@ -64,8 +73,9 @@ export async function blockedByRecentLosingClose(params: {
   supabase: ReturnType<typeof createClient>;
   userId: string;
   symbol: string;
+  paperOnly?: boolean;
 }): Promise<{ blocked: boolean; reason?: string }> {
-  const cooldownMs = readPostStoplossReentryCooldownMs();
+  const cooldownMs = readPostStoplossReentryCooldownMs(Boolean(params.paperOnly));
   if (cooldownMs <= 0) return { blocked: false };
   const sinceIso = new Date(Date.now() - cooldownMs).toISOString();
   const { data, error } = await params.supabase
@@ -117,6 +127,7 @@ export async function blockedByBuyReentryGuards(params: {
   supabase: ReturnType<typeof createClient>;
   userId: string;
   symbol: string;
+  paperOnly?: boolean;
 }): Promise<{ blocked: boolean; reason?: string }> {
   const stopCooldown = await blockedByPostStoplossCooldown(params);
   if (stopCooldown.blocked) return stopCooldown;

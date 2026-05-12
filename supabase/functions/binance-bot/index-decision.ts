@@ -288,7 +288,7 @@ export function decideHybridMatrix(params: {
     aggressiveModeEnabled &&
     !hasOpenTrade &&
     Number.isFinite(imbalanceRatio) &&
-    imbalanceRatio > 3.0 &&
+    imbalanceRatio > 1.15 &&
     hasAggressiveConfidence
   ) {
     if (!passesAggressiveTechGate) {

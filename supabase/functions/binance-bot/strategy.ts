@@ -47,6 +47,16 @@ export function checkEntryConditions(snapshot: IndicatorSnapshot): EntryCheckRes
     return { signal: "BUY", strategy_reason: "freqtrade_bbrsi_entry_confirmed" };
   }
 
+  const oversoldBounce =
+    snapshot.rsi > 0 &&
+    snapshot.rsi < 38 &&
+    snapshot.bbLower > 0 &&
+    snapshot.latestPrice <= snapshot.bbLower * 1.012 &&
+    gtWithTolerance(snapshot.emaFast, snapshot.emaSlow * 0.995);
+  if (oversoldBounce) {
+    return { signal: "BUY", strategy_reason: "strategy_oversold_bounce_entry" };
+  }
+
   // Trend-following momentum entry for low-liquidity sandbox periods:
   // relaxed to avoid "perfect alignment" starvation in paper/ghost runs.
   const c = snapshot.candles5 ?? [];
