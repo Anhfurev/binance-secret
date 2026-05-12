@@ -84,6 +84,20 @@ export function checkEntryConditions(snapshot: IndicatorSnapshot): EntryCheckRes
     return { signal: "BUY", strategy_reason: "strategy_ranging_pullback_entry" };
   }
 
+  const structureRecovery =
+    snapshot.rsi >= 42 &&
+    snapshot.rsi <= 62 &&
+    risingMicro &&
+    gtWithTolerance(snapshot.emaFast, snapshot.emaSlow) &&
+  (
+    priceNearEma50 ||
+    (snapshot.bbLower > 0 && snapshot.latestPrice <= snapshot.bbLower * 1.02)
+  ) &&
+    volumeConfirmed;
+  if (structureRecovery) {
+    return { signal: "BUY", strategy_reason: "strategy_structure_recovery_entry" };
+  }
+
   // Freqtrade BbandRsi populate_exit_trend:
   // (rsi > 70) => exit_long
   if (snapshot.rsi > 70) {

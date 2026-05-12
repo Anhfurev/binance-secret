@@ -114,7 +114,7 @@ export function decideHybridMatrix(params: {
     Number.isFinite(imbalanceRatio) &&
     imbalanceRatio > 0.8;
   const aggressiveTechFloor = aggressiveModeEnabled
-    ? Math.max(5, minTechnicalScore + 1)
+    ? minTechnicalScore
     : Math.max(6, minTechnicalScore + 1);
   const passesAggressiveTechGate =
     technicalScore >= aggressiveTechFloor || hasExtremeAggressiveException;
@@ -299,10 +299,21 @@ export function decideHybridMatrix(params: {
     return { decision: "BUY", reason: "aggressive_buy_confirmed_orderbook" };
   }
 
+  const aggressiveBuyIntent =
+    ai.action === "BUY" ||
+    (
+      ai.action === "HOLD" &&
+      (
+        ai.trend_alignment ||
+        technicalScore >= aggressiveTechFloor ||
+        (Number.isFinite(imbalanceRatio) && imbalanceRatio >= 0.55)
+      )
+    );
+
   if (
     aggressiveModeEnabled &&
     !hasOpenTrade &&
-    ai.action === "BUY" &&
+    aggressiveBuyIntent &&
     hasAggressiveConfidence &&
     technicalScore >= minTechnicalScore
   ) {
@@ -311,7 +322,10 @@ export function decideHybridMatrix(params: {
     }
     const rangingHoldAg = rangingMeanReversionBlock();
     if (rangingHoldAg) return rangingHoldAg;
-    return { decision: "BUY", reason: "aggressive_buy_confirmed" };
+    return {
+      decision: "BUY",
+      reason: ai.action === "BUY" ? "aggressive_buy_confirmed" : "aggressive_buy_confirmed_fallback",
+    };
   }
 
   return { decision: "HOLD", reason: "hold_no_strategy_buy" };

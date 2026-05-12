@@ -68,8 +68,9 @@ echo "==> Uploading setup script..."
 run_scp "${ROOT}/scripts/vultr-stable-gateway-setup.sh" "${REMOTE}:~/vultr-stable-gateway-setup.sh"
 
 echo "==> Uploading WebSocket stream hub..."
-run_ssh "rm -rf ~/gateway-stream-hub && mkdir -p ~/gateway-stream-hub"
+run_ssh "rm -rf ~/gateway-stream-hub && mkdir -p ~/gateway-stream-hub ${REMOTE_DIR}/scripts/gateway-stream-hub"
 run_scp "${ROOT}/scripts/gateway-stream-hub/"* "${REMOTE}:~/gateway-stream-hub/"
+run_ssh "cp -R ~/gateway-stream-hub/. ${REMOTE_DIR}/scripts/gateway-stream-hub/"
 
 echo "==> Running nginx gateway setup on VM..."
 run_ssh "chmod +x ~/vultr-stable-gateway-setup.sh && BINANCE_GATEWAY_SECRET='${BINANCE_GATEWAY_SECRET}' bash ~/vultr-stable-gateway-setup.sh"

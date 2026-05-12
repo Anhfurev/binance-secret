@@ -12,6 +12,9 @@ DENO_BIN="$(command -v deno)"
 echo "deno=${DENO_BIN}"
 
 HUB_SRC="${HUB_SRC:-/root/binance-gateway/scripts/gateway-stream-hub}"
+if [[ ! -d "${HUB_SRC}" && -d /root/gateway-stream-hub ]]; then
+  HUB_SRC="/root/gateway-stream-hub"
+fi
 HUB_DIR="${HUB_DIR:-/opt/binance-stream-hub}"
 [[ -d "${HUB_SRC}" ]] || {
   echo "Missing hub source: ${HUB_SRC}" >&2

@@ -21,6 +21,18 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-12 — Live aggressive entry + gateway hub sync
+
+**Summary**
+
+- **`index-decision.ts`:** aggressive paper can confirm buys when AI returns `HOLD` but trend/OB/tech align; tech floor matches `min_tech_score`.
+- **`strategy.ts`:** structure-recovery BUY when micro trend + volume confirm under EMA200.
+- **`cycle-decider.ts`:** wide-spread smart-filter no longer blocks paper/sandbox buys.
+- **Gateway scripts:** `apply-vultr-gateway.sh` mirrors stream hub into `scripts/gateway-stream-hub`; `fix-vultr-stream-hub-deno.sh` falls back to `~/gateway-stream-hub`.
+- **Tests:** decision matrix aggressive fallback case (66 Deno tests).
+
+---
+
 ## 2026-05-12 — Paper wallet reconcile + entry quality gates
 
 **Summary**

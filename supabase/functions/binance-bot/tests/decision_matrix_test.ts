@@ -57,6 +57,30 @@ Deno.test("strategy BUY with low-confidence AI HOLD stays hold", () => {
   assertEquals(result.reason, "strategy_buy_rejected_low_conviction");
 });
 
+Deno.test("aggressive fallback confirms buy on aligned AI HOLD", () => {
+  const result = decideHybridMatrix({
+    strategySignal: "HOLD",
+    hasOpenTrade: false,
+    strategyExitTriggered: false,
+    aggressiveModeEnabled: true,
+    technical: "HOLD",
+    technicalScore: 5,
+    rsi: 52,
+    imbalanceRatio: 0.6,
+    marketRegime: "TRENDING",
+    latestPrice: 100,
+    bbLower: 98,
+    isBreakout: false,
+    isBelowEma200: true,
+    ai: { ...baseAi, ai_confidence: 52, action: "HOLD" },
+    minAiConfidence: 55,
+    minTechnicalScore: 5,
+    symbol: "SOLUSDT",
+  });
+  assertEquals(result.decision, "BUY");
+  assertEquals(result.reason, "aggressive_buy_confirmed_fallback");
+});
+
 Deno.test("tie-breaker accepts technical score above 8", () => {
   const result = decideHybridMatrix({
     strategySignal: "BUY",

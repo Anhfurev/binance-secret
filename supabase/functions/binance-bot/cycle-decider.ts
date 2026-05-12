@@ -178,7 +178,7 @@ export async function decideSymbolCycleOutcome(params: {
       executionUsdScale = mtfHalf.executionUsdScale;
     }
   }
-  if (smartNoise.blockBuy && decision === "BUY" && !openTrade) {
+  if (smartNoise.blockBuy && decision === "BUY" && !openTrade && !isSandboxMode) {
     decision = "HOLD";
     reason = smartNoise.blockReason ?? "hold_smart_filter_wide_spread";
     executionUsdScale = undefined;
