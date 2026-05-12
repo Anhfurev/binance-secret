@@ -54,6 +54,19 @@ type TechnicalPulseItem = {
   note: string;
 };
 
+type BotPerformanceSummary = {
+  totalTrades: number;
+  winCount: number;
+  lossCount: number;
+  winRatePct: number;
+  totalPnlUsd: number;
+};
+
+type BotPerformancePayload = {
+  ok?: boolean;
+  summary?: BotPerformanceSummary | null;
+};
+
 export default function DemoPage() {
   const isDemo = true;
   // 1. Core State
@@ -107,6 +120,11 @@ export default function DemoPage() {
     fetcher,
     { refreshInterval: 15000, revalidateOnFocus: false },
   );
+  const { data: botPerformanceData, mutate: mutateBotPerformance } = useSWR<BotPerformancePayload>(
+    user?.id ? `/api/bot-performance?userId=${encodeURIComponent(user.id)}` : null,
+    fetcher,
+    { refreshInterval: 5000, revalidateOnFocus: true },
+  );
   const { data: tradesData, isValidating: isTradesValidating, mutate: mutateTrades } = useSWR(
     user?.id && isSupabaseConfigured && supabase ? ["demo-trades", user.id] : null,
     async () => {
@@ -142,6 +160,7 @@ export default function DemoPage() {
   );
   const recentActivities = recentActivityData?.activities ?? [];
   const technicalPulseTraces = technicalPulseData?.traces ?? [];
+  const performanceSummary = botPerformanceData?.summary ?? null;
   const symbolToLivePrice = useMemo(
     () =>
       new Map(
@@ -246,9 +265,10 @@ export default function DemoPage() {
   );
   const realizedClosedPnl = useMemo(
     () =>
-      closedTrades
-        .filter((trade: any) => String(trade.type ?? "").toLowerCase() === "sell")
-        .reduce((sum: number, trade: any) => sum + Number(trade.pnl ?? 0), 0),
+      closedTrades.reduce((sum: number, trade: any) => {
+        const pnl = Number(trade.pnl ?? 0);
+        return Number.isFinite(pnl) ? sum + pnl : sum;
+      }, 0),
     [closedTrades],
   );
   const unrealizedOpenPnl = useMemo(
@@ -416,6 +436,7 @@ export default function DemoPage() {
           () => {
             void mutateTrades();
             void mutateOpenTrades();
+            void mutateBotPerformance();
             void fetchViaApi();
           },
         )
@@ -432,7 +453,7 @@ export default function DemoPage() {
         void supabase?.removeChannel(tradesChannel);
       }
     };
-  }, [authLoading, mutateOpenTrades, mutateTrades, user?.id, syncNonce]);
+  }, [authLoading, mutateBotPerformance, mutateOpenTrades, mutateTrades, user?.id, syncNonce]);
 
   useEffect(() => {
     if (!isHydrated || !account) return;
@@ -443,11 +464,26 @@ export default function DemoPage() {
       ? realStartingBalance
       : 0;
     const fallbackPnlFromBalance = Number((nextCurrentBalance - nextStartingBalance).toFixed(2));
-    const nextPnl = Number.isFinite(combinedTradePnl)
+    const performancePnl = Number(performanceSummary?.totalPnlUsd ?? NaN);
+    const performanceTrades = Number(performanceSummary?.totalTrades ?? 0);
+    const nextPnl = performanceTrades > 0 && Number.isFinite(performancePnl)
+      ? performancePnl
+      : nextStartingBalance > 0
+      ? fallbackPnlFromBalance
+      : Number.isFinite(combinedTradePnl)
       ? Number(combinedTradePnl.toFixed(2))
-      : fallbackPnlFromBalance;
+      : 0;
     const nextPnlPct = nextStartingBalance > 0
       ? Number(((nextPnl / nextStartingBalance) * 100).toFixed(2))
+      : 0;
+    const nextWinRate = performanceTrades > 0
+      ? Number(performanceSummary?.winRatePct ?? 0)
+      : 0;
+    const nextWinningTrades = performanceTrades > 0
+      ? Number(performanceSummary?.winCount ?? 0)
+      : 0;
+    const nextLosingTrades = performanceTrades > 0
+      ? Number(performanceSummary?.lossCount ?? 0)
       : 0;
 
     setAccount((prev: any) => {
@@ -456,7 +492,10 @@ export default function DemoPage() {
         prev.currentBalance === nextCurrentBalance &&
         prev.startingBalance === nextStartingBalance &&
         prev.totalPnl === nextPnl &&
-        prev.totalPnlPercent === nextPnlPct
+        prev.totalPnlPercent === nextPnlPct &&
+        prev.winRate === nextWinRate &&
+        prev.winningTrades === nextWinningTrades &&
+        prev.losingTrades === nextLosingTrades
       ) {
         return prev;
       }
@@ -466,6 +505,9 @@ export default function DemoPage() {
         startingBalance: nextStartingBalance,
         totalPnl: nextPnl,
         totalPnlPercent: nextPnlPct,
+        winRate: nextWinRate,
+        winningTrades: nextWinningTrades,
+        losingTrades: nextLosingTrades,
       };
     });
 
@@ -477,6 +519,7 @@ export default function DemoPage() {
     balanceUpdatedAt,
     combinedTradePnl,
     isHydrated,
+    performanceSummary,
     realBalance,
     realStartingBalance,
   ]);
