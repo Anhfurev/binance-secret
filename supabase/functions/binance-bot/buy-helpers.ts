@@ -8,7 +8,7 @@ export const AI_REASONING_JSON_MAX = 50_000;
 
 /** `computeEmaLastFromCloses(closes, 200)` needs `closes.length >= 201`. */
 export const MIN_1H_BARS_FOR_LIVE_MTF = 201;
-/** When 1h is bearish (close < EMA200 on 1h series), weighted score cannot exceed this before the 78% gate. */
+/** When 1h is bearish (close < EMA200 on 1h series), weighted score cannot exceed this before War Room. */
 export const ONE_H_BEARISH_MAX_CONFIDENCE = 55;
 
 /** Skip BUY when ADX(14) below this AND regime != TRENDING — chop bleeds via tight SLs. */

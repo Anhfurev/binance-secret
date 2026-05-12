@@ -3,6 +3,22 @@ import crypto from "node:crypto";
 const BINANCE_SPOT_BASE = "https://api.binance.com";
 const BINANCE_FUTURES_BASE = "https://fapi.binance.com";
 
+function resolveBinanceSpotBaseUrl(): string {
+  const gateway = (
+    process.env.BINANCE_REST_GATEWAY_URL ??
+    process.env.BINANCE_API_GATEWAY_URL ??
+    ""
+  ).trim();
+  if (!gateway) return BINANCE_SPOT_BASE;
+  return gateway.replace(/\/+$/, "");
+}
+
+function resolveBinanceGatewayHeaders(): Record<string, string> {
+  const secret = (process.env.BINANCE_GATEWAY_SECRET ?? "").trim();
+  if (!secret) return {};
+  return { "X-Binance-Gateway-Secret": secret };
+}
+
 export interface BinanceSpotBalance {
   asset: string;
   free: string;
@@ -122,11 +138,14 @@ async function binanceSpotPublicGet<T>(
   params: Record<string, string | number | boolean> = {},
 ): Promise<T> {
   const query = toQuery(params);
-  const url = `${BINANCE_SPOT_BASE}${path}${query ? `?${query}` : ""}`;
+  const url = `${resolveBinanceSpotBaseUrl()}${path}${query ? `?${query}` : ""}`;
 
   const res = await fetch(url, {
     cache: "no-store",
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      ...resolveBinanceGatewayHeaders(),
+    },
   });
 
   if (!res.ok) {
@@ -155,13 +174,14 @@ async function binanceSignedSpotRequest<T>(
     timestamp: Date.now(),
   });
   const signature = signQuery(query, apiSecret);
-  const url = `${BINANCE_SPOT_BASE}${path}?${query}&signature=${signature}`;
+  const url = `${resolveBinanceSpotBaseUrl()}${path}?${query}&signature=${signature}`;
 
   const res = await fetch(url, {
     method,
     headers: {
       Accept: "application/json",
       "X-MBX-APIKEY": apiKey,
+      ...resolveBinanceGatewayHeaders(),
     },
     cache: "no-store",
   });

@@ -45,6 +45,7 @@ export async function resolveWarRoomOutcome(params: {
     ai,
     marketContext: warRoomMarket,
     baseRegimeFloor,
+    bearish1hCap,
   });
 
   if (warRoom.news_veto && !demoProbePaper) {

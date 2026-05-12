@@ -4,6 +4,7 @@
  */
 import type { AiAnalysis } from "./types.ts";
 import { MIN_WEIGHTED_CONFIDENCE_TO_EXECUTE_BUY } from "./ai-scoring.ts";
+import { ONE_H_BEARISH_MAX_CONFIDENCE } from "./buy-helpers.ts";
 
 export type WarRoomMarketContext = {
   imbalance_ratio: number;
@@ -75,6 +76,8 @@ export function evaluateWarRoomConsensus(params: {
   ai: AiAnalysis;
   marketContext: WarRoomMarketContext;
   baseRegimeFloor: number;
+  /** When 1h is below EMA200, chart score is capped — align quorum chart leg with that cap. */
+  bearish1hCap?: boolean;
 }): WarRoomConsensus {
   const {
     rawWeightedConfidence,
@@ -82,6 +85,7 @@ export function evaluateWarRoomConsensus(params: {
     ai,
     marketContext,
     baseRegimeFloor,
+    bearish1hCap = false,
   } = params;
 
   const sv = ai.sentiment_vibe;
@@ -110,13 +114,16 @@ export function evaluateWarRoomConsensus(params: {
 
   const technicianScore = Number(rawWeightedConfidence);
   const effChart = Number(effectiveChartConfidence);
+  const chartGovernanceFloor = bearish1hCap
+    ? Math.min(governanceFloor, ONE_H_BEARISH_MAX_CONFIDENCE)
+    : governanceFloor;
 
   // Use >= so scores exactly on the governance floor still clear quorum,
   // consistent with regime min confidence floors elsewhere.
   const quorumPassed =
     !newsVeto &&
     technicianScore >= governanceFloor &&
-    effChart >= governanceFloor;
+    effChart >= chartGovernanceFloor;
 
   let final_governance: WarRoomGovernance;
   if (newsVeto) {
