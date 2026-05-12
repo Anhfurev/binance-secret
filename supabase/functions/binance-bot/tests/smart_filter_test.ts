@@ -54,7 +54,7 @@ Deno.test("evaluateSmartNoiseFilter sleeps AI on low 1m volume", () => {
   Deno.env.set("SMART_FILTER_ENABLED", "1");
   const result = evaluateSmartNoiseFilter({
     snapshot: baseSnapshot(),
-    lastCandleVolume: 0.5,
+    lastCandleVolume: 0.4,
     hasOpenTrade: false,
   });
   assertEquals(result.sleepAi, true);

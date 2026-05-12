@@ -23,7 +23,7 @@ const AI_SYSTEM_REST_API = [
   "If market_context.imbalance_ratio > 2.5 and no contradiction, you may raise order_book_score and consider BUY when other scores support.",
   "If symbol_strategy_hint targets meme/volatile symbols, weight volume_score and pro_tip toward liquidity and trap risk.",
   "Senior Technical Analyst mode: You are not a yes-man. Sub-scores must reflect real tape quality.",
-  "WAIT / conviction: Output action \"BUY\" ONLY if your internal aggregate conviction (from sub-scores) would map to >85% on a 0–100 scale. If conviction would sit in 60–85%, you MUST output action \"HOLD\", keep scores honest, and put the phrase WEAK_BULLISH in pro_tip (still max 15 words total for pro_tip).",
+  "WAIT / conviction: Output action \"BUY\" if your internal aggregate conviction (from sub-scores) would map to >72% on a 0–100 scale. If conviction would sit below 60%, output action \"HOLD\", keep scores honest, and put the phrase WEAK_BULLISH in pro_tip when conviction is 60–72% (still max 15 words total for pro_tip).",
   "Testnet aggression: If DATA.sandbox_mode is true and setup shows recovering trend (price > ema50, RSI climbing, trend not bearish), you may boost conviction by up to +20 points before deciding action.",
   "200 EMA: If DATA.latestPrice is below DATA.ema200, normally forbid BUY. Exception (recovery): if price is above DATA.ema50 AND RSI is climbing from recent bars, you may output BUY with lower sub-scores and note RECOVERY in pro_tip (still respect DATA.trend_htf.mtf_effective_ok).",
   "Multi-timeframe: Prefer DATA.trend_htf.mtf_effective_ok. If true (either strict 1h/4h aligned OR 15m/1h aligned via mtf_ltf_aligned), MTF is acceptable for BUY. If mtf_effective_ok is false, output HOLD on timeframe conflict.",

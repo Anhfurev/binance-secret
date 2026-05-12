@@ -249,6 +249,47 @@ export async function formatAmount(symbol: string, amount: number) {
   return floorAmountToLotStep(exchange, ccxtSymbol, market, amount);
 }
 
+/** Floor buy qty to LOT_SIZE step so notional stays at or below `maxUsd`. */
+export async function formatBuyAmountWithinUsdCap(
+  symbol: string,
+  maxUsd: number,
+  referencePrice: number,
+): Promise<number> {
+  if (
+    !Number.isFinite(maxUsd) || maxUsd <= 0 ||
+    !Number.isFinite(referencePrice) || referencePrice <= 0
+  ) {
+    return 0;
+  }
+  const exchange = getSharedBinanceSignedExchange();
+  const ccxtSymbol = toCcxtSymbol(symbol);
+  await applyBinanceJitter();
+  await exchange.loadMarkets();
+  const market = exchange.market(ccxtSymbol) as any;
+  const filters = Array.isArray(market?.info?.filters) ? market.info.filters : [];
+  const rawStep = filters.find((f: any) => f?.filterType === "LOT_SIZE")?.stepSize;
+  const stepSize = Number(rawStep);
+
+  let qty = maxUsd / referencePrice;
+  if (!Number.isFinite(qty) || qty <= 0) return 0;
+  if (Number.isFinite(stepSize) && stepSize > 0) {
+    qty = Math.floor(qty / stepSize) * stepSize;
+  }
+  qty = Number(exchange.amountToPrecision(ccxtSymbol, qty));
+  if (!Number.isFinite(qty) || qty <= 0) return 0;
+
+  while (qty > 0 && qty * referencePrice > maxUsd + 1e-9) {
+    if (Number.isFinite(stepSize) && stepSize > 0) {
+      qty = Number(
+        exchange.amountToPrecision(ccxtSymbol, Math.max(0, qty - stepSize)),
+      );
+    } else {
+      return 0;
+    }
+  }
+  return qty;
+}
+
 async function createLimitOrderWithStpRetry(
   exchange: InstanceType<typeof ccxt.binance>,
   ccxtSymbol: string,

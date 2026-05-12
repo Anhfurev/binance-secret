@@ -52,7 +52,17 @@ function buildTunablePatchFromBody(body: Record<string, unknown>): Record<string
   if (rsiBuy !== undefined) patch.rsi_buy_threshold = rsiBuy;
   const rsiSell = readBodyNumber(body, "rsi_sell_threshold", { min: 50, max: 99 });
   if (rsiSell !== undefined) patch.rsi_sell_threshold = rsiSell;
+  const minTech = readBodyNumber(body, "min_tech_score", { min: 1, max: 10, int: true });
+  if (minTech !== undefined) patch.min_tech_score = minTech;
+  const minVolQuote = readBodyNumber(body, "min_volume_24h_quote", { min: 0 });
+  if (minVolQuote !== undefined) patch.min_volume_24h_quote = minVolQuote;
   return patch;
+}
+
+function normalizeSymbolFromBody(body: Record<string, unknown>): string | null {
+  const raw = body?.symbol != null ? String(body.symbol).toUpperCase().trim() : "";
+  if (!raw) return null;
+  return raw;
 }
 
 async function getLatestUserId() {
@@ -179,10 +189,15 @@ export async function POST(req: NextRequest) {
   const tunablePatch = buildTunablePatchFromBody(body as Record<string, unknown>);
   Object.assign(updatePayload, tunablePatch);
 
-  const updateResult = await supabaseAdmin
+  const symbol = normalizeSymbolFromBody(body as Record<string, unknown>);
+  let updateQuery = supabaseAdmin
     .from("bot_settings")
     .update(updatePayload)
     .eq("user_id", userId);
+  if (symbol) {
+    updateQuery = updateQuery.eq("symbol", symbol);
+  }
+  const updateResult = await updateQuery;
 
   if (updateResult.error) {
     const upsertInvalidate = new Date(Date.now() + 10 * 60 * 1000).toISOString();

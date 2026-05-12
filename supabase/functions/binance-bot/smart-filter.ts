@@ -20,7 +20,7 @@ function readEnabled(): boolean {
 function readMinVolVs24hAvg(): number {
   const raw = String(Deno.env.get("SMART_FILTER_MIN_VOL_VS_24H_AVG") ?? "").trim();
   const n = raw.length ? Number(raw) : NaN;
-  if (!Number.isFinite(n)) return 0.8;
+  if (!Number.isFinite(n)) return 0.45;
   return Math.min(3, Math.max(0.1, n));
 }
 
@@ -36,7 +36,7 @@ function readMaxSpreadBps(symbol: string): number {
   if (Number.isFinite(n)) {
     return Math.min(500, Math.max(1, Math.floor(n)));
   }
-  if (sym.includes("PEPE")) return 45;
+  if (sym.includes("PEPE")) return 80;
   if (sym.includes("SOL")) return 14;
   return 10;
 }

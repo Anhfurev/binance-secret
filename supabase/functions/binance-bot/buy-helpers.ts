@@ -9,7 +9,7 @@ export const AI_REASONING_JSON_MAX = 50_000;
 /** `computeEmaLastFromCloses(closes, 200)` needs `closes.length >= 201`. */
 export const MIN_1H_BARS_FOR_LIVE_MTF = 201;
 /** When 1h is bearish (close < EMA200 on 1h series), weighted score cannot exceed this before the 78% gate. */
-export const ONE_H_BEARISH_MAX_CONFIDENCE = 40;
+export const ONE_H_BEARISH_MAX_CONFIDENCE = 55;
 
 /** Skip BUY when ADX(14) below this AND regime != TRENDING — chop bleeds via tight SLs. */
 export const MIN_ADX_FOR_NON_TRENDING_BUY = 18;
@@ -18,7 +18,11 @@ export const MIN_REWARD_RISK_RATIO = 2.0;
 /** When ATR is valid, default TP distance = `ATR × this` unless R:R floor lifts it higher. */
 export const ATR_TAKE_PROFIT_MULTIPLIER = 2.5;
 
-/** Stop / initial trail distance below entry: `atrStopMult×ATR` when ATR valid, else `entry × pctFraction`. */
+/**
+ * Stop / initial trail distance below entry.
+ * When ATR is valid: `max(atrStopMult×ATR, entry×f)` — clamped `pctFallbackFraction` as `f` is a hard
+ * minimum; ATR may only widen. When ATR is invalid: `entry×f`.
+ */
 export function volatilityAdjustedDistanceDown(
   entry: number,
   atr14: number,
@@ -26,13 +30,12 @@ export function volatilityAdjustedDistanceDown(
   /** Effective trail mult (base `ATR_STOP_TRAIL_MULTIPLIER` × vol-burst widen). */
   atrStopMult = ATR_STOP_TRAIL_MULTIPLIER,
 ): number {
-  const minRel = 0.0005;
+  const f = clamp(pctFallbackFraction, 0.0005, 0.5);
   const m = Number.isFinite(atrStopMult) && atrStopMult > 0 ? atrStopMult : ATR_STOP_TRAIL_MULTIPLIER;
   if (Number.isFinite(atr14) && atr14 > 0 && Number.isFinite(entry) && entry > 0) {
-    return Math.max(m * atr14, entry * minRel);
+    return Math.max(m * atr14, entry * f);
   }
-  const f = clamp(pctFallbackFraction, 0.0005, 0.5);
-  return Math.max(entry * f, entry * minRel);
+  return entry * f;
 }
 
 /**

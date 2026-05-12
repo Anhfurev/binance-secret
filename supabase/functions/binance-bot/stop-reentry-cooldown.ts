@@ -41,6 +41,21 @@ export function readStopChurnMaxStops(): number {
   return Math.min(6, Math.floor(n));
 }
 
+const RECENT_LOSS_COOLDOWN_MIN_PNL_PCT = -0.3;
+
+function isProfitableTrailingStopExit(
+  exitReason: unknown,
+  pnl: number,
+  pnlPercent: number,
+): boolean {
+  const reason = String(exitReason ?? "").toLowerCase();
+  const trailing =
+    reason === "money_machine_trailing_lock" || reason.includes("trailing");
+  if (!trailing) return false;
+  if (pnl > 0) return true;
+  return Number.isFinite(pnlPercent) && pnlPercent > 0;
+}
+
 export async function blockedByPostStoplossCooldown(params: {
   supabase: ReturnType<typeof createClient>;
   userId: string;
@@ -80,17 +95,25 @@ export async function blockedByRecentLosingClose(params: {
   const sinceIso = new Date(Date.now() - cooldownMs).toISOString();
   const { data, error } = await params.supabase
     .from("trades")
-    .select("id,closed_at,pnl,exit_reason")
+    .select("id,closed_at,pnl,pnlPercent,exit_reason")
     .eq("user_id", params.userId)
     .eq("symbol", params.symbol)
     .in("status", ["closed", "stopped"])
-    .lt("pnl", 0)
     .gte("closed_at", sinceIso)
     .order("closed_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error) throw error;
   if (!data) return { blocked: false };
+  const pnl = Number(data.pnl);
+  const pnlPercent = Number(data.pnlPercent);
+  if (isProfitableTrailingStopExit(data.exit_reason, pnl, pnlPercent)) {
+    return { blocked: false };
+  }
+  if (!(pnl < 0)) return { blocked: false };
+  if (!Number.isFinite(pnlPercent) || pnlPercent > RECENT_LOSS_COOLDOWN_MIN_PNL_PCT) {
+    return { blocked: false };
+  }
   return {
     blocked: true,
     reason: `hold_post_loss_cooldown_${Math.round(cooldownMs / 1000)}s`,

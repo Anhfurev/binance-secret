@@ -13,7 +13,7 @@ import { botDebug, botWarn } from "./bot-debug.ts";
 import { volatilityAdjustedDistanceDown, takeProfitDistanceUp } from "./buy-helpers.ts";
 import { resolveStopLossPctFraction, resolveTakeProfitPctPoints } from "./trade-stop-risk.ts";
 import { safeInsertLog } from "./buy-logging.ts";
-import { formatAmount } from "./exchange-client.ts";
+import { formatBuyAmountWithinUsdCap } from "./exchange-client.ts";
 
 export async function prepareBuyExecution(params: {
   supabase: ReturnType<typeof createClient>;
@@ -58,8 +58,7 @@ export async function prepareBuyExecution(params: {
     };
   }
 
-  const rawQty = tradeUsd / snapshotPrice;
-  const qty = Number((await formatAmount(symbol, rawQty)));
+  const qty = await formatBuyAmountWithinUsdCap(symbol, tradeUsd, snapshotPrice);
   const stopLossPct = clamp(toNumber((row as any).stop_loss_pct, 2), 0.1, 50);
   const takeProfitPctRaw = clamp(toNumber((row as any).take_profit_pct, 4), 0.1, 100);
   const stopLossPctFraction = resolveStopLossPctFraction(stopLossPct, symbol);

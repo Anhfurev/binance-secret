@@ -34,7 +34,7 @@ export async function resolvePaperLossLesson(params: {
     .eq("user_id", userId)
     .eq("symbol", symbol)
     .in("status", ["closed", "stopped"])
-    .lt("pnl", 0)
+    .eq("exit_reason", "stoploss_hit")
     .gte("closed_at", sinceIso);
   if (error) {
     return { recentStopLosses: 0, confidenceBump: 0, blockBuy: false, reason: null };
@@ -43,7 +43,7 @@ export async function resolvePaperLossLesson(params: {
   if (recentStopLosses <= 0) {
     return { recentStopLosses: 0, confidenceBump: 0, blockBuy: false, reason: null };
   }
-  const confidenceBump = Math.min(12, recentStopLosses * 4);
+  const confidenceBump = Math.min(6, recentStopLosses * 2);
   if (recentStopLosses >= 3) {
     const ok = passesMeanReversionBuyGate({ regime, rsi, latestPrice, bbLower });
     if (!ok) {

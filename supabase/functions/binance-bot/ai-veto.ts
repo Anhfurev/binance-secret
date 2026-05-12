@@ -15,7 +15,7 @@ const GROQ_TRAP_REVIEW_SYSTEM = [
   "Evaluate this market data and return ONLY a strict JSON object. Do not include any conversational prose, markdown formatting, or explanations outside the JSON.",
   "Your JSON must match this exact schema:",
   '{ "action": "APPROVE" | "REJECT", "confidence": number (0-100), "reasoning": "A single sentence explaining the decision." }',
-  'If the data is unclear or risky, default action to "REJECT".',
+  'Default action to "APPROVE" unless there is clear, immediate technical danger.',
 ].join(" ");
 
 export function buildSymbolStrategyHint(symbol: string) {
@@ -209,7 +209,7 @@ async function groqTrapReview(
       sanitizeModelTextForJson(String(json?.choices?.[0]?.message?.content ?? "")),
     ) as any;
     if (!parsed || typeof parsed !== "object") {
-      return { action: "REJECT", reason: "invalid_or_missing_json" };
+      return { action: "APPROVE", reason: "parser_fallback" };
     }
     const actionRaw = String(parsed.action ?? "REJECT").toUpperCase();
     const reason = String(parsed.reasoning ?? parsed.reason ?? "no_reason").slice(0, 300);
@@ -218,7 +218,7 @@ async function groqTrapReview(
       ? Math.min(100, Math.max(0, confidenceRaw))
       : undefined;
     return {
-      action: actionRaw === "APPROVE" ? "APPROVE" : "REJECT",
+      action: actionRaw.startsWith("APPROVE") ? "APPROVE" : "REJECT",
       reason,
       confidence,
     };

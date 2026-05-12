@@ -15,7 +15,7 @@ Deno.test("paper loss lesson bumps confidence after recent losses", async () => 
           in() {
             return this;
           },
-          lt() {
+          eq() {
             return this;
           },
           gte() {
@@ -31,6 +31,6 @@ Deno.test("paper loss lesson bumps confidence after recent losses", async () => 
     latestPrice: 100,
     bbLower: 98,
   });
-  assertEquals(result.confidenceBump, 8);
+  assertEquals(result.confidenceBump, 4);
   assertEquals(result.blockBuy, false);
 });
