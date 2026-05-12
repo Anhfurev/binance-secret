@@ -1,6 +1,6 @@
 {
   "tasks": {
     "start": "deno run --allow-net --allow-env hub.ts",
-    "check": "deno check hub.ts main.ts"
+    "check": "deno check hub.ts"
   }
 }

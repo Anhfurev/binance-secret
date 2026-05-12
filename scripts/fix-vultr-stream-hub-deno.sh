@@ -11,6 +11,19 @@ fi
 DENO_BIN="$(command -v deno)"
 echo "deno=${DENO_BIN}"
 
+ensure_hub_entry() {
+  local dir="$1"
+  [[ -d "${dir}" ]] || return 1
+  if [[ -f "${dir}/hub.ts" ]]; then
+    return 0
+  fi
+  if [[ -f "${dir}/main.ts" ]]; then
+    printf 'import "./main.ts";\n' > "${dir}/hub.ts"
+    return 0
+  fi
+  return 1
+}
+
 HUB_SRC="${HUB_SRC:-/root/binance-gateway/scripts/gateway-stream-hub}"
 if [[ ! -d "${HUB_SRC}" && -d /root/gateway-stream-hub ]]; then
   HUB_SRC="/root/gateway-stream-hub"
@@ -20,9 +33,13 @@ HUB_DIR="${HUB_DIR:-/opt/binance-stream-hub}"
   echo "Missing hub source: ${HUB_SRC}" >&2
   exit 1
 }
+ensure_hub_entry "${HUB_SRC}" || {
+  echo "Missing hub.ts (and main.ts) under ${HUB_SRC}" >&2
+  exit 1
+}
 mkdir -p "${HUB_DIR}"
 cp -R "${HUB_SRC}/." "${HUB_DIR}/"
-[[ -f "${HUB_DIR}/hub.ts" ]] || {
+ensure_hub_entry "${HUB_DIR}" || {
   echo "Missing ${HUB_DIR}/hub.ts after copy from ${HUB_SRC}" >&2
   exit 1
 }

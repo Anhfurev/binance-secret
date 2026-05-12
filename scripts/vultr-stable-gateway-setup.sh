@@ -72,10 +72,21 @@ echo "Using deno at ${DENO_BIN}"
 
 HUB_DIR="/opt/binance-stream-hub"
 mkdir -p "${HUB_DIR}"
+HUB_SRC=""
 if [[ -d /root/binance-gateway/scripts/gateway-stream-hub ]]; then
-  cp -R /root/binance-gateway/scripts/gateway-stream-hub/. "${HUB_DIR}/"
+  HUB_SRC="/root/binance-gateway/scripts/gateway-stream-hub"
 elif [[ -d /root/gateway-stream-hub ]]; then
-  cp -R /root/gateway-stream-hub/. "${HUB_DIR}/"
+  HUB_SRC="/root/gateway-stream-hub"
+fi
+if [[ -n "${HUB_SRC}" ]]; then
+  cp -R "${HUB_SRC}/." "${HUB_DIR}/"
+fi
+if [[ ! -f "${HUB_DIR}/hub.ts" && -f "${HUB_DIR}/main.ts" ]]; then
+  printf 'import "./main.ts";\n' > "${HUB_DIR}/hub.ts"
+fi
+if [[ ! -f "${HUB_DIR}/hub.ts" ]]; then
+  echo "Missing ${HUB_DIR}/hub.ts — sync scripts/gateway-stream-hub to the VM first." >&2
+  exit 1
 fi
 
 tee /etc/systemd/system/binance-stream-hub.service >/dev/null <<UNIT
