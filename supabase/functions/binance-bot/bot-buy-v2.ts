@@ -6,6 +6,7 @@ import { formatUnknownError, toStringValue, coinIdFromSymbol } from "./utils.ts"
 import type { AiAnalysis, BotSettingsRow, MarketRegime, SignalDecision } from "./types.ts";
 import { takeProfitDistanceUp, buildAiReasoningJson } from "./buy-helpers.ts";
 import { estimatePreSentimentWeightedForRegime } from "./ai-scoring.ts";
+import { widenStopLossToDbFloor } from "./trade-stop-risk.ts";
 import { resolveBuyContextAndSizing } from "./buy-context.ts";
 import { resolveWarRoomOutcome } from "./buy-warroom.ts";
 import { prepareBuyExecution } from "./buy-prep.ts";
@@ -152,6 +153,7 @@ export async function executeBuyFlow(params: {
     const valueUsd = Number((filledQty * entryForDb).toFixed(8));
     let stopLossPersist = Number((Math.min(entryForDb * (1 - 1e-8), Math.max(entryForDb - prep.slDistance, entryForDb * 1e-8))).toFixed(8));
     if (!(stopLossPersist < entryForDb)) stopLossPersist = Number((entryForDb * (1 - prep.stopLossPctFraction)).toFixed(8));
+    stopLossPersist = widenStopLossToDbFloor(entryForDb, stopLossPersist, prep.stopLossPctFraction);
     const slDistanceAtEntry = entryForDb - stopLossPersist;
     const tpDistanceAtEntry = takeProfitDistanceUp(entryForDb, atr14, Number((row as any)?.take_profit_pct ?? 0) / 100, slDistanceAtEntry);
     const takeProfitPersist = Number((entryForDb + tpDistanceAtEntry).toFixed(8));

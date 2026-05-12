@@ -48,7 +48,7 @@ export async function resolveWarRoomOutcome(params: {
     bearish1hCap,
   });
 
-  if (warRoom.news_veto && !demoProbePaper) {
+  if (warRoom.news_veto) {
     sentryWarRoomVetoBreadcrumb({
       final_governance: warRoom.final_governance,
       news_vibe: ai.sentiment_vibe,
@@ -94,7 +94,7 @@ export async function resolveWarRoomOutcome(params: {
     };
   }
 
-  if (!warRoom.quorum_passed && !demoProbePaper) {
+  if (!warRoom.quorum_passed) {
     const goldenRatioBounceCandidate =
       bearish1hCap &&
       rawWeighted >= warRoom.governance_floor;
@@ -143,24 +143,12 @@ export async function resolveWarRoomOutcome(params: {
   }
 
   let executionConfidence = warRoom.effective_confidence_after_governance;
-  if (demoProbePaper) {
-    executionConfidence = Math.max(
-      Number(executionConfidence) || 0,
-      rawWeighted,
-      effectiveConfidence,
-      55,
-    );
-  }
   if (!Number.isFinite(executionConfidence) || executionConfidence <= 0) {
-    if (demoProbePaper) {
-      executionConfidence = Math.max(55, rawWeighted, effectiveConfidence, 1);
-    } else {
-      return {
-        skipDetail:
-          "BUY blocked: post–War Room guard — effective_confidence_after_governance is not finite/positive (would not call exchange).",
-        warRoom,
-      };
-    }
+    return {
+      skipDetail:
+        "BUY blocked: post–War Room guard — effective_confidence_after_governance is not finite/positive (would not call exchange).",
+      warRoom,
+    };
   }
   botDebug("buyFlow", "war_room_gate_passed", {
     userId,

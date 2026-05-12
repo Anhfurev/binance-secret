@@ -24,7 +24,7 @@ export function resolvePaperWalletUsdt(
 }
 
 export function readDemoProbeEnabled(): boolean {
-  const raw = String(Deno.env.get("DEMO_PROBE_ENABLED") ?? "1").trim().toLowerCase();
+  const raw = String(Deno.env.get("DEMO_PROBE_ENABLED") ?? "0").trim().toLowerCase();
   if (raw === "0" || raw === "false" || raw === "no") return false;
   return raw === "1" || raw === "true" || raw === "yes";
 }

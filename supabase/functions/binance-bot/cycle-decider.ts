@@ -19,6 +19,7 @@ import { formatUnknownError, resolveMinAiConfidenceForRegime, resolveMinTechScor
 import { collectPreflightVetoChecks, formatVetoDetailsPayload, tryMtfOnlyHighConfidenceHalfBuy } from "./veto-transparency.ts";
 import { evaluateSmartNoiseFilter } from "./smart-filter.ts";
 import { resolvePaperLossLesson } from "./paper-loss-lesson.ts";
+import { passesDemoPaperProbeQualityGate } from "./demo-paper-probe-buy.ts";
 
 export async function decideSymbolCycleOutcome(params: {
   row: any;
@@ -223,10 +224,20 @@ export async function decideSymbolCycleOutcome(params: {
   }
   let demoProbeBuyFlag = false;
   const paperProbe = await resolveDemoPaperProbeBuy({ supabase, userId, symbol, row, hasOpenTrade: Boolean(openTrade) });
-  if (paperProbe.apply && decision === "HOLD") {
+  const probeQualityOk = passesDemoPaperProbeQualityGate({
+    strategySignal,
+    technicalScore,
+    minTech,
+    minAiConfidence,
+    ai,
+    groqRejected: groqVerdictUpper === "REJECT",
+  });
+  if (paperProbe.apply && decision === "HOLD" && probeQualityOk) {
     decision = "BUY";
     reason = paperProbe.reason ?? "demo_inactivity_probe_buy";
     demoProbeBuyFlag = true;
+  } else if (paperProbe.apply && decision === "HOLD" && !probeQualityOk) {
+    reason = `${reason ?? "hold"}|demo_probe_blocked_quality_gate`;
   }
   const vetoDetailsPayload = formatVetoDetailsPayload({
     veto_reasons: [...preflight.veto_reasons, ...(strategyFailDetail ? [strategyFailDetail] : []), ...(typeof reason === "string" && reason.startsWith("hold_max_open_trades_limit") ? ["FAIL_MAX_TRADES"] : []), ...(decision === "HOLD" && reason ? [`HOLD:${reason}`] : []), ...(demoProbeBuyFlag ? ["DEMO_PAPER_PROBE_BUY_ACTIVE"] : []), ...(executionUsdScale != null && executionUsdScale < 1 ? ["OVERRIDE_MTF_HALF_POSITION"] : [])],

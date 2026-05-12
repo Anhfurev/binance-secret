@@ -41,6 +41,7 @@ import {
 } from "./log-policy.ts";
 import { executeBuyFlow } from "./bot-buy-v2.ts";
 import { applyBreakEvenTrigger, executeSellFlow } from "./bot-sell.ts";
+import { canFireDbStopLoss } from "./strategy-stop-hold.ts";
 import { botDebug, botError } from "./bot-debug.ts";
 import { assertExpectedEgressIpOrThrow } from "./exchange-client.ts";
 import { VOL_BURST_MAX_ATR_BONUS } from "./constants.ts";
@@ -249,7 +250,7 @@ export async function processBot(params: {
           });
         }
       }
-      if (trailingState.shouldExit) {
+      if (trailingState.shouldExit && canFireDbStopLoss(openTrade)) {
         effectiveDecision = "SELL";
         effectiveExitReason = "stoploss_hit";
         trailingStopTriggered = true;

@@ -52,3 +52,17 @@ export function resolveHardStopLossFrac(
   }
   return fallbackFrac;
 }
+
+/** Long: never persist a stop tighter than the configured DB fraction. */
+export function widenStopLossToDbFloor(
+  entry: number,
+  candidateStop: number,
+  stopLossFrac: number,
+): number {
+  if (!(entry > 0) || !Number.isFinite(candidateStop) || !Number.isFinite(stopLossFrac)) {
+    return candidateStop;
+  }
+  const f = Math.max(0.0005, Math.min(0.5, stopLossFrac));
+  const floorPrice = Number((entry * (1 - f)).toFixed(8));
+  return Math.min(candidateStop, floorPrice);
+}

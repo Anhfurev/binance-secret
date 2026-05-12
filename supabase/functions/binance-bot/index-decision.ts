@@ -179,6 +179,9 @@ export function decideHybridMatrix(params: {
   }
 
   if (strategySignal === "BUY") {
+    if (technicalScore <= 0 && !aggressiveModeEnabled) {
+      return { decision: "HOLD", reason: "hold_zero_technical_score" };
+    }
     const highConfidenceAiOverride =
       aggressiveModeEnabled &&
       hasAggressiveConfidence &&

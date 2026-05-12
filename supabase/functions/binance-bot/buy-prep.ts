@@ -94,11 +94,14 @@ export async function prepareBuyExecution(params: {
   const vbRaw = Number(volBurstWidenMult);
   const vb = Number.isFinite(vbRaw) && vbRaw >= 1 ? Math.min(vbRaw, VB_MAX) : 1;
   const atrTrailEffective = Number((ATR_STOP_TRAIL_MULTIPLIER * vb).toFixed(6));
-  const slDistance = volatilityAdjustedDistanceDown(
-    entryPriceFull,
-    atr14,
-    stopLossPctFraction,
-    atrTrailEffective,
+  const slDistance = Math.max(
+    volatilityAdjustedDistanceDown(
+      entryPriceFull,
+      atr14,
+      stopLossPctFraction,
+      atrTrailEffective,
+    ),
+    entryPriceFull * stopLossPctFraction,
   );
   const stopLossRaw = entryPriceFull - slDistance;
   let stopLossPrice = Number(

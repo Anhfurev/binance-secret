@@ -129,7 +129,6 @@ export async function resolveBuyContextAndSizing(params: {
   }
 
   if (
-    !demoProbePaper &&
     regime !== "TRENDING" &&
     Number.isFinite(adx14) &&
     adx14 < MIN_ADX_FOR_NON_TRENDING_BUY
@@ -147,7 +146,6 @@ export async function resolveBuyContextAndSizing(params: {
     };
   }
   if (
-    !demoProbePaper &&
     regime === "RANGING" &&
     !passesMeanReversionBuyGate({
       regime,

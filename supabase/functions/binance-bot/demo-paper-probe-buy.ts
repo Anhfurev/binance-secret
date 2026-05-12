@@ -2,6 +2,25 @@
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { readDemoProbeEnabled } from "./paper-balance.ts";
 import { blockedByPostStoplossCooldown } from "./stop-reentry-cooldown.ts";
+import type { AiAnalysis, SignalDecision } from "./types.ts";
+
+export function passesDemoPaperProbeQualityGate(params: {
+  strategySignal: SignalDecision;
+  technicalScore: number;
+  minTech: number;
+  minAiConfidence: number;
+  ai: AiAnalysis;
+  groqRejected: boolean;
+}): boolean {
+  const { strategySignal, technicalScore, minTech, minAiConfidence, ai, groqRejected } = params;
+  if (groqRejected) return false;
+  if (strategySignal !== "BUY") return false;
+  if (technicalScore < minTech) return false;
+  if (ai.trend === "bearish") return false;
+  const aiConf = Number(ai.ai_confidence);
+  if (!Number.isFinite(aiConf) || aiConf < minAiConfidence) return false;
+  return true;
+}
 
 /**
  * No BUY recorded for this long (in HOURS) → eligible for a paper/demo probe buy.
