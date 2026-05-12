@@ -4,6 +4,7 @@ import { sendTelegramAlert } from "./notifier.ts";
 import { escapeHtml } from "./bot-shared.ts";
 import { botDebug, botWarn } from "./bot-debug.ts";
 import { safeInsertLog } from "./buy-logging.ts";
+import { enforceBankrollMutex } from "./bankroll-mutex.ts";
 
 export async function acquireBuyCapitalReservation(params: {
   supabase: ReturnType<typeof createClient>;
@@ -38,6 +39,17 @@ export async function acquireBuyCapitalReservation(params: {
     usdtBalance,
   } = params;
   if (ghostMode) return { reservationId: null as string | null };
+  const mutex = await enforceBankrollMutex({ supabase, userId, symbol });
+  if (!mutex.allowed) {
+    botWarn("buyFlow", "bankroll_mutex_blocked", {
+      userId,
+      symbol,
+      detail: mutex.detail,
+      waited_ms: mutex.waitedMs,
+      mode: mutex.mode,
+    });
+    return { skipDetail: mutex.detail };
+  }
 
   const { data: reserved, error: reserveError } = await supabase.rpc("reserve_buy_capital", {
     p_user_id: userId,

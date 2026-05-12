@@ -8,6 +8,7 @@ import { persistRunTelemetry } from "./bot-telemetry.ts";
 import { escapeHtml, formatTelegramPrice, formatUsdAlertAmount, fromUsdCents, toUsdCents } from "./bot-shared.ts";
 import { botDebug } from "./bot-debug.ts";
 import { releaseTradeExecutionLock } from "./trade-execution-lock.ts";
+import { shouldApplyPaperDemoLedgerDelta } from "./paper-balance.ts";
 
 export async function finalizeBuyExecution(params: {
   supabase: ReturnType<typeof createClient>;
@@ -46,6 +47,7 @@ export async function finalizeBuyExecution(params: {
   technical: string;
   buyOrder: Record<string, unknown>;
   openedAt: string;
+  feeUsdBuy?: number;
 }) {
   const {
     supabase, userId, symbol, ai, strategyNotes, botId, cycleId, buyOrderId,
@@ -54,9 +56,15 @@ export async function finalizeBuyExecution(params: {
     stopLossPersist, takeProfitPersist, initialTrailingPersist, trailingStopPct, atr14,
     atrTrailEffective, vb, volBurstMeta, slDistance, trailDistance, effectiveConfidence,
     rawWeighted, bearish1hCap, aiReasoningJson, coinId, technical, buyOrder, openedAt,
+    feeUsdBuy = 0,
   } = params;
 
-  let nextBalance = fromUsdCents(toUsdCents(currentBalance) - toUsdCents(valueUsd));
+  const buyFeeUsd = Number.isFinite(Number(feeUsdBuy)) && Number(feeUsdBuy) >= 0
+    ? Number(Number(feeUsdBuy).toFixed(8))
+    : 0;
+  let nextBalance = fromUsdCents(
+    toUsdCents(currentBalance) - toUsdCents(valueUsd) - toUsdCents(buyFeeUsd),
+  );
   const boughtAsset = symbol.replace(/USDT$/i, "");
   const proTipLine = ai.pro_tip?.trim()
     ? `\n<b>Pro tip:</b> ${escapeHtml(ai.pro_tip.trim())}`
@@ -106,6 +114,7 @@ export async function finalizeBuyExecution(params: {
       stop_trail_basis: Number.isFinite(atr14) && atr14 > 0
         ? vb > 1.002 ? "atr_burst_guard" : "atr_1p5x"
         : "pct_fallback",
+      fee_usd_buy: buyFeeUsd,
     },
     followedSignal: true,
     notes:
@@ -133,7 +142,7 @@ export async function finalizeBuyExecution(params: {
     created_at: new Date().toISOString(),
   }]);
 
-  if (isTestMode || ghostMode) {
+  if (shouldApplyPaperDemoLedgerDelta(isTestMode, ghostMode)) {
     if (shouldInitializeStartingBalance && Number.isFinite(resolvedStartingBalance)) {
       const initSb = await supabase
         .from("profiles")
@@ -144,7 +153,11 @@ export async function finalizeBuyExecution(params: {
         .eq("id", userId);
       if (initSb.error) throw initSb.error;
     }
-    nextBalance = await adjustPaperDemoBalance(supabase, userId, -valueUsd);
+    nextBalance = await adjustPaperDemoBalance(
+      supabase,
+      userId,
+      -(valueUsd + buyFeeUsd),
+    );
   }
 
   if (botId && cycleId) {

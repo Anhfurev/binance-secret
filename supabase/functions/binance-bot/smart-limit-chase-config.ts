@@ -17,7 +17,7 @@ export function readSmartLimitMaxChasePct(symbol: string): number {
   if (sym.includes("PEPE")) {
     return readPctEnv(
       ["SMART_LIMIT_MAX_CHASE_PCT_PEPEUSDT", "SMART_LIMIT_MAX_CHASE_PCT"],
-      0.3,
+      0.5,
     );
   }
   if (sym.includes("SOL")) {

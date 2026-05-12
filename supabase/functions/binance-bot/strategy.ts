@@ -12,6 +12,7 @@ import type {
   SignalDecision,
   StrategyReason,
 } from "./types.ts";
+import { canFireDbStopLoss } from "./strategy-stop-hold.ts";
 import { clamp, toNumber } from "./utils.ts";
 
 export const STRATEGY_STOPLOSS = -0.25;
@@ -53,13 +54,17 @@ export function checkEntryConditions(snapshot: IndicatorSnapshot): EntryCheckRes
   const c2 = c.at(-2)?.close ?? 0;
   const c3 = c.at(-3)?.close ?? 0;
   const risingMicro = c1 > c2 && c2 > c3;
+  const lastVolume = Number(c.at(-1)?.volume ?? 0);
+  const avgVolume1m = Number(snapshot.avgVolume1m ?? 0);
+  const volumeConfirmed = avgVolume1m > 0 && lastVolume > avgVolume1m * 1.2;
   const bullishMomentum =
-    snapshot.rsi >= 42 &&
-    snapshot.rsi <= 68 &&
-    snapshot.rsi15m >= 48 &&
+    snapshot.rsi >= 36 &&
+    snapshot.rsi <= 72 &&
+    snapshot.rsi15m >= 42 &&
     gtWithTolerance(snapshot.emaFast, snapshot.emaSlow) &&
     gteWithTolerance(snapshot.latestPrice, snapshot.ema50) &&
-    risingMicro;
+    risingMicro &&
+    volumeConfirmed;
   if (bullishMomentum) {
     return { signal: "BUY", strategy_reason: "strategy_trend_momentum_entry" };
   }
@@ -182,7 +187,10 @@ export function checkExitConditions(
 
   // Absolute DB stop first (capital) — hardcoded -25% ROI only when no row stopLoss.
   if (hitAbsoluteStopLoss(openTrade, latestPrice)) {
-    return { shouldExit: true, exit_reason: "stoploss_hit" };
+    if (canFireDbStopLoss(openTrade)) {
+      return { shouldExit: true, exit_reason: "stoploss_hit" };
+    }
+    return { shouldExit: false, exit_reason: "hold" };
   }
 
   if (hitAbsoluteTakeProfit(openTrade, entryPrice, latestPrice)) {
@@ -200,11 +208,17 @@ export function checkExitConditions(
 
   const useHardcodedDrawdownFallback = !hasDbStopLossPrice(openTrade);
   if (useHardcodedDrawdownFallback && roi <= STRATEGY_STOPLOSS) {
-    return { shouldExit: true, exit_reason: "stoploss_hit" };
+    if (canFireDbStopLoss(openTrade)) {
+      return { shouldExit: true, exit_reason: "stoploss_hit" };
+    }
+    return { shouldExit: false, exit_reason: "hold" };
   }
 
   if (snapshot.rsi > 70) {
-    return { shouldExit: true, exit_reason: "rsi_overbought" };
+    if (canFireDbStopLoss(openTrade)) {
+      return { shouldExit: true, exit_reason: "rsi_overbought" };
+    }
+    return { shouldExit: false, exit_reason: "hold" };
   }
 
   return { shouldExit: false, exit_reason: "hold" };

@@ -160,6 +160,8 @@ export type SignalDecision = "BUY" | "SELL" | "HOLD";
 export type ExitReason =
   | "roi_target_hit"
   | "stoploss_hit"
+  | "money_machine_hard_stop"
+  | "money_machine_trailing_lock"
   | "rsi_overbought"
   | "no_open_trade"
   | "invalid_entry"

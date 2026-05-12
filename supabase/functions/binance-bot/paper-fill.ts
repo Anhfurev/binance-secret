@@ -81,13 +81,6 @@ export async function simulatePaperFill(params: {
 
   const grossNotional = filledAmount * fillPrice;
   const feeUsd = Number((grossNotional * feePct).toFixed(8));
-  // Buyer receives base minus fee in base; seller receives quote minus fee.
-  // We collapse both into a single effective `price` so PnL calc downstream
-  // treats fee as a price haircut — matches our `fromUsdCents(exit-entry)` math.
-  const effectivePrice = side === "buy"
-    ? Number(((grossNotional + feeUsd) / filledAmount).toFixed(8))
-    : Number(((grossNotional - feeUsd) / filledAmount).toFixed(8));
-
   const fillPriceRounded = Number(fillPrice.toFixed(8));
   const refForSlip = signalPrice;
   const slippagePct = refForSlip > 0
@@ -102,7 +95,7 @@ export async function simulatePaperFill(params: {
     status: "closed",
     amount: filledAmount,
     price: fillPriceRounded,
-    average: effectivePrice,
+    average: fillPriceRounded,
     execution_type: "paper_market",
     actual_slippage_pct: slippagePct,
     smart_execution_meta: {
@@ -117,7 +110,6 @@ export async function simulatePaperFill(params: {
       fee_pct: feePct,
       fee_usd: feeUsd,
       fill_price_pre_fee: fillPriceRounded,
-      effective_price_post_fee: effectivePrice,
       gross_notional: Number(grossNotional.toFixed(8)),
     },
     testMode: true,

@@ -11,14 +11,11 @@ import { withLlmConcurrency } from "./ai-llm-concurrency.ts";
 
 const DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant";
 const GROQ_TRAP_REVIEW_SYSTEM = [
-  "You are a cynical Wall Street whale.",
-  "Gemini wants to BUY this coin. Your job is to find the lie.",
-  "You are given veto_window: last five 1m OHLCV bars (oldest→newest), last five 15m bars, and computed short-horizon returns.",
-  "The primary BUY signal may be stale (seconds of latency). If recent 1m closes or ticker vs last 1m close clearly contradict a long, REJECT.",
-  "Check for trap conditions: price rising while volume declines (bearish divergence), obvious blow-off moves, suspicious sell pressure.",
-  "If symbol is PEPEUSDT, prioritize volume spikes and social sentiment risk signals over standard RSI/MACD.",
-  "Base your verdict on the provided numbers only — do not invent candle data.",
-  'Return ONLY JSON: { "action": "APPROVE" | "REJECT", "reason": "<short reason>" }.',
+  "You are a ruthless, quantitative crypto trading AI.",
+  "Evaluate this market data and return ONLY a strict JSON object. Do not include any conversational prose, markdown formatting, or explanations outside the JSON.",
+  "Your JSON must match this exact schema:",
+  '{ "action": "APPROVE" | "REJECT", "confidence": number (0-100), "reasoning": "A single sentence explaining the decision." }',
+  'If the data is unclear or risky, default action to "REJECT".',
 ].join(" ");
 
 export function buildSymbolStrategyHint(symbol: string) {
@@ -176,7 +173,7 @@ async function groqTrapReview(
   groqKey: string,
   data: unknown,
   signal?: AbortSignal,
-): Promise<{ action: "APPROVE" | "REJECT"; reason: string }> {
+): Promise<{ action: "APPROVE" | "REJECT"; reason: string; confidence?: number }> {
   const groqModel = (Deno.env.get("GROQ_MODEL") ?? "").trim() || DEFAULT_GROQ_MODEL;
   try {
     const response = await fetchWithExponentialBackoff(
@@ -211,10 +208,19 @@ async function groqTrapReview(
     const parsed = safeJsonParseFromText(
       sanitizeModelTextForJson(String(json?.choices?.[0]?.message?.content ?? "")),
     ) as any;
-    const actionRaw = String(parsed?.action ?? "APPROVE").toUpperCase();
+    if (!parsed || typeof parsed !== "object") {
+      return { action: "REJECT", reason: "invalid_or_missing_json" };
+    }
+    const actionRaw = String(parsed.action ?? "REJECT").toUpperCase();
+    const reason = String(parsed.reasoning ?? parsed.reason ?? "no_reason").slice(0, 300);
+    const confidenceRaw = Number(parsed.confidence);
+    const confidence = Number.isFinite(confidenceRaw)
+      ? Math.min(100, Math.max(0, confidenceRaw))
+      : undefined;
     return {
-      action: actionRaw === "REJECT" ? "REJECT" : "APPROVE",
-      reason: String(parsed?.reason ?? "no_reason").slice(0, 300),
+      action: actionRaw === "APPROVE" ? "APPROVE" : "REJECT",
+      reason,
+      confidence,
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

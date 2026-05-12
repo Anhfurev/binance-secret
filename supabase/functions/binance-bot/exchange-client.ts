@@ -708,6 +708,7 @@ export async function getAvailableBalance(
 
 export async function getUsdtBalance(isTestMode = false): Promise<number> {
   if (isTestMode) {
+    // Paper BUY sizing uses `profiles.demo_balance` via `resolvePaperWalletUsdt` in buy-prep.
     const testBalance = Number(Deno.env.get("TEST_USDT_BALANCE") ?? "100000");
     return Number.isFinite(testBalance) ? testBalance : 100000;
   }

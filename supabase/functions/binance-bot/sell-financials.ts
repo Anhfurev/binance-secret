@@ -1,13 +1,23 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import { shouldApplyPaperDemoLedgerDelta } from "./paper-balance.ts";
 import { adjustPaperDemoBalance } from "./trade-store.ts";
 import { fromUsdCents, toUsdCents } from "./bot-shared.ts";
 import { toNumber } from "./utils.ts";
 import { botWarn } from "./bot-debug.ts";
 import { execObserve } from "./exec-observe.ts";
+import { computeNetTradePnl, extractLegFeeUsd } from "./fill-fees.ts";
 
 export function isPartialSellFill(openAmount: number, soldBase: number): boolean {
   return soldBase < openAmount * 0.999;
+}
+
+/** Full closes credit here; partial closes credit once in `sell-partial.ts`. */
+export function shouldApplyPaperBalanceOnSellFinancials(
+  isPaperMode: boolean,
+  partialFill: boolean,
+): boolean {
+  return isPaperMode && !partialFill;
 }
 
 export async function resolveSellFillFinancials(params: {
@@ -22,6 +32,7 @@ export async function resolveSellFillFinancials(params: {
   ghostMode: boolean;
   currentBalance: number;
   resolvedStartingBalance: number;
+  openTradeExtra?: Record<string, unknown> | null;
 }) {
   const {
     supabase,
@@ -35,6 +46,7 @@ export async function resolveSellFillFinancials(params: {
     ghostMode,
     currentBalance,
     resolvedStartingBalance,
+    openTradeExtra,
   } = params;
   const soldBase = toNumber((sellOrder as any)?.amount, amount);
   if (!Number.isFinite(soldBase) || soldBase <= 0) {
@@ -59,8 +71,15 @@ export async function resolveSellFillFinancials(params: {
     });
   }
   const exitNotional = soldBase * exitPx;
-  const entryCost = soldBase * entryPrice;
-  const pnl = fromUsdCents(toUsdCents(exitNotional) - toUsdCents(entryCost));
+  const feeUsdBuy = toNumber(openTradeExtra?.fee_usd_buy, 0);
+  const feeUsdSell = extractLegFeeUsd(sellOrder);
+  const pnl = computeNetTradePnl({
+    qty: soldBase,
+    entryPrice,
+    exitPrice: exitPx,
+    feeUsdBuy,
+    feeUsdSell,
+  });
   const notionalForPct = soldBase * entryPrice;
   const pnlPercentRaw = Number.isFinite(notionalForPct) && notionalForPct >= 0.01
     ? (pnl / notionalForPct) * 100
@@ -69,10 +88,17 @@ export async function resolveSellFillFinancials(params: {
     ? Number(pnlPercentRaw.toFixed(2))
     : 0;
   let nextBalance = fromUsdCents(
-    toUsdCents(currentBalance) + toUsdCents(exitNotional),
+    toUsdCents(currentBalance) + toUsdCents(exitNotional) - toUsdCents(feeUsdSell),
   );
-  if (isTestMode || ghostMode) {
-    nextBalance = await adjustPaperDemoBalance(supabase, userId, exitNotional);
+  if (
+    shouldApplyPaperDemoLedgerDelta(isTestMode, ghostMode) &&
+    shouldApplyPaperBalanceOnSellFinancials(true, partialFill)
+  ) {
+    nextBalance = await adjustPaperDemoBalance(
+      supabase,
+      userId,
+      exitNotional - feeUsdSell,
+    );
   }
   const accountPnl = fromUsdCents(toUsdCents(nextBalance) - toUsdCents(resolvedStartingBalance));
   const soldValueUsd = Number((soldBase * entryPrice).toFixed(2));
@@ -84,5 +110,7 @@ export async function resolveSellFillFinancials(params: {
     nextBalance,
     accountPnl,
     soldValueUsd,
+    feeUsdBuy,
+    feeUsdSell,
   };
 }

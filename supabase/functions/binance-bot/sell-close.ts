@@ -25,6 +25,8 @@ export async function closeTradeRowAfterSell(params: {
   effectiveExitReason?: string;
   /** When true, caller sends one consolidated Telegram (avoids duplicate with bot-sell). */
   skipTradeRowTelegram?: boolean;
+  feeUsdBuy?: number;
+  feeUsdSell?: number;
 }) {
   const {
     supabase,
@@ -48,6 +50,8 @@ export async function closeTradeRowAfterSell(params: {
     soldValueUsd,
     effectiveExitReason,
     skipTradeRowTelegram,
+    feeUsdBuy = 0,
+    feeUsdSell = 0,
   } = params;
   const closeResult = await supabase.from("trades").update({
     status: pnl >= 0 ? "closed" : "stopped",
@@ -65,6 +69,8 @@ export async function closeTradeRowAfterSell(params: {
       execution_type: (sellOrder as any)?.execution_type ?? null,
       actual_slippage_pct: (sellOrder as any)?.actual_slippage_pct ?? null,
       smart_execution_meta: (sellOrder as any)?.smart_execution_meta ?? null,
+      fee_usd_buy: Number.isFinite(Number(feeUsdBuy)) ? Number(Number(feeUsdBuy).toFixed(8)) : 0,
+      fee_usd_sell: Number.isFinite(Number(feeUsdSell)) ? Number(Number(feeUsdSell).toFixed(8)) : 0,
     },
     notes: `Closed by Edge SELL | strategy=${strategyNotes} | tech=${technical} ai=${aiTrend}(${aiConfidence})`,
   })

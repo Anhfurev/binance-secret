@@ -4,9 +4,9 @@ import {
   shouldFastTrackGroqBuyVeto,
 } from "../ai-veto-helpers.ts";
 
-Deno.test("readGroqVetoFastTrackMinConfidence defaults to 95", () => {
+Deno.test("readGroqVetoFastTrackMinConfidence defaults to 98", () => {
   Deno.env.delete("GROQ_VETO_FAST_TRACK_MIN_CONFIDENCE");
-  assertEquals(readGroqVetoFastTrackMinConfidence(), 95);
+  assertEquals(readGroqVetoFastTrackMinConfidence(), 98);
 });
 
 Deno.test("shouldFastTrackGroqBuyVeto skips Groq at high conviction", () => {
@@ -14,7 +14,7 @@ Deno.test("shouldFastTrackGroqBuyVeto skips Groq at high conviction", () => {
   assertEquals(
     shouldFastTrackGroqBuyVeto({
       action: "BUY",
-      ai_confidence: 95,
+      ai_confidence: 98,
       trend: "bullish",
       trend_alignment: true,
     }),

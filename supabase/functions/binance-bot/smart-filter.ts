@@ -20,7 +20,7 @@ function readEnabled(): boolean {
 function readMinVolVs24hAvg(): number {
   const raw = String(Deno.env.get("SMART_FILTER_MIN_VOL_VS_24H_AVG") ?? "").trim();
   const n = raw.length ? Number(raw) : NaN;
-  if (!Number.isFinite(n)) return 1;
+  if (!Number.isFinite(n)) return 0.8;
   return Math.min(3, Math.max(0.1, n));
 }
 

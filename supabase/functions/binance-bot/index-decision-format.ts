@@ -22,6 +22,9 @@ export function formatCycleReason(
     return `Strategy BUY rejected: AI confidence ${ai.ai_confidence} < ${minAiConfidence}`;
   }
   if (reason === "hold_ai_action_not_buy") return `AI Action is ${ai.action}, expected BUY`;
+  if (reason === "strategy_confirmed_high_conviction_buy") {
+    return `Strategy BUY confirmed: AI HOLD but confidence ${ai.ai_confidence} >= ${minAiConfidence}`;
+  }
   if (reason === "hold_ai_trend_not_aligned") return "1m and 15m trend are not aligned";
   if (reason === "hold_technical_sell_block") return "Technical signal blocked BUY";
   if (reason === "hold_technical_bearish_override") return "Skipped: Technical Bearish Override";
@@ -54,7 +57,7 @@ export function formatCycleReason(
     return `Dip-buy override: RSI < 30, technical score > 8, confidence >= ${minAiConfidence}`;
   }
   if (reason === "tie_breaker_tech8_ai40") {
-    return "Tie-break BUY: technical score = 8 and AI confidence > 40";
+    return `Tie-break BUY: technical score >= 8 and AI confidence >= ${minAiConfidence}`;
   }
   if (reason === "meme_volume_sentiment_override") {
     return "Meme volatility override: volume spike + supportive sentiment + tech floor";

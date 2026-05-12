@@ -8,7 +8,22 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
-## 2026-05-11 — PostgREST transient retries + `min_profit_after_fees_pct` DDL
+## 2026-05-12 — Paper wallet reconcile + entry quality gates
+
+**Summary**
+
+- **`paper-wallet-reconcile.ts`:** debugger rebases `profiles.demo_balance` from `starting_balance` + paper realized PnL − open notionals (`PAPER_WALLET_RECONCILE=1` default).
+- **`stop-reentry-cooldown.ts`:** 5m post-`stoploss_hit` symbol cooldown before new BUYs.
+- **`trade-size-floor.ts`:** BTC min ~$50 notional; PEPE ~$25.
+- **`index-decision.ts`:** removed aggressive HOLD fallback; tighter tie-breaker + order-book gate.
+- **`run-symbol-batch.ts`:** force-buy needs `action=BUY` + higher confidence delta; cooldown wired pre-execution.
+- **`ai-veto-helpers.ts` / `index-ai.ts`:** looser fast-veto micro-pullback defaults; fewer AI calls on small price moves.
+- **`money-machine-guard.ts`:** live-tick high-water; distinct exit reasons; cron paper-wallet reconcile for active paper users.
+- **`no-trade-fallback.ts`:** no longer forces aggressive mode unless `NO_TRADE_FALLBACK_FORCE_AGGRESSIVE=1`.
+- **`run-symbol-batch.ts`:** paper scenario overlay uses `let snapshot` (fixes `Assignment to constant variable` on `momentum_buy` / dry-run); dry-run returns `tag: ok` so batch actions are not mislabeled `error`.
+- **`health-debugger.ts`:** Binance secret check accepts `BINANCE_SECRET` / `BINANCE_API_SECRET` (not only `BINANCE_SECRET_KEY`).
+
+---
 
 **Summary**
 

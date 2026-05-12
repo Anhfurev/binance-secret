@@ -7,6 +7,7 @@ import { persistRunTelemetry } from "./bot-telemetry.ts";
 import { botWarn } from "./bot-debug.ts";
 import { toNumber } from "./utils.ts";
 import { releaseTradeExecutionLock } from "./trade-execution-lock.ts";
+import { shouldApplyPaperDemoLedgerDelta } from "./paper-balance.ts";
 
 export async function handlePartialSellAndKeepOpen(params: {
   supabase: ReturnType<typeof createClient>;
@@ -67,10 +68,9 @@ export async function handlePartialSellAndKeepOpen(params: {
   const remainingValue = Number((remainingBase * entryPrice).toFixed(8));
   const closedAt = new Date().toISOString();
   const exitNotional = soldBase * exitPx;
-  let nextBalance = fromUsdCents(toUsdCents(currentBalance) + toUsdCents(exitNotional));
-  if (isTestMode || ghostMode) {
-    nextBalance = await adjustPaperDemoBalance(supabase, userId, exitNotional);
-  }
+  const nextBalance = shouldApplyPaperDemoLedgerDelta(isTestMode, ghostMode)
+    ? await adjustPaperDemoBalance(supabase, userId, exitNotional)
+    : fromUsdCents(toUsdCents(currentBalance) + toUsdCents(exitNotional));
   const currentExtra = ((openTrade as any)?.extra as Record<string, unknown> | undefined) ?? {};
   const realizedPnlBefore = toNumber(currentExtra.realized_pnl_usd, 0);
   const realizedPnlNow = fromUsdCents(toUsdCents(realizedPnlBefore) + toUsdCents(pnl));

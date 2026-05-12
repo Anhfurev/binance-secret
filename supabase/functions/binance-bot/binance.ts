@@ -1,6 +1,7 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { SUPPORTED_SYMBOLS } from "./constants.ts";
+import { resolveBinanceRestBaseUrl } from "./binance-rest-base.ts";
 import { gatewayFetch } from "./gateway-http-client.ts";
 import type { IndicatorSnapshot } from "./types.ts";
 import { toStringValue } from "./utils.ts";
@@ -222,6 +223,8 @@ export async function createOrder(params: {
     });
   }
 
+  const lockHeld = Boolean(botId && cycleId);
+  let orderFilled = false;
   try {
     await assertExpectedEgressIpOrThrow();
     const precisionAmount = await formatAmount(symbol, amount);
@@ -259,6 +262,7 @@ export async function createOrder(params: {
       },
     });
     const filledBase = Number((order as any)?.amount ?? precisionAmount);
+    orderFilled = true;
     return {
       exchange_order_id: toStringValue((order as any)?.id) ?? null,
       status: toStringValue((order as any)?.status) ?? "unknown",
@@ -289,7 +293,9 @@ export async function createOrder(params: {
       });
     }
     await logCcxtOrderError({ supabase, userId, symbol, side, amount, error });
-    if (botId && cycleId) {
+    throw error;
+  } finally {
+    if (lockHeld && !orderFilled && botId && cycleId) {
       await releaseTradeExecutionLock({
         supabase,
         botId: String(botId),
@@ -297,6 +303,5 @@ export async function createOrder(params: {
         side: sideType as "buy" | "sell",
       });
     }
-    throw error;
   }
 }

@@ -29,7 +29,12 @@ import { withLlmConcurrency } from "./ai-llm-concurrency.ts";
 // previous AI check for this symbol. Lower values burn key quota on micro
 // wiggles; higher values risk missing fast moves. 0.4% is a practical balance
 // for BTC / SOL / PEPE on a 1m heartbeat cadence.
-export const AI_PRICE_MOVE_THRESHOLD_PERCENT = 0.4;
+export const AI_PRICE_MOVE_THRESHOLD_PERCENT = (() => {
+  const raw = String(Deno.env.get("AI_PRICE_MOVE_THRESHOLD_PCT") ?? "0.35").trim();
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0.22;
+  return Math.min(2, Math.max(0.05, n));
+})();
 
 export function resetAiCycleGuards() {
   // State moved to DB-backed ai_quota_state.

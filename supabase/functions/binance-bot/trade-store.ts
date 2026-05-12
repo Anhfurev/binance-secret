@@ -57,7 +57,7 @@ async function loadOpenTradeOnce(
     .eq("symbol", symbol)
     .ilike("status", "open")
     .or("extra->>is_ghost.is.null,extra->>is_ghost.eq.false")
-    .or("extra->>trade_mode.is.null,extra->>trade_mode.eq.live")
+    .or("extra->>trade_mode.is.null,extra->>trade_mode.eq.live,extra->>trade_mode.eq.paper")
     .order("opened_at", { ascending: false })
     .limit(1)
     .maybeSingle();

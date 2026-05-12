@@ -69,7 +69,7 @@ export async function tryClaimTradeExecutionLock(params: {
   if (!dup) {
     console.warn(`[trade_execution_locks] insert failed: ${code} ${msg}`);
     execObserve("trade_lock_insert_error", { botId, cycleId, side, code, msg });
-    return "claimed";
+    return "duplicate";
   }
   execObserve("trade_lock_duplicate", { botId, cycleId, side, symbol });
   return "duplicate";

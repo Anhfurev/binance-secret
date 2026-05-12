@@ -19,6 +19,10 @@ HUB_DIR="${HUB_DIR:-/opt/binance-stream-hub}"
 }
 mkdir -p "${HUB_DIR}"
 cp -R "${HUB_SRC}/." "${HUB_DIR}/"
+[[ -f "${HUB_DIR}/hub.ts" ]] || {
+  echo "Missing ${HUB_DIR}/hub.ts after copy from ${HUB_SRC}" >&2
+  exit 1
+}
 
 ENV_FILE="${ENV_FILE:-/root/binance-gateway/scripts/.oracle-gateway.env}"
 if [[ -z "${BINANCE_GATEWAY_SECRET:-}" && -f "${ENV_FILE}" ]]; then
@@ -29,6 +33,11 @@ fi
   echo "Set BINANCE_GATEWAY_SECRET or populate ${ENV_FILE}" >&2
   exit 1
 }
+
+BINANCE_BOT_WAKE_URL="${BINANCE_BOT_WAKE_URL:-https://emviaygygylosvmtsvlq.supabase.co/functions/v1/binance-bot}"
+if [[ -z "${BOT_WAKE_SECRET:-}" ]]; then
+  echo "WARN: BOT_WAKE_SECRET unset — stream wick wakes to binance-bot are disabled until set (same value as Edge BOT_SECRET)." >&2
+fi
 
 tee /etc/systemd/system/binance-stream-hub.service >/dev/null <<UNIT
 [Unit]
@@ -42,10 +51,10 @@ WorkingDirectory=${HUB_DIR}
 Environment=BINANCE_GATEWAY_SECRET=${BINANCE_GATEWAY_SECRET}
 Environment=STREAM_HUB_PORT=8787
 Environment=STREAM_SYMBOLS=BTCUSDT,SOLUSDT,PEPEUSDT
-Environment=WICK_WAKE_DROP_PCT_PEPEUSDT=2.0
+Environment=WICK_WAKE_DROP_PCT_PEPEUSDT=2.5
 Environment=BINANCE_BOT_WAKE_URL=${BINANCE_BOT_WAKE_URL:-}
 Environment=BOT_WAKE_SECRET=${BOT_WAKE_SECRET:-}
-ExecStart=${DENO_BIN} run --no-config --allow-net --allow-env ${HUB_DIR}/main.ts
+ExecStart=${DENO_BIN} run --no-config --allow-net --allow-env ${HUB_DIR}/hub.ts
 Restart=always
 RestartSec=3
 

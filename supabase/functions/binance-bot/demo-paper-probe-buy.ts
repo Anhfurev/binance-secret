@@ -1,14 +1,25 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import { readDemoProbeEnabled } from "./paper-balance.ts";
+import { blockedByPostStoplossCooldown } from "./stop-reentry-cooldown.ts";
 
 /**
  * No BUY recorded for this long (in HOURS) → eligible for a paper/demo probe buy.
  * Aggressive default for demo so the user can validate the BUY pipeline:
  * if the bot has been silent for a few hours, try one paper trade.
  */
-const DEMO_PROBE_INACTIVITY_HOURS = 6;
-/** Minimum gap between probe attempts (avoids BUY spam every cron tick while inactive). */
-const PROBE_COOLDOWN_MS = 90 * 60 * 1000;
+function readProbeHours(): number {
+  const raw = String(Deno.env.get("DEMO_PROBE_INACTIVITY_HOURS") ?? "").trim();
+  const n = raw.length ? Number(raw) : 1;
+  return Number.isFinite(n) ? Math.min(48, Math.max(1, Math.floor(n))) : 1;
+}
+
+function readProbeCooldownMs(): number {
+  const raw = String(Deno.env.get("DEMO_PROBE_COOLDOWN_MINUTES") ?? "").trim();
+  const n = raw.length ? Number(raw) : 45;
+  const minutes = Number.isFinite(n) ? Math.min(24 * 60, Math.max(15, Math.floor(n))) : 45;
+  return minutes * 60 * 1000;
+}
 
 export type DemoPaperProbeBuyResult = {
   apply: boolean;
@@ -31,8 +42,20 @@ export async function resolveDemoPaperProbeBuy(params: {
   if (Boolean((row as any)?.is_live_trading_enabled)) {
     return { apply: false, reason: null };
   }
+  if (!readDemoProbeEnabled()) {
+    return { apply: false, reason: "demo_probe_disabled" };
+  }
   if (hasOpenTrade || !userId || userId === "unknown") {
     return { apply: false, reason: null };
+  }
+
+  const stopCooldown = await blockedByPostStoplossCooldown({
+    supabase,
+    userId,
+    symbol,
+  });
+  if (stopCooldown.blocked) {
+    return { apply: false, reason: stopCooldown.reason ?? "demo_probe_post_stop_cooldown" };
   }
 
   const lastProbe = await supabase
@@ -48,7 +71,7 @@ export async function resolveDemoPaperProbeBuy(params: {
 
   if (!lastProbe.error && lastProbe.data?.created_at) {
     const ms = Date.parse(String(lastProbe.data.created_at));
-    if (Number.isFinite(ms) && Date.now() - ms < PROBE_COOLDOWN_MS) {
+    if (Number.isFinite(ms) && Date.now() - ms < readProbeCooldownMs()) {
       return { apply: false, reason: "demo_probe_cooldown_active" };
     }
   }
@@ -80,7 +103,7 @@ export async function resolveDemoPaperProbeBuy(params: {
 
   const neverBought = !Number.isFinite(lastMs);
   const inactiveLongEnough =
-    neverBought || (hoursSinceLastBuy ?? 0) >= DEMO_PROBE_INACTIVITY_HOURS;
+    neverBought || (hoursSinceLastBuy ?? 0) >= readProbeHours();
 
   if (!inactiveLongEnough) {
     return { apply: false, reason: null };

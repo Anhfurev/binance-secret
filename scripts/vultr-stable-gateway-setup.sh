@@ -27,6 +27,7 @@ server {
     }
 
     location /stream/ {
+        # Loopback only — never proxy stream hub via the VM public IP (adds RTT on wicks).
         if (\$http_x_binance_gateway_secret != "${GATEWAY_SECRET}") {
             return 403;
         }
@@ -89,8 +90,8 @@ WorkingDirectory=${HUB_DIR}
 Environment=BINANCE_GATEWAY_SECRET=${GATEWAY_SECRET}
 Environment=STREAM_HUB_PORT=8787
 Environment=STREAM_SYMBOLS=BTCUSDT,SOLUSDT,PEPEUSDT
-Environment=WICK_WAKE_DROP_PCT_PEPEUSDT=2.0
-ExecStart=${DENO_BIN} run --no-config --allow-net --allow-env ${HUB_DIR}/main.ts
+Environment=WICK_WAKE_DROP_PCT_PEPEUSDT=2.5
+ExecStart=${DENO_BIN} run --no-config --allow-net --allow-env ${HUB_DIR}/hub.ts
 Restart=always
 RestartSec=3
 

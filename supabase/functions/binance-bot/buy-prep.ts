@@ -7,11 +7,13 @@ import {
   resolveSpotRoundTripTakerFeePct,
 } from "./constants.ts";
 import { clamp, toNumber, toStringValue } from "./utils.ts";
-import { getUsdtBalance } from "./binance.ts";
 import { resolveExchangeSkipped, resolveTestMode } from "./bot-shared.ts";
+import { resolvePaperWalletUsdt } from "./paper-balance.ts";
 import { botDebug, botWarn } from "./bot-debug.ts";
 import { volatilityAdjustedDistanceDown, takeProfitDistanceUp } from "./buy-helpers.ts";
+import { resolveStopLossPctFraction, resolveTakeProfitPctPoints } from "./trade-stop-risk.ts";
 import { safeInsertLog } from "./buy-logging.ts";
+import { formatAmount } from "./exchange-client.ts";
 
 export async function prepareBuyExecution(params: {
   supabase: ReturnType<typeof createClient>;
@@ -31,17 +33,21 @@ export async function prepareBuyExecution(params: {
   bearish1hCap: boolean;
   mtf: Record<string, unknown>;
   ghostMode: boolean;
+  /** Profile cash for paper/ghost; live callers pass exchange free USDT. */
+  walletUsdt: number;
 }) {
   const {
     supabase, row, userId, symbol, ai, marketRegime, snapshotPrice, atr14,
     trailingStopPct, volBurstWidenMult = 1, volBurstMeta, tradeUsd,
-    effectiveConfidence, rawWeighted, bearish1hCap, mtf, ghostMode,
+    effectiveConfidence, rawWeighted, bearish1hCap, mtf, ghostMode, walletUsdt,
   } = params;
   /** Must match `resolveTestMode` / `is_live_trading_enabled` — not legacy `is_test_mode`. */
   const isTestMode = resolveTestMode(row);
   const exchangeSkipped = resolveExchangeSkipped(row);
   const isLiveMode = !exchangeSkipped;
-  const usdtBalance = await getUsdtBalance(isTestMode || ghostMode);
+  const usdtBalance = exchangeSkipped
+    ? resolvePaperWalletUsdt(walletUsdt)
+    : walletUsdt;
   if (usdtBalance < tradeUsd) {
     const shortBy = Number((tradeUsd - usdtBalance).toFixed(2));
     return {
@@ -52,9 +58,12 @@ export async function prepareBuyExecution(params: {
     };
   }
 
-  const qty = Number((tradeUsd / snapshotPrice).toFixed(8));
+  const rawQty = tradeUsd / snapshotPrice;
+  const qty = Number((await formatAmount(symbol, rawQty)));
   const stopLossPct = clamp(toNumber((row as any).stop_loss_pct, 2), 0.1, 50);
-  const takeProfitPct = clamp(toNumber((row as any).take_profit_pct, 4), 0.1, 100);
+  const takeProfitPctRaw = clamp(toNumber((row as any).take_profit_pct, 4), 0.1, 100);
+  const stopLossPctFraction = resolveStopLossPctFraction(stopLossPct, symbol);
+  const takeProfitPct = resolveTakeProfitPctPoints(takeProfitPctRaw, stopLossPct, symbol);
   const gateFees = String(Deno.env.get("MIN_PROFIT_AFTER_FEES_GATE") ?? "1").trim() !== "0";
   if (gateFees) {
     const rawMin = (row as any).min_profit_after_fees_pct;
@@ -82,7 +91,6 @@ export async function prepareBuyExecution(params: {
     }
   }
   const entryPriceFull = Number(snapshotPrice.toFixed(8));
-  const stopLossPctFraction = stopLossPct / 100;
   const VB_MAX = 1 + VOL_BURST_MAX_ATR_BONUS;
   const vbRaw = Number(volBurstWidenMult);
   const vb = Number.isFinite(vbRaw) && vbRaw >= 1 ? Math.min(vbRaw, VB_MAX) : 1;

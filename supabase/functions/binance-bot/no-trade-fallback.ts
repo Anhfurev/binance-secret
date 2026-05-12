@@ -3,6 +3,20 @@ import type { createClient } from "npm:@supabase/supabase-js@2";
 
 const NO_TRADE_FALLBACK_AFTER_DAYS = 10;
 
+function readPaperNoTradeFallbackHours(): number {
+  const raw = String(Deno.env.get("PAPER_NO_TRADE_FALLBACK_HOURS") ?? "4").trim();
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return 4;
+  return Math.min(72, Math.floor(n));
+}
+
+function readNoTradeFallbackForceAggressive(): boolean {
+  const raw = String(Deno.env.get("NO_TRADE_FALLBACK_FORCE_AGGRESSIVE") ?? "0")
+    .trim()
+    .toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
 export type NoTradeFallbackResult = {
   active: boolean;
   daysSinceLastBuy: number | null;
@@ -23,6 +37,7 @@ export async function resolveNoTradeFallback(params: {
   hasOpenTrade: boolean;
   minAiConfidence: number;
   minTechScore: number;
+  paperOnly?: boolean;
 }): Promise<NoTradeFallbackResult> {
   const {
     supabase,
@@ -31,6 +46,7 @@ export async function resolveNoTradeFallback(params: {
     hasOpenTrade,
     minAiConfidence,
     minTechScore,
+    paperOnly = false,
   } = params;
 
   if (hasOpenTrade || !userId || userId === "unknown") {
@@ -67,12 +83,17 @@ export async function resolveNoTradeFallback(params: {
 
   const lastTs = String(lastBuyResult.data?.opened_at ?? lastBuyResult.data?.created_at ?? "");
   const lastMs = Date.parse(lastTs);
+  const hoursSinceLastBuy = Number.isFinite(lastMs)
+    ? Math.floor((Date.now() - lastMs) / (60 * 60 * 1000))
+    : null;
   const daysSinceLastBuy = Number.isFinite(lastMs)
     ? Math.floor((Date.now() - lastMs) / (24 * 60 * 60 * 1000))
     : null;
 
   const neverBought = !Number.isFinite(lastMs);
-  const inactiveLongEnough = neverBought || (daysSinceLastBuy ?? 0) >= NO_TRADE_FALLBACK_AFTER_DAYS;
+  const inactiveLongEnough = paperOnly
+    ? neverBought || (hoursSinceLastBuy ?? 0) >= readPaperNoTradeFallbackHours()
+    : neverBought || (daysSinceLastBuy ?? 0) >= NO_TRADE_FALLBACK_AFTER_DAYS;
   if (!inactiveLongEnough) {
     return {
       active: false,
@@ -95,9 +116,11 @@ export async function resolveNoTradeFallback(params: {
     daysSinceLastBuy,
     adjustedMinAiConfidence,
     adjustedMinTechScore,
-    forceAggressiveMode: true,
+    forceAggressiveMode: readNoTradeFallbackForceAggressive(),
     reason: neverBought
       ? "no_trade_fallback_activated_never_bought"
+      : paperOnly
+      ? `no_trade_fallback_activated_${hoursSinceLastBuy}h`
       : `no_trade_fallback_activated_${daysSinceLastBuy}d`,
   };
 }

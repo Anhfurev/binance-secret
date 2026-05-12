@@ -8,6 +8,7 @@ import { handlePartialSellAndKeepOpen } from "./sell-partial.ts";
 import { closeTradeRowAfterSell } from "./sell-close.ts";
 import { resolveExchangeSkipped, resolveGhostMode, resolveTestMode } from "./bot-shared.ts";
 import { resolveSellFillFinancials } from "./sell-financials.ts";
+import { resolveFillVwap } from "./fill-fees.ts";
 import { insertSellFillQualityLog } from "./sell-fill-quality.ts";
 import { notifyFullSellClose } from "./sell-notify-full-close.ts";
 import { botDebug, botError, botWarn } from "./bot-debug.ts";
@@ -134,9 +135,9 @@ export async function executeSellFlow(params: {
   const sellOrderId = toStringValue((sellOrder as any)?.exchange_order_id);
   // Live (CCXT) and paper (`simulatePaperFill`) return the same `average`/`price`
   // shape — read both so paper PnL includes the same fee/slippage haircut as live.
-  const fillPx = Number((sellOrder as any)?.average ?? (sellOrder as any)?.price);
+  const fillPx = resolveFillVwap(sellOrder as Record<string, unknown>, snapshotPrice);
   if (Number.isFinite(fillPx) && fillPx > 0) {
-    exitPx = Number(fillPx.toFixed(8));
+    exitPx = fillPx;
   }
 
   const bridgeResult = await supabase
@@ -165,6 +166,8 @@ export async function executeSellFlow(params: {
     nextBalance,
     accountPnl,
     soldValueUsd,
+    feeUsdBuy,
+    feeUsdSell,
   } = await resolveSellFillFinancials({
     supabase,
     userId,
@@ -177,6 +180,7 @@ export async function executeSellFlow(params: {
     ghostMode,
     currentBalance,
     resolvedStartingBalance,
+    openTradeExtra: ((openTrade as any)?.extra as Record<string, unknown> | undefined) ?? null,
   });
 
   await insertSellFillQualityLog({
@@ -246,6 +250,8 @@ export async function executeSellFlow(params: {
     soldValueUsd,
     effectiveExitReason,
     skipTradeRowTelegram: true,
+    feeUsdBuy,
+    feeUsdSell,
   });
 
   if (botId && cycleId) {

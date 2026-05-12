@@ -19,6 +19,16 @@ source "$ENV_FILE"
   echo "BINANCE_GATEWAY_SECRET missing in $ENV_FILE" >&2
   exit 1
 }
+LOCAL_ENV="${ROOT}/.env.local"
+if [[ -f "$LOCAL_ENV" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$LOCAL_ENV"
+  set +a
+fi
+BOT_WAKE_SECRET="${BOT_WAKE_SECRET:-${BOT_SECRET:-}}"
+BINANCE_BOT_WAKE_URL="${BINANCE_BOT_WAKE_URL:-https://emviaygygylosvmtsvlq.supabase.co/functions/v1/binance-bot}"
+REMOTE_DIR="${REMOTE_DIR:-/root/binance-gateway}"
 
 SSH_BASE=(
   -o StrictHostKeyChecking=accept-new
@@ -63,6 +73,9 @@ run_scp "${ROOT}/scripts/gateway-stream-hub/"* "${REMOTE}:~/gateway-stream-hub/"
 
 echo "==> Running nginx gateway setup on VM..."
 run_ssh "chmod +x ~/vultr-stable-gateway-setup.sh && BINANCE_GATEWAY_SECRET='${BINANCE_GATEWAY_SECRET}' bash ~/vultr-stable-gateway-setup.sh"
+
+echo "==> Installing stream hub under /opt/binance-stream-hub..."
+run_ssh "BOT_WAKE_SECRET='${BOT_WAKE_SECRET:-}' BINANCE_BOT_WAKE_URL='${BINANCE_BOT_WAKE_URL}' bash ${REMOTE_DIR}/scripts/fix-vultr-stream-hub-deno.sh"
 
 echo "==> Verify (from Mac):"
 echo "curl -fsS --max-time 10 http://${REMOTE_HOST}/healthz"

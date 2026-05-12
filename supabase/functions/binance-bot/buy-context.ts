@@ -15,6 +15,7 @@ import { passesMeanReversionBuyGate } from "./regime-detection.ts";
 import { resolveBuyFlowMtfContext } from "./buy-mtf.ts";
 import { MIN_ADX_FOR_NON_TRENDING_BUY, ONE_H_BEARISH_MAX_CONFIDENCE } from "./buy-helpers.ts";
 import { safeInsertLog } from "./buy-logging.ts";
+import { applySymbolTradeUsdFloor } from "./trade-size-floor.ts";
 import { resolveGhostMode, resolveTestMode } from "./bot-shared.ts";
 import { resolveMinAiConfidenceForRegime } from "./utils.ts";
 
@@ -219,13 +220,17 @@ export async function resolveBuyContextAndSizing(params: {
     weightedConfidence: effectiveConfidence,
     minAiConfidence,
   });
-  const tradeUsd = applyConfidenceSizedTradeUsd({
-    baseTradeUsd,
+  const tradeUsd = applySymbolTradeUsdFloor({
+    symbol,
+    tradeUsd: applyConfidenceSizedTradeUsd({
+      baseTradeUsd,
+      currentBalance,
+      minTradeUsd: MIN_TRADE_USD,
+      sizing: confidenceSizing,
+      executionUsdScale,
+      useConfidenceScale: !useEnvTradeAmount && fixedUsd <= 0,
+    }),
     currentBalance,
-    minTradeUsd: MIN_TRADE_USD,
-    sizing: confidenceSizing,
-    executionUsdScale,
-    useConfidenceScale: !useEnvTradeAmount && fixedUsd <= 0,
   });
   if (tradeUsd < MIN_TRADE_USD) {
     return {

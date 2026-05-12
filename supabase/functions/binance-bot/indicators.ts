@@ -21,9 +21,14 @@ function normalizeSmallNumber(value: number): number {
 }
 
 export function calculateEma(prices: number[], period: number): number {
+  if (!prices.length) return 0;
+  if (prices.length < period) {
+    const seed = prices.reduce((sum, p) => sum + p, 0) / prices.length;
+    return normalizeSmallNumber(seed);
+  }
   const multiplier = 2 / (period + 1);
-  let ema = prices[0] ?? 0;
-  for (let i = 1; i < prices.length; i += 1) {
+  let ema = prices.slice(0, period).reduce((sum, p) => sum + p, 0) / period;
+  for (let i = period; i < prices.length; i += 1) {
     ema = prices[i] * multiplier + ema * (1 - multiplier);
   }
   return normalizeSmallNumber(ema);
@@ -130,12 +135,32 @@ function seriesEma(prices: number[], period: number) {
   const multiplier = 2 / (period + 1);
   const result: number[] = [];
   let ema = prices[0] ?? 0;
-  result.push(ema);
-  for (let i = 1; i < prices.length; i += 1) {
-    ema = prices[i] * multiplier + ema * (1 - multiplier);
+  for (let i = 0; i < prices.length; i += 1) {
+    if (i === period - 1 && prices.length >= period) {
+      ema = prices.slice(0, period).reduce((sum, p) => sum + p, 0) / period;
+    } else if (i > 0) {
+      ema = prices[i] * multiplier + ema * (1 - multiplier);
+    }
     result.push(ema);
   }
   return result;
+}
+
+function hasGreen1mCandle(candles: Candle[] | undefined): boolean {
+  const last = candles?.at(-1);
+  if (!last) return false;
+  return toNumber(last.close, 0) > toNumber(last.open, 0);
+}
+
+function hasBullishRsiDivergence(closes: number[], rsi: number): boolean {
+  if (closes.length < 4) return false;
+  const prevClose = toNumber(closes[closes.length - 2], 0);
+  const lastClose = toNumber(closes[closes.length - 1], 0);
+  const priorClose = toNumber(closes[closes.length - 3], 0);
+  if (!(prevClose > 0) || !(lastClose > 0) || !(priorClose > 0)) return false;
+  const priceLowerLow = lastClose < prevClose && prevClose <= priorClose;
+  const rsiRecovering = rsi > 0 && lastClose < prevClose && rsi >= 28;
+  return priceLowerLow && rsiRecovering;
 }
 
 export function decideTechnicalSignal(
@@ -144,6 +169,7 @@ export function decideTechnicalSignal(
   emaSlow: number,
   latestPrice: number,
   row: BotSettingsRow,
+  candles1m?: Candle[],
 ): SignalDecision {
   const buyRsi = clamp(toNumber(row.rsi_buy_threshold, DEFAULT_BUY_RSI), 5, 50);
   const sellRsi = clamp(
@@ -154,8 +180,10 @@ export function decideTechnicalSignal(
 
   const bullishTrend = emaFast > emaSlow;
   const bearishTrend = emaFast < emaSlow;
+  const closes = (candles1m ?? []).map((c) => toNumber(c.close, 0)).filter((c) => c > 0);
+  const dipStabilized = hasBullishRsiDivergence(closes, rsi) || hasGreen1mCandle(candles1m);
 
-  if (rsi <= buyRsi && bullishTrend && latestPrice >= emaFast) return "BUY";
+  if (rsi <= buyRsi && bullishTrend && latestPrice >= emaFast && dipStabilized) return "BUY";
   if (rsi >= sellRsi && bearishTrend && latestPrice <= emaFast) return "SELL";
   return "HOLD";
 }

@@ -50,6 +50,6 @@ export function readWickDropPct(symbol: string): number | null {
   if (Number.isFinite(n) && n > 0) {
     return Math.min(25, Math.max(0.2, n));
   }
-  if (sym.includes("PEPE")) return 2;
+  if (sym.includes("PEPE")) return 2.5;
   return null;
 }

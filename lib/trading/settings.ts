@@ -25,7 +25,7 @@ export interface AppSettings {
 
 export const defaultScalpingSettings: ScalpingSettings = {
   timeframe: "3m",
-  minAiConfidence: 70,
+  minAiConfidence: 58,
   rsiBuyThreshold: 30,
   rsiSellThreshold: 70,
   maxOpenTrades: 5,
@@ -35,8 +35,8 @@ export const defaultScalpingSettings: ScalpingSettings = {
   minVolatilityPct: 0.2,
   maxVolatilitySpikePct: 2.4,
   requiredTechnicalConfirmations: 2,
-  stopLossPct: 0.45,
-  takeProfitPct: 0.95,
+  stopLossPct: 2.0,
+  takeProfitPct: 4.0,
   maxPositionSizePct: 5,
   maxDailyLossPct: 5,
   useTrailingStop: true,

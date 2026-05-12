@@ -44,7 +44,7 @@ function readAiCacheWindowMs(): number {
   if (!Number.isFinite(n)) return 90 * 1000;
   return Math.min(5 * 60 * 1000, Math.max(30_000, Math.floor(n)));
 }
-const AI_STALE_CACHE_FALLBACK_MS = 10 * 60 * 1000;
+const AI_STALE_CACHE_FALLBACK_MS = 2 * 60 * 1000;
 const AI_UNAVAILABLE_LOG = "AI currently unavailable - switching to Technical-Only mode.";
 const SAFETY_LIMIT_FALLBACK = { signal: "HOLD", confidence: 100, reason: "limit_fallback" } as const;
 

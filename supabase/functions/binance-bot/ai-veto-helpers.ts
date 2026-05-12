@@ -13,9 +13,9 @@ function numEnv(key: string, fallback: number): number {
 /** Gemini BUY at or above this weighted score skips the Groq LLM veto (fast-track). */
 export function readGroqVetoFastTrackMinConfidence(): number {
   const raw = String(Deno.env.get("GROQ_VETO_FAST_TRACK_MIN_CONFIDENCE") ?? "").trim();
-  if (!raw) return 95;
+  if (!raw) return 98;
   const n = Number(raw);
-  if (!Number.isFinite(n)) return 95;
+  if (!Number.isFinite(n)) return 98;
   return Math.min(100, Math.max(70, Math.floor(n)));
 }
 
@@ -96,8 +96,8 @@ export function evaluateStaleSignalVeto(snapshot: IndicatorSnapshot): {
 } | null {
   if (!VETO_STALE_ON()) return null;
   const win = buildVetoTechnicalWindow(snapshot);
-  const fiveTh = numEnv("VETO_FAST_1M_5BAR_RETURN_PCT", -0.2);
-  const gapTh = numEnv("VETO_FAST_GAP_FROM_LAST_1M_CLOSE_PCT", -0.15);
+  const fiveTh = numEnv("VETO_FAST_1M_5BAR_RETURN_PCT", -0.08);
+  const gapTh = numEnv("VETO_FAST_GAP_FROM_LAST_1M_CLOSE_PCT", -0.08);
   if (
     win.computed.five_1m_return_pct != null &&
     win.computed.five_1m_return_pct < fiveTh

@@ -30,8 +30,14 @@ export function decideHybridMatrix(params: {
   orderBookImbalanceExitBelow?: number;
   /** Do not fire imbalance exit until this many ms after `openTradeOpenedAt` (default 90_000). */
   orderBookImbalanceMinHoldMs?: number;
+  /** Prior consecutive cycles with weak bid/ask imbalance (open position). */
+  orderBookImbalanceExitWeakStreak?: number;
   openTradeOpenedAt?: string | null;
-}): { decision: SignalDecision; reason: string } {
+}): {
+  decision: SignalDecision;
+  reason: string;
+  orderBookImbalanceWeakStreak?: number;
+} {
   const {
     strategySignal,
     hasOpenTrade,
@@ -54,9 +60,16 @@ export function decideHybridMatrix(params: {
     memeSentimentSupport = false,
     orderBookImbalanceExitDisabledUntilMs = null,
     orderBookImbalanceExitBelow = 0.32,
-    orderBookImbalanceMinHoldMs = 90_000,
+    orderBookImbalanceMinHoldMs = 120_000,
+    orderBookImbalanceExitWeakStreak = 0,
     openTradeOpenedAt = null,
   } = params;
+
+  const withObStreak = (result: { decision: SignalDecision; reason: string }) => (
+    hasOpenTrade
+      ? { ...result, orderBookImbalanceWeakStreak: orderBookImbalanceWeakStreakNext }
+      : result
+  );
 
   let obImbalanceHoldElapsed = true;
   if (hasOpenTrade && openTradeOpenedAt) {
@@ -97,13 +110,16 @@ export function decideHybridMatrix(params: {
     aiConf > 88 &&
     Number.isFinite(imbalanceRatio) &&
     imbalanceRatio > 0.8;
-  const aggressiveTechFloor = Math.max(6, minTechnicalScore);
+  const aggressiveTechFloor = aggressiveModeEnabled
+    ? Math.max(7, minTechnicalScore + 2)
+    : Math.max(6, minTechnicalScore + 1);
   const passesAggressiveTechGate =
     technicalScore >= aggressiveTechFloor || hasExtremeAggressiveException;
   const tieBreakerTech8Ai40 =
-    technicalScore === 8 &&
+    strategySignal === "BUY" &&
+    technicalScore >= 8 &&
     Number.isFinite(aiConf) &&
-    aiConf > 40 &&
+    aiConf >= minAiConfidence &&
     ai.groq_verdict !== "REJECT" &&
     ai.trend !== "bearish";
   const isMemeSymbol = /PEPE|BONK|WIF|FLOKI|MEME/i.test(symbol);
@@ -113,35 +129,50 @@ export function decideHybridMatrix(params: {
     memeSentimentSupport &&
     technicalScore >= 6 &&
     Number.isFinite(aiConf) &&
-    aiConf >= 35 &&
+    aiConf >= 55 &&
+    rsi < 70 &&
     ai.groq_verdict !== "REJECT" &&
     ai.trend !== "bearish";
 
-  if (strategyExitTriggered || strategySignal === "SELL") {
-    return { decision: "SELL", reason: "strategy_exit_or_signal_sell" };
-  }
-  if (hasOpenTrade && ai.trend === "bearish" && Number.isFinite(aiConf) && aiConf > 85) {
-    return { decision: "SELL", reason: "ai_panic_sell" };
-  }
-  const isImbalanceExitTemporarilyDisabled =
-    Number.isFinite(Number(orderBookImbalanceExitDisabledUntilMs)) &&
-    Date.now() < Number(orderBookImbalanceExitDisabledUntilMs);
   const obExitThresh = Number.isFinite(orderBookImbalanceExitBelow) &&
       orderBookImbalanceExitBelow > 0 &&
       orderBookImbalanceExitBelow < 0.99
     ? orderBookImbalanceExitBelow
     : 0.32;
+  const weakObSample = hasOpenTrade &&
+    marketRegime !== "RANGING" &&
+    Number.isFinite(imbalanceRatio) &&
+    imbalanceRatio < obExitThresh;
+  const orderBookImbalanceWeakStreakNext = weakObSample
+    ? orderBookImbalanceExitWeakStreak + 1
+    : 0;
+
+  if (strategyExitTriggered || strategySignal === "SELL") {
+    return withObStreak({ decision: "SELL", reason: "strategy_exit_or_signal_sell" });
+  }
+  if (
+    hasOpenTrade &&
+    ai.trend === "bearish" &&
+    technical === "SELL" &&
+    Number.isFinite(aiConf) &&
+    aiConf > 85
+  ) {
+    return withObStreak({ decision: "SELL", reason: "ai_panic_sell" });
+  }
+  const isImbalanceExitTemporarilyDisabled =
+    Number.isFinite(Number(orderBookImbalanceExitDisabledUntilMs)) &&
+    Date.now() < Number(orderBookImbalanceExitDisabledUntilMs);
   if (
     !isImbalanceExitTemporarilyDisabled &&
     hasOpenTrade &&
+    marketRegime !== "RANGING" &&
     obImbalanceHoldElapsed &&
-    Number.isFinite(imbalanceRatio) &&
-    imbalanceRatio < obExitThresh
+    orderBookImbalanceWeakStreakNext >= 3
   ) {
-    return { decision: "SELL", reason: "Order Book Imbalance Exit" };
+    return withObStreak({ decision: "SELL", reason: "Order Book Imbalance Exit" });
   }
   if (strategySignal === "BUY" && hasOpenTrade) {
-    return { decision: "HOLD", reason: "hold_open_position" };
+    return withObStreak({ decision: "HOLD", reason: "hold_open_position" });
   }
 
   if (strategySignal === "BUY") {
@@ -155,7 +186,7 @@ export function decideHybridMatrix(params: {
       rsi < 30 &&
       technicalScore > 8 &&
       Number.isFinite(aiConf) &&
-      aiConf >= minAiConfidence &&
+      aiConf >= Math.max(55, minAiConfidence - 15) &&
       ai.groq_verdict !== "REJECT";
     if (
       technicalScore < minTechnicalScore &&
@@ -174,11 +205,11 @@ export function decideHybridMatrix(params: {
     if (!Number.isFinite(aiConf) || aiConf <= 0) {
       return { decision: "HOLD", reason: "strategy_buy_rejected_ai_call_failed" };
     }
-    if (aiConf < minAiConfidence) {
-      return { decision: "HOLD", reason: "strategy_buy_rejected_low_conviction" };
-    }
     if (dipBuyConfidenceOverride) {
       return { decision: "BUY", reason: "oversold_dip_buy_confidence_override" };
+    }
+    if (aiConf < minAiConfidence) {
+      return { decision: "HOLD", reason: "strategy_buy_rejected_low_conviction" };
     }
     if (ai.action !== "BUY") {
       if (ai.groq_verdict === "REJECT") {
@@ -186,6 +217,34 @@ export function decideHybridMatrix(params: {
           decision: "HOLD",
           reason: `Vetoed by Groq: ${ai.groq_reason ?? "No reason provided"}`,
         };
+      }
+      if (
+        ai.action === "HOLD" &&
+        Number.isFinite(aiConf) &&
+        aiConf >= minAiConfidence + (aggressiveModeEnabled ? 5 : 0) &&
+        technicalScore >= minTechnicalScore + (aggressiveModeEnabled ? 1 : 0) &&
+        technical !== "SELL" &&
+        ai.trend !== "bearish"
+      ) {
+        if (!aggressiveModeEnabled && !ai.trend_alignment) {
+          return { decision: "HOLD", reason: "hold_ai_trend_not_aligned" };
+        }
+        if (!aggressiveModeEnabled && isBelowEma200) {
+          return { decision: "HOLD", reason: "hold_ema200_gate" };
+        }
+        if (marketRegime === "RANGING" && isBreakout) {
+          return { decision: "HOLD", reason: "hold_regime_mismatch" };
+        }
+        if (
+          marketRegime === "TRENDING" &&
+          technical !== "BUY" &&
+          technicalScore < minTechnicalScore + 2
+        ) {
+          return { decision: "HOLD", reason: "hold_regime_mismatch" };
+        }
+        const rangingHold = rangingMeanReversionBlock();
+        if (rangingHold) return rangingHold;
+        return { decision: "BUY", reason: "strategy_confirmed_high_conviction_buy" };
       }
       return { decision: "HOLD", reason: "hold_ai_action_not_buy" };
     }
@@ -226,7 +285,7 @@ export function decideHybridMatrix(params: {
     aggressiveModeEnabled &&
     !hasOpenTrade &&
     Number.isFinite(imbalanceRatio) &&
-    imbalanceRatio > 2.5 &&
+    imbalanceRatio > 3.0 &&
     hasAggressiveConfidence
   ) {
     if (!passesAggressiveTechGate) {
@@ -241,7 +300,8 @@ export function decideHybridMatrix(params: {
     aggressiveModeEnabled &&
     !hasOpenTrade &&
     ai.action === "BUY" &&
-    hasAggressiveConfidence
+    hasAggressiveConfidence &&
+    technicalScore >= minTechnicalScore + 2
   ) {
     if (!passesAggressiveTechGate) {
       return { decision: "HOLD", reason: "aggressive_buy_rejected_low_tech" };
@@ -249,22 +309,6 @@ export function decideHybridMatrix(params: {
     const rangingHoldAg = rangingMeanReversionBlock();
     if (rangingHoldAg) return rangingHoldAg;
     return { decision: "BUY", reason: "aggressive_buy_confirmed" };
-  }
-
-  // Aggressive fallback: allow BUY even when AI action is HOLD/neutral, but
-  // require strong conviction (>= minAiConfidence), non-bearish trend, and tech >= 6 unless
-  // extreme exception applies (conf > 88 and imbalance > 0.8).
-  if (
-    aggressiveModeEnabled &&
-    !hasOpenTrade &&
-    hasAggressiveConfidence
-  ) {
-    if (!passesAggressiveTechGate) {
-      return { decision: "HOLD", reason: "aggressive_buy_rejected_low_tech" };
-    }
-    const rangingHoldFb = rangingMeanReversionBlock();
-    if (rangingHoldFb) return rangingHoldFb;
-    return { decision: "BUY", reason: "aggressive_buy_confirmed_fallback" };
   }
 
   return { decision: "HOLD", reason: "hold_no_strategy_buy" };

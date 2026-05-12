@@ -13,6 +13,7 @@ import { acquireBuyCapitalReservation, releaseBuyCapitalReservation } from "./bu
 import { finalizeBuyExecution } from "./buy-finalize.ts";
 import { logBuyFlowFailure } from "./buy-logging.ts";
 import { releaseTradeExecutionLock } from "./trade-execution-lock.ts";
+import { extractLegFeeUsd, resolveFillVwap } from "./fill-fees.ts";
 
 export async function executeBuyFlow(params: {
   supabase: ReturnType<typeof createClient>;
@@ -94,11 +95,13 @@ export async function executeBuyFlow(params: {
     bearish1hCap: ctx.bearish1hCap,
     mtf: ctx.mtf,
     ghostMode: ctx.ghostMode,
+    walletUsdt: currentBalance,
   });
   if (prep.skipDetail) return { action: "skip" as const, detail: prep.skipDetail };
 
   let reservationId: string | null = null;
   let buyOrder: Record<string, unknown> | null = null;
+  let buyLockHeld = false;
   const reserveResult = await acquireBuyCapitalReservation({
     supabase,
     userId,
@@ -140,11 +143,12 @@ export async function executeBuyFlow(params: {
       botWarn("buyFlow", "idempotent_duplicate_block", { userId, symbol, cycleId });
       return { action: "skip" as const, detail: `Duplicate BUY skipped (cycle) for bot=${prep.botId ?? "n/a"} cycle=${cycleId}` };
     }
+    buyLockHeld = true;
     const buyOrderId = toStringValue((buyOrder as any)?.exchange_order_id);
     const executedQty = Number((buyOrder as any)?.amount);
     const filledQty = Number.isFinite(executedQty) && executedQty > 0 ? executedQty : prep.qty;
-    const fillAvg = Number((buyOrder as any)?.average ?? (buyOrder as any)?.price);
-    const entryForDb = Number.isFinite(fillAvg) && fillAvg > 0 ? Number(fillAvg.toFixed(8)) : Number(snapshotPrice.toFixed(8));
+    const entryForDb = resolveFillVwap(buyOrder as Record<string, unknown>, snapshotPrice);
+    const feeUsdBuy = extractLegFeeUsd(buyOrder as Record<string, unknown>);
     const valueUsd = Number((filledQty * entryForDb).toFixed(8));
     let stopLossPersist = Number((Math.min(entryForDb * (1 - 1e-8), Math.max(entryForDb - prep.slDistance, entryForDb * 1e-8))).toFixed(8));
     if (!(stopLossPersist < entryForDb)) stopLossPersist = Number((entryForDb * (1 - prep.stopLossPctFraction)).toFixed(8));
@@ -170,7 +174,7 @@ export async function executeBuyFlow(params: {
       },
       war_room: wr.warRoom,
     });
-    return await finalizeBuyExecution({
+    const finalized = await finalizeBuyExecution({
       supabase,
       userId,
       symbol,
@@ -207,22 +211,12 @@ export async function executeBuyFlow(params: {
       technical,
       buyOrder: buyOrder as any,
       openedAt: prep.openedAt,
+      feeUsdBuy,
     });
+    buyLockHeld = false;
+    return finalized;
   } catch (error) {
     const detail = formatUnknownError(error);
-    if (
-      buyOrder &&
-      !(buyOrder as any).idempotent &&
-      prep.botId &&
-      cycleId
-    ) {
-      await releaseTradeExecutionLock({
-        supabase,
-        botId: String(prep.botId),
-        cycleId: String(cycleId),
-        side: "buy",
-      });
-    }
     const lower = detail.toLowerCase();
     await logBuyFlowFailure({
       supabase,
@@ -254,6 +248,14 @@ export async function executeBuyFlow(params: {
     });
     throw error;
   } finally {
+    if (buyLockHeld && prep.botId && cycleId) {
+      await releaseTradeExecutionLock({
+        supabase,
+        botId: String(prep.botId),
+        cycleId: String(cycleId),
+        side: "buy",
+      });
+    }
     await releaseBuyCapitalReservation({ supabase, reservationId, userId, symbol });
   }
 }
