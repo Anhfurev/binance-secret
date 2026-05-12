@@ -304,7 +304,7 @@ export function decideHybridMatrix(params: {
     !hasOpenTrade &&
     ai.action === "BUY" &&
     hasAggressiveConfidence &&
-    technicalScore >= minTechnicalScore + 2
+    technicalScore >= minTechnicalScore
   ) {
     if (!passesAggressiveTechGate) {
       return { decision: "HOLD", reason: "aggressive_buy_rejected_low_tech" };
