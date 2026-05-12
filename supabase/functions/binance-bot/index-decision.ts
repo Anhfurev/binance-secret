@@ -115,14 +115,14 @@ export function decideHybridMatrix(params: {
     imbalanceRatio > 0.8;
   const aggressiveTechFloor = aggressiveModeEnabled
     ? minTechnicalScore
-    : Math.max(6, minTechnicalScore + 1);
+    : Math.max(5, minTechnicalScore + 1);
   const passesAggressiveTechGate =
     technicalScore >= aggressiveTechFloor || hasExtremeAggressiveException;
-  const tieBreakerTech8Ai40 =
+  const tieBreakerQualityBuy =
     strategySignal === "BUY" &&
-    technicalScore >= 8 &&
+    technicalScore >= Math.max(7, minTechnicalScore + 1) &&
     Number.isFinite(aiConf) &&
-    aiConf >= minAiConfidence &&
+    aiConf >= Math.max(48, minAiConfidence - 3) &&
     ai.groq_verdict !== "REJECT" &&
     ai.trend !== "bearish";
   const isMemeSymbol = /PEPE|BONK|WIF|FLOKI|MEME/i.test(symbol);
@@ -197,13 +197,13 @@ export function decideHybridMatrix(params: {
     if (
       technicalScore < minTechnicalScore &&
       (!aggressiveModeEnabled || !highConfidenceAiOverride) &&
-      !tieBreakerTech8Ai40 &&
+      !tieBreakerQualityBuy &&
       !memeVolatilityOverride
     ) {
       return { decision: "HOLD", reason: "hold_technical_score_gate" };
     }
-    if (tieBreakerTech8Ai40) {
-      return { decision: "BUY", reason: "tie_breaker_tech8_ai40" };
+    if (tieBreakerQualityBuy) {
+      return { decision: "BUY", reason: "tie_breaker_quality_buy" };
     }
     if (memeVolatilityOverride) {
       return { decision: "BUY", reason: "meme_volume_sentiment_override" };

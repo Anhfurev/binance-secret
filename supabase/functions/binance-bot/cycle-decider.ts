@@ -20,6 +20,11 @@ import { collectPreflightVetoChecks, formatVetoDetailsPayload, tryMtfOnlyHighCon
 import { evaluateSmartNoiseFilter } from "./smart-filter.ts";
 import { resolvePaperLossLesson } from "./paper-loss-lesson.ts";
 import { passesDemoPaperProbeQualityGate } from "./demo-paper-probe-buy.ts";
+import {
+  applySeniorTraderActivityFloors,
+  resolveSeniorForceBuyFloors,
+  seniorTraderActivityEnabled,
+} from "./senior-trader-activity.ts";
 
 export async function decideSymbolCycleOutcome(params: {
   row: any;
@@ -60,7 +65,13 @@ export async function decideSymbolCycleOutcome(params: {
   const bbRange = snapshot.bbUpper - snapshot.bbLower;
   const bbPosition = Number.isFinite(bbRange) && bbRange > 0 ? (snapshot.latestPrice - snapshot.bbLower) / bbRange : 0;
   const lastCandle = snapshot.candles5?.at(-1);
-  const smartNoise = evaluateSmartNoiseFilter({ snapshot, lastCandleVolume: Number(lastCandle?.volume ?? 0), hasOpenTrade: Boolean(openTrade), isGhostExecution });
+  const smartNoise = evaluateSmartNoiseFilter({
+    snapshot,
+    lastCandleVolume: Number(lastCandle?.volume ?? 0),
+    hasOpenTrade: Boolean(openTrade),
+    isGhostExecution,
+    paperRelaxed: isSandboxMode && !Boolean((row as any)?.is_live_trading_enabled),
+  });
   if (smartNoise.sleepAi && !aggressiveModeEnabled && !isSandboxMode) {
     shouldInvokeAi = false;
     console.log("[SMART_FILTER]", { symbol, userId, sleep_ai: 1, volume_1m: smartNoise.volume1m, avg_1m_from_24h: smartNoise.avgVolume1mFrom24h });
@@ -82,6 +93,17 @@ export async function decideSymbolCycleOutcome(params: {
     aggressiveModeEnabled = aggressiveModeEnabled || noTradeFallback.forceAggressiveMode;
     console.log("[NO_TRADE_FALLBACK]", { symbol, userId, days_since_last_buy: noTradeFallback.daysSinceLastBuy, adjusted_min_ai_confidence: minAiConfidence, adjusted_min_tech_score: minTech, force_aggressive: noTradeFallback.forceAggressiveMode ? 1 : 0 });
   }
+  const seniorActivityEnabled = seniorTraderActivityEnabled(
+    row as { is_aggressive_mode?: boolean },
+    isPaperTrading,
+  );
+  const seniorFloors = applySeniorTraderActivityFloors({
+    minAiConfidence,
+    minTechScore: minTech,
+    enabled: seniorActivityEnabled,
+  });
+  minAiConfidence = seniorFloors.minAiConfidence;
+  minTech = seniorFloors.minTechScore;
   let paperLossLesson: Awaited<ReturnType<typeof resolvePaperLossLesson>> | null = null;
   if (isPaperTrading && !openTrade && userId !== "unknown") {
     paperLossLesson = await resolvePaperLossLesson({
@@ -162,12 +184,14 @@ export async function decideSymbolCycleOutcome(params: {
     buyReentryReason = guard.reason;
   }
   const aiConfidence = Number(ai.ai_confidence);
-  const forceBuyTechFloor = isPaperTrading && aggressiveModeEnabled
-    ? Math.max(minTech, 5)
-    : Math.max(7, minTech + 2);
-  const forceBuyConfidenceFloor = isPaperTrading && aggressiveModeEnabled
-    ? minAiConfidence + 2
-    : minAiConfidence + readForceBuyConfidenceDelta() + 5;
+  const seniorForceBuy = resolveSeniorForceBuyFloors({
+    minAiConfidence,
+    minTechScore: minTech,
+    enabled: seniorActivityEnabled,
+    forceBuyConfidenceDelta: readForceBuyConfidenceDelta(),
+  });
+  const forceBuyTechFloor = seniorForceBuy.techFloor;
+  const forceBuyConfidenceFloor = seniorForceBuy.confidenceFloor;
   const shouldForceBuy = !buyReentryBlocked && strategySignal === "BUY" && groqVerdictUpper !== "REJECT" && ai.action === "BUY" && Number.isFinite(aiConfidence) && aiConfidence >= forceBuyConfidenceFloor && technicalScore >= forceBuyTechFloor && ai.trend !== "bearish";
   const forceBuyReason = shouldForceBuy ? `force_buy_override: ai_confidence=${Number.isFinite(aiConfidence) ? aiConfidence : "n/a"}, tech_score=${technicalScore} (ai>=${forceBuyConfidenceFloor} && tech>=${forceBuyTechFloor} && groq!=REJECT && trend!=bearish && action=BUY)` : null;
   if (shouldForceBuy) {

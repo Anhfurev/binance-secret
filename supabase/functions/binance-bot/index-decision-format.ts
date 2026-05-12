@@ -56,8 +56,8 @@ export function formatCycleReason(
   if (reason === "oversold_dip_buy_confidence_override") {
     return `Dip-buy override: RSI < 30, technical score > 8, confidence >= ${minAiConfidence}`;
   }
-  if (reason === "tie_breaker_tech8_ai40") {
-    return `Tie-break BUY: technical score >= 8 and AI confidence >= ${minAiConfidence}`;
+  if (reason === "tie_breaker_quality_buy" || reason === "tie_breaker_tech8_ai40") {
+    return `Tie-break BUY: technical score >= 7 and AI confidence near floor (${minAiConfidence})`;
   }
   if (reason === "meme_volume_sentiment_override") {
     return "Meme volatility override: volume spike + supportive sentiment + tech floor";

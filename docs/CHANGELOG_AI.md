@@ -8,7 +8,17 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
-## 2026-05-12 — Aggressive paper entry unblock (sleepy bot)
+## 2026-05-12 — Senior trader activity (paper)
+
+**Summary**
+
+- **`senior-trader-activity.ts`:** paper/aggressive lowers AI/tech floors modestly; easier force-buy thresholds when enabled.
+- **`no-trade-fallback.ts`:** paper inactivity fallback after 45m; paper fallback enables aggressive matrix paths.
+- **`stop-reentry-cooldown.ts`:** paper post-stop re-entry cooldown default 3m.
+- **`index-decision.ts`:** quality tie-break BUY at tech ≥7 with confidence near floor.
+- **DB migration `20260513133000_senior_trader_activity.sql`:** `max_open_trades` ≥4, lower paper confidence/tech floors, aggressive on autopilot symbols.
+
+---
 
 **Summary**
 

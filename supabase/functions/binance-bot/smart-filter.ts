@@ -56,8 +56,15 @@ export function evaluateSmartNoiseFilter(params: {
   lastCandleVolume: number;
   hasOpenTrade: boolean;
   isGhostExecution?: boolean;
+  paperRelaxed?: boolean;
 }): SmartNoiseFilterResult {
-  const { snapshot, lastCandleVolume, hasOpenTrade, isGhostExecution = false } = params;
+  const {
+    snapshot,
+    lastCandleVolume,
+    hasOpenTrade,
+    isGhostExecution = false,
+    paperRelaxed = false,
+  } = params;
   const volume1m = Math.max(0, toNumber(lastCandleVolume, 0));
   const avgVolume1mFrom24h = resolveAvgVolume1mFrom24h(snapshot);
   const spreadBps = Number.isFinite(snapshot.spreadBps ?? NaN)
@@ -82,7 +89,7 @@ export function evaluateSmartNoiseFilter(params: {
   let blockReason: string | null = null;
 
   if (!hasOpenTrade && avgVolume1mFrom24h != null && avgVolume1mFrom24h > 0) {
-    const minRatio = readMinVolVs24hAvg();
+    const minRatio = paperRelaxed ? Math.min(readMinVolVs24hAvg(), 0.32) : readMinVolVs24hAvg();
     if (volume1m < avgVolume1mFrom24h * minRatio) {
       sleepAi = true;
       vetoReasons.push("FAIL_LOW_VOLUME_VS_24H_AVG");

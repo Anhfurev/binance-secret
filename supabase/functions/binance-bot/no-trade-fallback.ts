@@ -10,6 +10,16 @@ function readPaperNoTradeFallbackHours(): number {
   return Math.min(72, Math.floor(n));
 }
 
+function readPaperNoTradeFallbackMinutes(): number {
+  const raw = String(Deno.env.get("PAPER_NO_TRADE_FALLBACK_MINUTES") ?? "45").trim();
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 15) {
+    return Math.min(24 * 60, Math.floor(n));
+  }
+  const hours = readPaperNoTradeFallbackHours();
+  return Math.min(24 * 60, Math.max(15, hours * 60));
+}
+
 function readNoTradeFallbackForceAggressive(): boolean {
   const raw = String(Deno.env.get("NO_TRADE_FALLBACK_FORCE_AGGRESSIVE") ?? "0")
     .trim()
@@ -83,8 +93,8 @@ export async function resolveNoTradeFallback(params: {
 
   const lastTs = String(lastBuyResult.data?.opened_at ?? lastBuyResult.data?.created_at ?? "");
   const lastMs = Date.parse(lastTs);
-  const hoursSinceLastBuy = Number.isFinite(lastMs)
-    ? Math.floor((Date.now() - lastMs) / (60 * 60 * 1000))
+  const minutesSinceLastBuy = Number.isFinite(lastMs)
+    ? Math.floor((Date.now() - lastMs) / (60 * 1000))
     : null;
   const daysSinceLastBuy = Number.isFinite(lastMs)
     ? Math.floor((Date.now() - lastMs) / (24 * 60 * 60 * 1000))
@@ -92,7 +102,7 @@ export async function resolveNoTradeFallback(params: {
 
   const neverBought = !Number.isFinite(lastMs);
   const inactiveLongEnough = paperOnly
-    ? neverBought || (hoursSinceLastBuy ?? 0) >= readPaperNoTradeFallbackHours()
+    ? neverBought || (minutesSinceLastBuy ?? 0) >= readPaperNoTradeFallbackMinutes()
     : neverBought || (daysSinceLastBuy ?? 0) >= NO_TRADE_FALLBACK_AFTER_DAYS;
   if (!inactiveLongEnough) {
     return {
@@ -116,11 +126,11 @@ export async function resolveNoTradeFallback(params: {
     daysSinceLastBuy,
     adjustedMinAiConfidence,
     adjustedMinTechScore,
-    forceAggressiveMode: readNoTradeFallbackForceAggressive(),
+    forceAggressiveMode: paperOnly || readNoTradeFallbackForceAggressive(),
     reason: neverBought
       ? "no_trade_fallback_activated_never_bought"
       : paperOnly
-      ? `no_trade_fallback_activated_${hoursSinceLastBuy}h`
+      ? `no_trade_fallback_activated_${minutesSinceLastBuy}m`
       : `no_trade_fallback_activated_${daysSinceLastBuy}d`,
   };
 }

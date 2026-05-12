@@ -16,7 +16,7 @@ Deno.test("strategy BUY with high-confidence AI HOLD confirms buy", () => {
     strategyExitTriggered: false,
     aggressiveModeEnabled: false,
     technical: "BUY",
-    technicalScore: 7,
+    technicalScore: 6,
     rsi: 48,
     imbalanceRatio: 1.1,
     marketRegime: "TRENDING",
@@ -102,5 +102,5 @@ Deno.test("tie-breaker accepts technical score above 8", () => {
     symbol: "BTCUSDT",
   });
   assertEquals(result.decision, "BUY");
-  assertEquals(result.reason, "tie_breaker_tech8_ai40");
+  assertEquals(result.reason, "tie_breaker_quality_buy");
 });

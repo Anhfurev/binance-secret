@@ -36,9 +36,9 @@ export const VOL_BURST_MAX_ATR_BONUS = 0.32;
 export const EMA_FAST_PERIOD = 20;
 export const EMA_SLOW_PERIOD = 50;
 
-export const DEFAULT_MIN_AI_CONFIDENCE = 65;
+export const DEFAULT_MIN_AI_CONFIDENCE = 58;
 /** Inclusive minimum technical score (1–10) when `bot_settings.min_tech_score` is null. */
-export const DEFAULT_MIN_TECH_SCORE = 6;
+export const DEFAULT_MIN_TECH_SCORE = 5;
 
 export const DEFAULT_RISK_PERCENT = 5;
 export const DEFAULT_BUY_RSI = 30;

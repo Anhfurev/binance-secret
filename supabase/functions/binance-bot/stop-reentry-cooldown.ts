@@ -10,7 +10,7 @@ export function readSymbolCooldownMinutes(): number {
 
 export function readPostStoplossReentryCooldownMs(paperOnly = false): number {
   if (paperOnly) {
-    const raw = String(Deno.env.get("PAPER_POST_STOP_REENTRY_COOLDOWN_MS") ?? "480000").trim();
+    const raw = String(Deno.env.get("PAPER_POST_STOP_REENTRY_COOLDOWN_MS") ?? "180000").trim();
     const n = Number(raw);
     if (Number.isFinite(n) && n >= 0) {
       return Math.min(24 * 60 * 60 * 1000, Math.floor(n));

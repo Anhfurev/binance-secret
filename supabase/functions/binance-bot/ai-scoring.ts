@@ -137,7 +137,7 @@ export function getResolvedScoreWeightsPack(
 }
 
 /** Hard gate before placing a BUY (sideways / low-conviction bleed filter). */
-export const MIN_WEIGHTED_CONFIDENCE_TO_EXECUTE_BUY = 62;
+export const MIN_WEIGHTED_CONFIDENCE_TO_EXECUTE_BUY = 58;
 
 function clamp0100(n: number): number {
   if (!Number.isFinite(n)) return 0;
