@@ -16,10 +16,10 @@ Deno.test("resolvePaperWalletUsdt prefers profile demo balance", () => {
   assertEquals(resolvePaperWalletUsdt(8885.09), 8885.09);
 });
 
-Deno.test("demo probe enabled by default", () => {
+Deno.test("demo probe disabled by default", () => {
   Deno.env.delete("DEMO_PROBE_ENABLED");
-  assertEquals(readDemoProbeEnabled(), true);
-  Deno.env.set("DEMO_PROBE_ENABLED", "0");
   assertEquals(readDemoProbeEnabled(), false);
+  Deno.env.set("DEMO_PROBE_ENABLED", "1");
+  assertEquals(readDemoProbeEnabled(), true);
   Deno.env.delete("DEMO_PROBE_ENABLED");
 });
