@@ -38,6 +38,8 @@ export function computeExpectedPaperDemoBalance(
     if (!isPaperNonGhostTrade(row.extra ?? null)) continue;
     const status = String(row.status ?? "").toLowerCase();
     if (status === "open") {
+      const extra = row.extra ?? null;
+      realized += toNumber(extra?.realized_pnl_usd, 0);
       openLocked += toNumber(row.value, 0);
       continue;
     }

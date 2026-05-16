@@ -224,6 +224,8 @@ export async function executeSellFlow(params: {
       pnlPercent,
       botId,
       cycleId,
+      nextBalance,
+      feeUsdSell,
     });
     return partialResult;
   }

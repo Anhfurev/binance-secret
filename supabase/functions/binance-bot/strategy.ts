@@ -9,10 +9,9 @@ import type {
   ExitReason,
   IndicatorSnapshot,
   OpenTradeRow,
-  SignalDecision,
-  StrategyReason,
 } from "./types.ts";
 import { canFireDbStopLoss } from "./strategy-stop-hold.ts";
+import { gtWithTolerance } from "./strategy-numeric-tolerance.ts";
 import { clamp, toNumber } from "./utils.ts";
 
 export const STRATEGY_STOPLOSS = -0.25;
@@ -22,121 +21,8 @@ export type ExitCheckResult = {
   exit_reason: ExitReason;
 };
 
-export type EntryCheckResult = {
-  signal: SignalDecision;
-  strategy_reason: StrategyReason;
-  strategy_fail_detail?: string;
-};
-
-function gtWithTolerance(left: number, right: number, relEps = 1e-8): boolean {
-  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
-  const scale = Math.max(Number.EPSILON, Math.abs(left), Math.abs(right));
-  return left - right > relEps * scale;
-}
-
-function gteWithTolerance(left: number, right: number, relEps = 1e-8): boolean {
-  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
-  const scale = Math.max(Number.EPSILON, Math.abs(left), Math.abs(right));
-  return left > right || Math.abs(left - right) <= relEps * scale;
-}
-
-// Freqtrade BbandRsi populate_entry_trend:
-// (rsi < 30) AND (close < bb_lowerband) => enter_long
-export function checkEntryConditions(snapshot: IndicatorSnapshot): EntryCheckResult {
-  if (snapshot.rsi < 30 && gtWithTolerance(snapshot.bbLower, snapshot.latestPrice)) {
-    return { signal: "BUY", strategy_reason: "freqtrade_bbrsi_entry_confirmed" };
-  }
-
-  const oversoldBounce =
-    snapshot.rsi > 0 &&
-    snapshot.rsi < 38 &&
-    snapshot.bbLower > 0 &&
-    snapshot.latestPrice <= snapshot.bbLower * 1.012 &&
-    gtWithTolerance(snapshot.emaFast, snapshot.emaSlow * 0.995);
-  if (oversoldBounce) {
-    return { signal: "BUY", strategy_reason: "strategy_oversold_bounce_entry" };
-  }
-
-  // Trend-following momentum entry for low-liquidity sandbox periods:
-  // relaxed to avoid "perfect alignment" starvation in paper/ghost runs.
-  const c = snapshot.candles5 ?? [];
-  const c1 = c.at(-1)?.close ?? 0;
-  const c2 = c.at(-2)?.close ?? 0;
-  const c3 = c.at(-3)?.close ?? 0;
-  const risingMicro = c1 > c2 && c2 > c3;
-  const lastVolume = Number(c.at(-1)?.volume ?? 0);
-  const avgVolume1m = Number(snapshot.avgVolume1m ?? 0);
-  const volumeConfirmed = avgVolume1m > 0 && lastVolume > avgVolume1m * 1.2;
-  const priceNearEma50 =
-    snapshot.ema50 > 0 &&
-    snapshot.latestPrice >= snapshot.ema50 * 0.992;
-  const bullishMomentum =
-    snapshot.rsi >= 36 &&
-    snapshot.rsi <= 72 &&
-    snapshot.rsi15m >= 42 &&
-    gtWithTolerance(snapshot.emaFast, snapshot.emaSlow) &&
-    (gteWithTolerance(snapshot.latestPrice, snapshot.ema50) || priceNearEma50) &&
-    risingMicro &&
-    volumeConfirmed;
-  if (bullishMomentum) {
-    return { signal: "BUY", strategy_reason: "strategy_trend_momentum_entry" };
-  }
-
-  const rangingPullback =
-    snapshot.marketRegime === "RANGING" &&
-    snapshot.rsi >= 30 &&
-    snapshot.rsi <= 50 &&
-    risingMicro &&
-    snapshot.bbLower > 0 &&
-    snapshot.latestPrice <= snapshot.bbLower * 1.015 &&
-    gtWithTolerance(snapshot.emaFast, snapshot.emaSlow * 0.998);
-  if (rangingPullback) {
-    return { signal: "BUY", strategy_reason: "strategy_ranging_pullback_entry" };
-  }
-
-  const structureRecovery =
-    snapshot.rsi >= 42 &&
-    snapshot.rsi <= 62 &&
-    risingMicro &&
-    gtWithTolerance(snapshot.emaFast, snapshot.emaSlow) &&
-  (
-    priceNearEma50 ||
-    (snapshot.bbLower > 0 && snapshot.latestPrice <= snapshot.bbLower * 1.02)
-  ) &&
-    volumeConfirmed;
-  if (structureRecovery) {
-    return { signal: "BUY", strategy_reason: "strategy_structure_recovery_entry" };
-  }
-
-  // Freqtrade BbandRsi populate_exit_trend:
-  // (rsi > 70) => exit_long
-  if (snapshot.rsi > 70) {
-    return {
-      signal: "SELL",
-      strategy_reason: "freqtrade_bbrsi_exit_signal",
-      strategy_fail_detail: "RSI_OVERBOUGHT",
-    };
-  }
-
-  let failDetail = "NO_SIGNAL";
-  if (snapshot.rsi >= 30) {
-    failDetail = "RSI_NOT_OVERSOLD";
-  }
-  if (!gtWithTolerance(snapshot.emaFast, snapshot.emaSlow)) {
-    failDetail = "EMA_NOT_CROSSED";
-  }
-  if (!gteWithTolerance(snapshot.latestPrice, snapshot.ema50)) {
-    failDetail = "PRICE_BELOW_EMA50";
-  }
-  if (!gteWithTolerance(snapshot.latestPrice, snapshot.ema200)) {
-    failDetail = "PRICE_BELOW_EMA200";
-  }
-  return {
-    signal: "HOLD",
-    strategy_reason: "strategy_no_entry_signal",
-    strategy_fail_detail: failDetail,
-  };
-}
+export { checkEntryConditions } from "./strategy-entry-conditions.ts";
+export type { EntryCheckResult } from "./types.ts";
 
 function readTradeTakeProfitPrice(row: OpenTradeRow): number {
   const raw = row.takeProfit ?? (row as Record<string, unknown>)["takeProfit"];
@@ -164,6 +50,16 @@ function hasDbStopLossPrice(openTrade: OpenTradeRow): boolean {
  * Short: exit when latestPrice >= SL.
  * Uses DB `stopLoss` whenever present; no drawdown fallback when this column is set.
  */
+function resolveStopExitReason(openTrade: OpenTradeRow, entryPrice: number): ExitReason {
+  const extra = (openTrade.extra as Record<string, unknown> | undefined) ?? {};
+  if (extra.partial_tp_executed !== true || extra.break_even_after_partial_tp !== true) {
+    return "stoploss_hit";
+  }
+  const sl = readTradeStopLossPrice(openTrade);
+  if (Number.isFinite(sl) && sl >= entryPrice * 0.999) return "be_stop_hit";
+  return "stoploss_hit";
+}
+
 function hitAbsoluteStopLoss(openTrade: OpenTradeRow, latestPrice: number): boolean {
   if (!hasDbStopLossPrice(openTrade)) return false;
   const sl = readTradeStopLossPrice(openTrade);
@@ -227,7 +123,7 @@ export function checkExitConditions(
   // Absolute DB stop first (capital) — hardcoded -25% ROI only when no row stopLoss.
   if (hitAbsoluteStopLoss(openTrade, latestPrice)) {
     if (canFireDbStopLoss(openTrade)) {
-      return { shouldExit: true, exit_reason: "stoploss_hit" };
+      return { shouldExit: true, exit_reason: resolveStopExitReason(openTrade, entryPrice) };
     }
     return { shouldExit: false, exit_reason: "hold" };
   }
@@ -270,8 +166,8 @@ export function calculateTechnicalScore(snapshot: IndicatorSnapshot): number {
   if (gtWithTolerance(snapshot.emaFast, snapshot.emaSlow)) score += 2;
   if (snapshot.macd.macd > snapshot.macd.signal) score += 2;
 
-  if (snapshot.rsi >= 45 && snapshot.rsi <= 65) score += 2;
-  else if (snapshot.rsi >= 35 && snapshot.rsi <= 75) score += 1;
+  if (snapshot.rsi >= 45 && snapshot.rsi <= 68) score += 2;
+  else if (snapshot.rsi >= 32 && snapshot.rsi <= 75) score += 1;
 
   if (snapshot.rsi15m >= 45 && snapshot.rsi15m <= 65) score += 1;
   if (detectLiquiditySweep(snapshot)) score += 3;

@@ -8,6 +8,7 @@ import { toStringValue } from "./utils.ts";
 import {
   assertExpectedEgressIpOrThrow,
   executeSmartLimitChaser,
+  executeMarketOrder,
   formatAmount,
   getTotalAccountBalanceUsdt,
   getUsdtBalance,
@@ -177,6 +178,8 @@ export async function createOrder(params: {
   isTestMode: boolean;
   /** Cancels public book-ticker fetch on paper path when the cron cycle aborts. */
   signal?: AbortSignal;
+  /** `market` submits an immediate market order on live; paper uses market-style fill. */
+  executionMode?: "smart_limit" | "market";
 }) {
   const {
     supabase,
@@ -191,6 +194,7 @@ export async function createOrder(params: {
     marketRegime,
     maxSlippagePct,
     signal,
+    executionMode = "smart_limit",
   } = params;
   const sideType = side.toLowerCase();
 
@@ -235,19 +239,27 @@ export async function createOrder(params: {
       );
     }
     const normalizedSignalPrice = await normalizePriceForSymbol(symbol, signalPx);
-    const order = await executeSmartLimitChaser({
-      symbol,
-      side,
-      amount: Number(precisionAmount),
-      signalPrice: Number.isFinite(normalizedSignalPrice) && normalizedSignalPrice > 0
-        ? normalizedSignalPrice
-        : signalPx,
-      maxSlippagePct: maxSlippagePct ?? readSmartLimitMaxSlippagePct(symbol),
-      marketRegime: String(marketRegime ?? "NEUTRAL"),
-    });
+    const order = executionMode === "market"
+      ? await executeMarketOrder(symbol, side, Number(precisionAmount), {
+        referencePrice: Number.isFinite(normalizedSignalPrice) && normalizedSignalPrice > 0
+          ? normalizedSignalPrice
+          : signalPx,
+      })
+      : await executeSmartLimitChaser({
+        symbol,
+        side,
+        amount: Number(precisionAmount),
+        signalPrice: Number.isFinite(normalizedSignalPrice) && normalizedSignalPrice > 0
+          ? normalizedSignalPrice
+          : signalPx,
+        maxSlippagePct: maxSlippagePct ?? readSmartLimitMaxSlippagePct(symbol),
+        marketRegime: String(marketRegime ?? "NEUTRAL"),
+      });
     await logTradeAction({
       supabase,
-      action: "CCXT smart limit chase executed",
+      action: executionMode === "market"
+        ? "CCXT market order executed"
+        : "CCXT smart limit chase executed",
       level: "info",
       userId,
       symbol,
@@ -261,7 +273,9 @@ export async function createOrder(params: {
         actual_slippage_pct: (order as any)?.actual_slippage_pct,
       },
     });
-    const filledBase = Number((order as any)?.amount ?? precisionAmount);
+    const filledBase = Number(
+      (order as any)?.filled ?? (order as any)?.amount ?? precisionAmount,
+    );
     orderFilled = true;
     return {
       exchange_order_id: toStringValue((order as any)?.id) ?? null,
@@ -272,7 +286,9 @@ export async function createOrder(params: {
       amount: Number.isFinite(filledBase) && filledBase > 0 ? filledBase : Number(precisionAmount),
       average: (order as any)?.average,
       price: (order as any)?.price,
-      execution_type: (order as any)?.execution_type,
+      execution_type: executionMode === "market"
+        ? "market"
+        : (order as any)?.execution_type,
       actual_slippage_pct: (order as any)?.actual_slippage_pct,
       smart_execution_meta: (order as any)?.smart_execution_meta,
       raw: order,

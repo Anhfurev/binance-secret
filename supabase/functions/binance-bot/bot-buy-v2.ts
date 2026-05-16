@@ -2,11 +2,13 @@
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { createOrder } from "./binance.ts";
 import { botError, botWarn } from "./bot-debug.ts";
-import { formatUnknownError, toStringValue, coinIdFromSymbol } from "./utils.ts";
+import { formatUnknownError, toStringValue, coinIdFromSymbol, clamp, toNumber } from "./utils.ts";
 import type { AiAnalysis, BotSettingsRow, MarketRegime, SignalDecision } from "./types.ts";
 import { takeProfitDistanceUp, buildAiReasoningJson } from "./buy-helpers.ts";
 import { estimatePreSentimentWeightedForRegime } from "./ai-scoring.ts";
-import { widenStopLossToDbFloor } from "./trade-stop-risk.ts";
+import { widenStopLossToDbFloor, resolveStopLossPctFraction, resolveTakeProfitPctPoints } from "./trade-stop-risk.ts";
+import { MIN_TRADE_USD } from "./constants.ts";
+import { scaleTradeUsdByGovernanceConfidence } from "./trade-size-confidence.ts";
 import { resolveBuyContextAndSizing } from "./buy-context.ts";
 import { resolveWarRoomOutcome } from "./buy-warroom.ts";
 import { prepareBuyExecution } from "./buy-prep.ts";
@@ -44,6 +46,7 @@ export async function executeBuyFlow(params: {
   executionUsdScale?: number;
   demoProbeBuy?: boolean;
   signal?: AbortSignal;
+  takeProfitPctOverride?: number | null;
 }) {
   const {
     supabase, row, userId, symbol, ai, technical, strategyNotes, snapshotPrice, snapshotEma200,
@@ -51,11 +54,12 @@ export async function executeBuyFlow(params: {
     resolvedStartingBalance, shouldInitializeStartingBalance, maxDrawdownLimitPct,
     trailingStopPct, cycleId, volBurstWidenMult = 1, volBurstMeta,
     snapshotImbalanceRatio, snapshotVolume24hQuote, executionUsdScale, demoProbeBuy = false, signal,
+    takeProfitPctOverride = null,
   } = params;
 
   const ctx = await resolveBuyContextAndSizing({
     supabase, row, userId, symbol, ai, marketRegime, snapshotPrice, snapshotEma200,
-    snapshotRsi, snapshotBbLower, adx14, currentBalance, resolvedStartingBalance,
+    snapshotRsi, snapshotBbLower, adx14, atr14, currentBalance, resolvedStartingBalance,
     maxDrawdownLimitPct, executionUsdScale, demoProbeBuy, signal,
   });
   if (ctx.skipDetail) return { action: "skip" as const, detail: ctx.skipDetail };
@@ -75,8 +79,17 @@ export async function executeBuyFlow(params: {
     demoProbePaper: ctx.demoProbePaper,
     snapshotImbalanceRatio,
     snapshotVolume24hQuote,
+    confidencePolicy: ctx.confidencePolicy,
   });
   if (wr.skipDetail) return { action: "skip" as const, detail: wr.skipDetail };
+
+  const governanceTradeUsd = scaleTradeUsdByGovernanceConfidence({
+    tradeUsd: ctx.tradeUsd,
+    executionConfidence: wr.executionConfidence,
+    effectiveConfidence: ctx.effectiveConfidence,
+    minTradeUsd: MIN_TRADE_USD,
+    currentBalance,
+  });
 
   const prep = await prepareBuyExecution({
     supabase,
@@ -90,13 +103,14 @@ export async function executeBuyFlow(params: {
     trailingStopPct,
     volBurstWidenMult,
     volBurstMeta,
-    tradeUsd: ctx.tradeUsd,
+    tradeUsd: governanceTradeUsd,
     effectiveConfidence: ctx.effectiveConfidence,
     rawWeighted: ctx.rawWeighted,
     bearish1hCap: ctx.bearish1hCap,
     mtf: ctx.mtf,
     ghostMode: ctx.ghostMode,
     walletUsdt: currentBalance,
+    takeProfitPctOverride,
   });
   if (prep.skipDetail) return { action: "skip" as const, detail: prep.skipDetail };
 
@@ -107,7 +121,7 @@ export async function executeBuyFlow(params: {
     supabase,
     userId,
     symbol,
-    tradeUsd: ctx.tradeUsd,
+    tradeUsd: prep.tradeUsd,
     currentBalance,
     effectiveConfidence: ctx.effectiveConfidence,
     rawWeighted: ctx.rawWeighted,
@@ -155,7 +169,15 @@ export async function executeBuyFlow(params: {
     if (!(stopLossPersist < entryForDb)) stopLossPersist = Number((entryForDb * (1 - prep.stopLossPctFraction)).toFixed(8));
     stopLossPersist = widenStopLossToDbFloor(entryForDb, stopLossPersist, prep.stopLossPctFraction);
     const slDistanceAtEntry = entryForDb - stopLossPersist;
-    const tpDistanceAtEntry = takeProfitDistanceUp(entryForDb, atr14, Number((row as any)?.take_profit_pct ?? 0) / 100, slDistanceAtEntry);
+    const stopLossPct = clamp(toNumber((row as any)?.stop_loss_pct, 2), 0.1, 50);
+    const takeProfitPctRaw = clamp(toNumber((row as any)?.take_profit_pct, 4), 0.1, 100);
+    const takeProfitPct = resolveTakeProfitPctPoints(takeProfitPctRaw, stopLossPct, symbol);
+    const tpDistanceAtEntry = takeProfitDistanceUp(
+      entryForDb,
+      atr14,
+      takeProfitPct / 100,
+      slDistanceAtEntry,
+    );
     const takeProfitPersist = Number((entryForDb + tpDistanceAtEntry).toFixed(8));
     let initialTrailingPersist = Number((Math.min(entryForDb * (1 - 1e-8), Math.max(entryForDb - prep.trailDistance, entryForDb * 1e-8))).toFixed(8));
     if (!(initialTrailingPersist < entryForDb)) initialTrailingPersist = Number((entryForDb * (1 - trailingStopPct)).toFixed(8));
@@ -214,6 +236,12 @@ export async function executeBuyFlow(params: {
       buyOrder: buyOrder as any,
       openedAt: prep.openedAt,
       feeUsdBuy,
+      sizingMeta: {
+        ...prep.sizingMeta,
+        governance_execution_confidence: wr.executionConfidence,
+        chart_execution_confidence: ctx.effectiveConfidence,
+        governance_trade_usd: governanceTradeUsd,
+      },
     });
     buyLockHeld = false;
     return finalized;
@@ -243,7 +271,7 @@ export async function executeBuyFlow(params: {
         weighted_confidence_effective: ctx.effectiveConfidence,
         bearish_1h_cap: ctx.bearish1hCap,
         qty: prep.qty,
-        trade_usd: Number(ctx.tradeUsd.toFixed(8)),
+        trade_usd: Number(prep.tradeUsd.toFixed(8)),
         snapshot_price: Number(snapshotPrice.toFixed(8)),
         stage: "create_order_or_insert_trade",
       },

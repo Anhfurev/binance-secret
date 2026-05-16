@@ -1,11 +1,10 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
-import { maybeNotifyDebuggerIssues } from "./debugger-alerts.ts";
 import { runDebuggerHealthAndFix } from "./health-debugger.ts";
 
 let lastScheduledDebuggerAtMs = 0;
 
-function readDebuggerAutoIntervalMs(): number {
+export function readDebuggerAutoIntervalMs(): number {
   const raw = String(Deno.env.get("DEBUGGER_AUTO_INTERVAL_MS") ?? "1800000").trim();
   const n = Number(raw);
   if (!Number.isFinite(n)) return 30 * 60 * 1000;
@@ -27,11 +26,6 @@ export async function maybeRunScheduledDebugger(
     supabase,
     batchId: `auto-${batchId.slice(0, 8)}`,
     applyFixes: true,
-  });
-  await maybeNotifyDebuggerIssues({
-    issues: result.issues,
-    batchId: `auto-${batchId.slice(0, 8)}`,
-    source: "scheduled_cron",
   });
   return {
     ok: result.ok,

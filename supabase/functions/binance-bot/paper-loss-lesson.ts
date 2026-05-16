@@ -43,8 +43,8 @@ export async function resolvePaperLossLesson(params: {
   if (recentStopLosses <= 0) {
     return { recentStopLosses: 0, confidenceBump: 0, blockBuy: false, reason: null };
   }
-  const confidenceBump = Math.min(6, recentStopLosses * 2);
-  if (recentStopLosses >= 3) {
+  const confidenceBump = Math.min(8, recentStopLosses * 3);
+  if (recentStopLosses >= 2) {
     const ok = passesMeanReversionBuyGate({ regime, rsi, latestPrice, bbLower });
     if (!ok) {
       return {

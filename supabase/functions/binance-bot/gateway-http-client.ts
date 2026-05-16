@@ -1,37 +1,39 @@
 // @ts-nocheck
 import {
-  isBinanceRestGatewayEnabled,
-  resolveBinanceRestBaseUrl,
   withBinanceGatewayFetchHeaders,
 } from "./binance-rest-base.ts";
 
-let gatewayHttpClient: Deno.HttpClient | null | undefined;
+const gatewayHttpClients = new Map<string, Deno.HttpClient | null>();
 
-function resolveGatewayHttpClient(): Deno.HttpClient | null {
-  if (!isBinanceRestGatewayEnabled()) return null;
-  if (gatewayHttpClient !== undefined) return gatewayHttpClient;
+function resolveGatewayHttpClient(hostname: string): Deno.HttpClient | null {
+  if (!hostname || hostname === "api.binance.com") return null;
+  if (gatewayHttpClients.has(hostname)) {
+    return gatewayHttpClients.get(hostname) ?? null;
+  }
   try {
-    const host = new URL(resolveBinanceRestBaseUrl()).hostname;
-    gatewayHttpClient = Deno.createHttpClient({ allowHost: host });
+    const client = Deno.createHttpClient({ allowHost: hostname });
+    gatewayHttpClients.set(hostname, client);
+    return client;
   } catch (error) {
     console.warn(
-      `[gateway-http] createHttpClient failed: ${error instanceof Error ? error.message : String(error)}`,
+      `[gateway-http] createHttpClient failed for ${hostname}: ${error instanceof Error ? error.message : String(error)}`,
     );
-    gatewayHttpClient = null;
+    gatewayHttpClients.set(hostname, null);
+    return null;
   }
-  return gatewayHttpClient;
 }
 
-/** Reuse TCP connections to the Binance REST gateway when Deno supports HttpClient pooling. */
+/** Reuse TCP connections to gateway hosts when Deno supports HttpClient pooling. */
 export async function gatewayFetch(
   input: string | URL,
   init: RequestInit = {},
 ): Promise<Response> {
+  const url = input instanceof URL ? input : new URL(input);
   const headers = withBinanceGatewayFetchHeaders(init.headers);
-  const client = resolveGatewayHttpClient();
+  const client = resolveGatewayHttpClient(url.hostname);
   const requestInit: RequestInit = { ...init, headers };
   if (client) {
-    return await fetch(input, { ...requestInit, client });
+    return await fetch(url, { ...requestInit, client });
   }
-  return await fetch(input, requestInit);
+  return await fetch(url, requestInit);
 }

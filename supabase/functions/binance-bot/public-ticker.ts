@@ -17,6 +17,24 @@ function toBinanceRestSymbol(symbol: string): string {
   return u.includes("/") ? u.replace("/", "") : u;
 }
 
+export function parsePublicBookTickerResponse(
+  json: unknown,
+): PublicSpotTicker | null {
+  const j = (json ?? {}) as Record<string, unknown>;
+  const bid = toNumber(j.bidPrice ?? j.bid, 0);
+  const ask = toNumber(j.askPrice ?? j.ask, 0);
+  let last = toNumber(j.lastPrice ?? j.last, 0);
+  if (!(last > 0) && bid > 0 && ask > 0) {
+    last = Number(((bid + ask) / 2).toFixed(8));
+  } else if (!(last > 0) && ask > 0) {
+    last = ask;
+  } else if (!(last > 0) && bid > 0) {
+    last = bid;
+  }
+  if (!(bid > 0) && !(ask > 0) && !(last > 0)) return null;
+  return { bid, ask, last };
+}
+
 function isAbortError(e: unknown): boolean {
   if (e instanceof DOMException && e.name === "AbortError") return true;
   const n = (e as Error)?.name;
@@ -48,19 +66,7 @@ export async function fetchPublicSpotTicker(
       headers: { Accept: "application/json" },
     });
     if (!res.ok) return null;
-    const j = (await res.json()) as Record<string, unknown>;
-    const bid = toNumber(j.bidPrice ?? j.bid, 0);
-    const ask = toNumber(j.askPrice ?? j.ask, 0);
-    let last = toNumber(j.lastPrice ?? j.last, 0);
-    if (!(last > 0) && bid > 0 && ask > 0) {
-      last = Number(((bid + ask) / 2).toFixed(8));
-    } else if (!(last > 0) && ask > 0) {
-      last = ask;
-    } else if (!(last > 0) && bid > 0) {
-      last = bid;
-    }
-    if (!(bid > 0) && !(ask > 0) && !(last > 0)) return null;
-    return { bid, ask, last };
+    return parsePublicBookTickerResponse(await res.json());
   } catch (e) {
     if (signal?.aborted || isAbortError(e)) return null;
     return null;

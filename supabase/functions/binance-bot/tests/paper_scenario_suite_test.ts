@@ -6,7 +6,7 @@ import { PAPER_SCENARIO_NAMES } from "../paper-scenario-snapshot.ts";
 
 Deno.test("suite builds scenario x symbol matrix capped at max cases", () => {
   const symbols = ["BTCUSDT", "SOLUSDT", "PEPEUSDT"];
-  const cases = buildPaperSuiteCases(symbols, 9);
+  const cases = buildPaperSuiteCases(symbols, 12);
   const expected = symbols.length * PAPER_SCENARIO_NAMES.length;
   if (cases.length !== expected) {
     throw new Error(`expected ${expected} cases, got ${cases.length}`);

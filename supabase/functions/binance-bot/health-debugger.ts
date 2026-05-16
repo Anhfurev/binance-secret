@@ -1,7 +1,17 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import { isBinanceRestGatewayEnabled } from "./binance-rest-base.ts";
 import { maybeNotifyDebuggerIssues } from "./debugger-alerts.ts";
 import { runDebuggerAppliedFixes } from "./debugger-applied-fixes.ts";
+import { summarizeRecentErrors } from "./debugger-error-triage.ts";
+import {
+  classifyHoldNoStrategyDominance,
+  classifyPaperAutopilotDisabledIssue,
+  classifyRecentErrorIssues,
+  classifyStaleCapitalReservationIssue,
+  classifySymbolCycleFailureIssue,
+  collectMissingRequiredEnvIssues,
+} from "./debugger-issue-rules.ts";
 import { runOpsProbes } from "./debugger-ops-probes.ts";
 
 const DEBUGGER_LOCK_STALE_MS = 10 * 60 * 1000;
@@ -45,38 +55,20 @@ export async function runDebuggerHealthAndFix(params: {
   batchId: string;
   applyFixes?: boolean;
 }): Promise<DebuggerHealthResult> {
-  const { supabase, batchId, applyFixes = true } = params;
+  const { supabase, batchId, applyFixes = false } = params;
   const nowIso = new Date().toISOString();
   const issues: DebuggerIssue[] = [];
   const fixes: DebuggerFix[] = [];
 
-  const requiredEnv = [
-    "SUPABASE_URL",
-    "SUPABASE_SERVICE_ROLE_KEY",
-    "BOT_SECRET",
-    "GEMINI_API_KEY",
-    "TELEGRAM_BOT_TOKEN",
-    "BINANCE_API_KEY",
-  ];
-  const missingEnv = requiredEnv.filter((name) => !hasEnv(name));
-  if (
-    !hasEnv("BINANCE_SECRET_KEY") &&
-    !hasEnv("BINANCE_SECRET") &&
-    !hasEnv("BINANCE_API_SECRET")
-  ) {
-    missingEnv.push("BINANCE_SECRET (or BINANCE_API_SECRET)");
-  }
-  if (!hasEnv("TELEGRAM_CHAT_ID") && !hasEnv("TELEGRAM_BOT_CHAT_ID")) {
-    missingEnv.push("TELEGRAM_CHAT_ID (or TELEGRAM_BOT_CHAT_ID)");
-  }
-  if (missingEnv.length > 0) {
-    issues.push({
-      code: "MISSING_REQUIRED_ENV",
-      severity: "critical",
-      message: "One or more required runtime secrets are missing",
-      detail: { missing_env: missingEnv },
-    });
-  }
+  const missingEnvIssues = collectMissingRequiredEnvIssues(hasEnv, {
+    gatewayEnabled: isBinanceRestGatewayEnabled(),
+  });
+  issues.push(...missingEnvIssues);
+  const missingEnv = missingEnvIssues.flatMap((issue) =>
+    Array.isArray(issue.detail?.missing_env)
+      ? issue.detail.missing_env.map(String)
+      : []
+  );
 
   const lookbackIso = new Date(Date.now() - DEBUGGER_LOOKBACK_HOURS * 60 * 60 * 1000).toISOString();
   const errorsLookbackIso = new Date(
@@ -84,7 +76,7 @@ export async function runDebuggerHealthAndFix(params: {
   ).toISOString();
   const staleLockIso = new Date(Date.now() - DEBUGGER_LOCK_STALE_MS).toISOString();
 
-  const [errorLogs, symbolFailures, staleLocks, recentWarRoom] = await Promise.all([
+  const [errorLogs, symbolFailures, staleLocks, recentWarRoom, errorSummary] = await Promise.all([
     supabase
       .from("logs")
       .select("id", { count: "exact", head: true })
@@ -104,62 +96,34 @@ export async function runDebuggerHealthAndFix(params: {
       .select("final_decision,veto_details")
       .order("created_at", { ascending: false })
       .limit(40),
+    summarizeRecentErrors({ supabase, sinceIso: errorsLookbackIso }),
   ]);
 
   const errorCount = asCount(errorLogs.count);
+  const actionableErrorCount = errorSummary.actionable;
   const symbolFailureCount = asCount(symbolFailures.count);
   const staleLockCount = asCount(staleLocks.count);
 
-  if (errorCount >= 20) {
-    issues.push({
-      code: "ERROR_SPIKE_RECENT",
-      severity: "critical",
-      message: "Recent runtime error volume is high",
-      detail: { error_count_last_2h: errorCount },
-    });
-  } else if (errorCount > 0) {
-    issues.push({
-      code: "ERRORS_RECENT",
-      severity: "warn",
-      message: "Recent runtime errors were detected",
-      detail: { error_count_last_2h: errorCount },
-    });
-  }
+  issues.push(...classifyRecentErrorIssues({
+    errorCount,
+    actionableErrorCount,
+    resolvedErrorCount: errorSummary.resolved,
+    breakdown: errorSummary.breakdown,
+  }));
 
-  if (symbolFailureCount > 0) {
-    issues.push({
-      code: "SYMBOL_CYCLE_FAILURES",
-      severity: symbolFailureCount >= 6 ? "critical" : "warn",
-      message: "Symbol cycle failures detected in recent runs",
-      detail: { symbol_cycle_failed_last_6h: symbolFailureCount },
-    });
-  }
+  const symbolFailureIssue = classifySymbolCycleFailureIssue(symbolFailureCount);
+  if (symbolFailureIssue) issues.push(symbolFailureIssue);
 
-  if (staleLockCount > 0) {
-    issues.push({
-      code: "STALE_CAPITAL_RESERVATIONS",
-      severity: staleLockCount >= 10 ? "critical" : "warn",
-      message: "Stale capital reservations can block BUY executions",
-      detail: { stale_count: staleLockCount, stale_before: staleLockIso },
-    });
-  }
+  const staleLockIssue = classifyStaleCapitalReservationIssue(staleLockCount, staleLockIso);
+  if (staleLockIssue) issues.push(staleLockIssue);
 
   if (Array.isArray(recentWarRoom.data) && recentWarRoom.data.length > 0) {
     const holdNoBuyCount = recentWarRoom.data.filter((row: any) => {
       const reason = String(row?.veto_details?.reason ?? "").toLowerCase();
       return reason === "hold_no_strategy_buy";
     }).length;
-    if (holdNoBuyCount >= 28) {
-      issues.push({
-        code: "HOLD_NO_STRATEGY_DOMINANT",
-        severity: "warn",
-        message: "Most recent cycles are HOLD due to strategy gate",
-        detail: {
-          hold_no_strategy_buy_recent: holdNoBuyCount,
-          sample_size: recentWarRoom.data.length,
-        },
-      });
-    }
+    const holdIssue = classifyHoldNoStrategyDominance(holdNoBuyCount, recentWarRoom.data.length);
+    if (holdIssue) issues.push(holdIssue);
   }
 
   const disabledPaperBots = await supabase
@@ -172,25 +136,8 @@ export async function runDebuggerHealthAndFix(params: {
       r && !r.is_ghost_execution
     )
     : [];
-  if (paperBotsToReenable.length > 0) {
-    issues.push({
-      code: "PAPER_AUTOPILOT_DISABLED",
-      severity: "warn",
-      message: "Paper bots have autopilot OFF — likely from past drawdown breach",
-      detail: {
-        affected: paperBotsToReenable.length,
-        sample: paperBotsToReenable.slice(0, 5).map((r: {
-          id?: string;
-          user_id?: string;
-          symbol?: string;
-        }) => ({
-          id: r.id,
-          user_id: r.user_id,
-          symbol: r.symbol,
-        })),
-      },
-    });
-  }
+  const paperAutopilotIssue = classifyPaperAutopilotDisabledIssue(paperBotsToReenable);
+  if (paperAutopilotIssue) issues.push(paperAutopilotIssue);
 
   if (applyFixes) {
     fixes.push(

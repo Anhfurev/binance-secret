@@ -1,4 +1,7 @@
 // @ts-nocheck
+/**
+ * Legacy Kelly sizing helpers — not on the live buy path (see `risk-to-stop-sizing.ts`).
+ */
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { toNumber } from "./utils.ts";
 

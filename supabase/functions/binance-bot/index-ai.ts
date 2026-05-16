@@ -13,7 +13,6 @@ import {
   applySentimentVibeCheck,
   getAiAnalysis,
   getRecentAiCacheForSymbol,
-  isGeminiInQuotaCooldown,
 } from "./ai-core.ts";
 import { patchAiQuotaState } from "./ai-db.ts";
 import { formatUnknownError, toNumber, toStringValue } from "./utils.ts";
@@ -23,32 +22,35 @@ import {
 } from "./index-ai-quota-writes.ts";
 import { getResolvedScoreWeightsPack } from "./ai-scoring.ts";
 import { safeExecute } from "./safe-execute.ts";
+import { applyStaleSignalBuyVeto } from "./ai-veto-helpers.ts";
 import { withLlmConcurrency } from "./ai-llm-concurrency.ts";
+import { isGeminiTerminalAuthError } from "./llm-key-backoff.ts";
+import { clearCronBatchLlmKeyPools } from "./llm-key-preemptive-route.ts";
+import { GLOBAL_BOT_CONFIG, IS_TEST_MODE } from "./config.ts";
 
 // Only invoke Gemini when the price has moved at least this much since the
 // previous AI check for this symbol. Lower values burn key quota on micro
 // wiggles; higher values risk missing fast moves. 0.4% is a practical balance
 // for BTC / SOL / PEPE on a 1m heartbeat cadence.
-export const AI_PRICE_MOVE_THRESHOLD_PERCENT = (() => {
-  const raw = String(Deno.env.get("AI_PRICE_MOVE_THRESHOLD_PCT") ?? "0.35").trim();
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return 0.22;
-  return Math.min(2, Math.max(0.05, n));
-})();
+export function readAiPriceMoveThresholdPercent(): number {
+  return GLOBAL_BOT_CONFIG.AI_PRICE_MOVE_THRESHOLD_PCT;
+}
 
 export function resetAiCycleGuards() {
-  // State moved to DB-backed ai_quota_state.
+  clearCronBatchLlmKeyPools();
 }
 
 export function shouldRunAiCheck(
   snapshot: IndicatorSnapshot,
   lastAiPriceBySymbol: Map<string, number>,
 ): boolean {
-  if (snapshot.rsi > 70 || snapshot.rsi < 30) return true;
+  if (IS_TEST_MODE) return true;
+  if (snapshot.rsi > GLOBAL_BOT_CONFIG.AI_RUN_TRIGGER_RSI_HIGH ||
+    snapshot.rsi < GLOBAL_BOT_CONFIG.AI_RUN_TRIGGER_RSI_LOW) return true;
   const previousPrice = lastAiPriceBySymbol.get(snapshot.symbol);
   if (!previousPrice || previousPrice <= 0) return true;
   const movePct = Math.abs((snapshot.latestPrice - previousPrice) / previousPrice) * 100;
-  return movePct > AI_PRICE_MOVE_THRESHOLD_PERCENT;
+  return movePct > readAiPriceMoveThresholdPercent();
 }
 
 /** True when UI or quota path set `ai_cache_invalidate_until` into the future. */
@@ -103,45 +105,37 @@ export async function getAiVerdict(params: {
   safetyAi: AiAnalysis;
   userId: string;
   signal?: AbortSignal;
+  /** Paper drill: always fresh LLM read, no short-window cache reuse. */
+  paperScenarioLiveAi?: boolean;
+  /** Cron symbol index for multi-provider matrix routing. */
+  symbolMatrixIndex?: number;
 }): Promise<{ ai: AiAnalysis; aiQuotaFallback: boolean }> {
   const { shouldInvokeAi, snapshot, symbol, row, supabase, safetyAi, userId, signal } = params;
+  const paperScenarioLiveAi = Boolean(params.paperScenarioLiveAi);
   let ai = safetyAi;
   let aiQuotaFallback = false;
   const shouldBypassCache = shouldBypassAiCacheFromSettings(row);
   const scoreWeights = getResolvedScoreWeightsPack(row as Record<string, unknown>);
 
-  if (!shouldInvokeAi && !shouldBypassCache) {
+  if (!shouldInvokeAi && !shouldBypassCache && !paperScenarioLiveAi) {
     const recentCached = await getRecentAiCacheForSymbol(symbol);
     if (recentCached) {
-      ai = await applySentimentVibeCheck(recentCached, snapshot, scoreWeights);
+      const refreshed = applyStaleSignalBuyVeto(snapshot, recentCached);
+      ai = await applySentimentVibeCheck(refreshed, snapshot, scoreWeights);
     }
     return { ai, aiQuotaFallback };
-  }
-  if (await isGeminiInQuotaCooldown()) {
-    await registerGeminiFailureAndAbortIfNeeded({
-      supabase,
-      row,
-      symbol,
-      detail: "gemini_cooldown_active",
-    });
-    console.warn(`[AI DEBUG] Gemini cooldown active; fallback safety AI for ${symbol}`);
-    return {
-      ai: await applySentimentVibeCheck(
-        withAiDebugTrace(ai, "fallback", "gemini_cooldown", shouldBypassCache),
-        snapshot,
-        scoreWeights,
-      ),
-      aiQuotaFallback: true,
-    };
   }
   try {
     ai = await withLlmConcurrency(() =>
       getAiAnalysis(snapshot, {
-        skipCache: shouldBypassCache,
-        cacheBypassReason: shouldBypassCache ? "settings_recently_changed" : undefined,
+        skipCache: shouldBypassCache || paperScenarioLiveAi,
+        cacheBypassReason: shouldBypassCache
+          ? "settings_recently_changed"
+          : (paperScenarioLiveAi ? "paper_scenario_live_ai_drill" : undefined),
         scoreWeights,
         botSettingsRow: row as Record<string, unknown>,
         signal,
+        symbolMatrixIndex: params.symbolMatrixIndex,
       })
     );
     await patchAiQuotaState({ consecutive_gemini_failures: 0, last_failure_at: null });
@@ -149,6 +143,7 @@ export async function getAiVerdict(params: {
       console.warn(`[AI DEBUG] Cache bypass for ${symbol}: ai_cache_invalidate_until is active`);
     }
   } catch (aiError) {
+    if (isGeminiTerminalAuthError(aiError)) throw aiError;
     const aiDetail = formatUnknownError(aiError);
     await safeExecute(
       "catch_ai_verdict_error_log",

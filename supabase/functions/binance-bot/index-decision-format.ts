@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { DEFAULT_MIN_AI_CONFIDENCE, DEFAULT_MIN_TECH_SCORE } from "./constants.ts";
 import type { AiAnalysis, SignalDecision } from "./types.ts";
+import { GLOBAL_BOT_CONFIG } from "./config.ts";
 
 export function formatCycleReason(
   reason: string | undefined,
@@ -8,6 +9,7 @@ export function formatCycleReason(
   finalDecision: SignalDecision,
   minAiConfidence: number = DEFAULT_MIN_AI_CONFIDENCE,
   minTechnicalScore: number = DEFAULT_MIN_TECH_SCORE,
+  strategyBuyRsiThreshold: number = GLOBAL_BOT_CONFIG.STRATEGY_BUY_RSI_THRESHOLD,
 ) {
   if (reason === "hold_ai_confidence_too_low") {
     return `Confidence (${ai.ai_confidence}) < Threshold (${minAiConfidence})`;
@@ -54,7 +56,7 @@ export function formatCycleReason(
     return `Aggressive BUY rejected: technical score < ${aggFloor} without extreme exception (conf > 88 and imbalance > 0.8)`;
   }
   if (reason === "oversold_dip_buy_confidence_override") {
-    return `Dip-buy override: RSI < 30, technical score > 8, confidence >= ${minAiConfidence}`;
+    return `Dip-buy override: RSI < ${strategyBuyRsiThreshold}, technical score > 8, confidence >= ${minAiConfidence}`;
   }
   if (reason === "tie_breaker_quality_buy" || reason === "tie_breaker_tech8_ai40") {
     return `Tie-break BUY: technical score >= 7 and AI confidence near floor (${minAiConfidence})`;

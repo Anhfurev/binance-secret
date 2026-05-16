@@ -5,7 +5,7 @@ import { formatUnknownError, jsonResponse, toStringValue } from "./utils.ts";
 import { parseStaleMs } from "./trade-execution-lock-config.ts";
 import { safeExecute } from "./safe-execute.ts";
 
-function readReservationStaleMs(): number {
+export function readReservationStaleMs(): number {
   const n = Number(String(Deno.env.get("CAPITAL_RESERVATION_STALE_MS") ?? "").trim());
   return Number.isFinite(n) && n >= 30_000 ? Math.min(600_000, Math.floor(n)) : 300_000;
 }

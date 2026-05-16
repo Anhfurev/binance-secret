@@ -1,6 +1,6 @@
 // @ts-nocheck
 import {
-  resolveBinanceRestBaseUrl,
+  resolveBinanceStreamTickBaseUrl,
   withBinanceGatewayFetchHeaders,
 } from "./binance-rest-base.ts";
 import { gatewayFetch } from "./gateway-http-client.ts";
@@ -18,7 +18,7 @@ export type StreamTickSnapshot = {
 function readStreamTickMaxAgeMs(): number {
   const raw = String(Deno.env.get("BINANCE_STREAM_TICK_MAX_AGE_MS") ?? "").trim();
   const n = raw.length ? Number(raw) : NaN;
-  if (!Number.isFinite(n)) return 2500;
+  if (!Number.isFinite(n)) return 5000;
   return Math.min(15_000, Math.max(250, Math.floor(n)));
 }
 
@@ -61,7 +61,7 @@ export async function fetchStreamTickSnapshot(
   const sym = String(symbol ?? "").trim().toUpperCase();
   if (!sym) return null;
   try {
-    const url = new URL(`${resolveBinanceRestBaseUrl()}/stream/tick`);
+    const url = new URL(`${resolveBinanceStreamTickBaseUrl()}/stream/tick`);
     url.searchParams.set("symbol", sym);
     const response = await gatewayFetch(url, {
       method: "GET",

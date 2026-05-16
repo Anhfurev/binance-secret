@@ -7,31 +7,23 @@ import {
   RSI_PERIOD,
 } from "./constants.ts";
 import type { BotSettingsRow, Candle, SignalDecision } from "./types.ts";
+import { sanitizeIndicatorFloat } from "./indicator-precision.ts";
 import { clamp, toNumber } from "./utils.ts";
 
 const DIVISOR_EPSILON = 1e-12;
-
-function normalizeSmallNumber(value: number): number {
-  if (!Number.isFinite(value)) return 0;
-  if (value === 0) return 0;
-  const abs = Math.abs(value);
-  if (abs >= 1) return Number(value.toFixed(6));
-  if (abs >= 0.0001) return Number(value.toFixed(8));
-  return Number(value.toPrecision(12));
-}
 
 export function calculateEma(prices: number[], period: number): number {
   if (!prices.length) return 0;
   if (prices.length < period) {
     const seed = prices.reduce((sum, p) => sum + p, 0) / prices.length;
-    return normalizeSmallNumber(seed);
+    return sanitizeIndicatorFloat(seed);
   }
   const multiplier = 2 / (period + 1);
   let ema = prices.slice(0, period).reduce((sum, p) => sum + p, 0) / period;
   for (let i = period; i < prices.length; i += 1) {
     ema = prices[i] * multiplier + ema * (1 - multiplier);
   }
-  return normalizeSmallNumber(ema);
+  return sanitizeIndicatorFloat(ema);
 }
 
 export function calculateRsi(prices: number[], period = RSI_PERIOD): number {
@@ -74,9 +66,9 @@ export function calculateMacd(prices: number[]) {
   const signal = signalSeries[signalSeries.length - 1] ?? 0;
   const histogram = macd - signal;
   return {
-    macd: normalizeSmallNumber(macd),
-    signal: normalizeSmallNumber(signal),
-    histogram: normalizeSmallNumber(histogram),
+    macd: sanitizeIndicatorFloat(macd),
+    signal: sanitizeIndicatorFloat(signal),
+    histogram: sanitizeIndicatorFloat(histogram),
   };
 }
 
@@ -127,7 +119,7 @@ export function calculateAtrLast(candles: Candle[], period: number): number {
   for (let i = period; i < trs.length; i++) {
     atr = (atr * (period - 1) + trs[i]) / period;
   }
-  return normalizeSmallNumber(atr);
+  return sanitizeIndicatorFloat(atr);
 }
 
 function seriesEma(prices: number[], period: number) {

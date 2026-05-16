@@ -5,6 +5,12 @@ import { executeSymbolCycle } from "./symbol-cycle.ts";
 import { captureTraceReasonOnly } from "./symbol-cycle-trace.ts";
 import { safeExecute } from "./safe-execute.ts";
 import { formatUnknownError, normalizeSymbol, toStringValue } from "./utils.ts";
+import { refreshExecutionFrictionSpreadBoost } from "./professional-expectancy.ts";
+import {
+  readBotParallelSymbolCyclesEnabled,
+  readBotSymbolStaggerMs,
+  readSerialSymbolCyclesForGeminiQuota,
+} from "./batch-validator.ts";
 
 type CycleRunResult =
   | { tag: "ok"; result: BotActionResult; symbol: string; lastPrice: number }
@@ -53,14 +59,34 @@ export async function orchestrateSymbolBatch(params: {
   cycleId: string;
   btcOverbought: boolean;
   botCycleTimeoutMs: number;
+  symbolMatrixIndex?: number;
 }) {
-  const { supabase, symbolFilter, activeBots, symbolCache, lastAiPriceBySymbol, paperScenario, cycleId, btcOverbought, botCycleTimeoutMs } = params;
+  const { supabase, symbolFilter, activeBots, symbolCache, lastAiPriceBySymbol, paperScenario, cycleId, btcOverbought, botCycleTimeoutMs, symbolMatrixIndex } = params;
+  await safeExecute("refresh_friction_spread_boost", () => refreshExecutionFrictionSpreadBoost(supabase), undefined);
   const actions: BotActionResult[] = [];
   let cycleEmergencyAbort = false;
   const allSettledStarted = performance.now();
-  const cycleRuns = activeBots.map((row, botIndex) =>
-    runSingleBotCycleWithTimeout(
-      (signal) => executeSymbolCycle({ row, botIndex, signal, supabase, symbolFilter, symbolCache, lastAiPriceBySymbol, paperScenario, cycleId, btcOverbought }),
+  const parallelCycles =
+    readBotParallelSymbolCyclesEnabled() && !readSerialSymbolCyclesForGeminiQuota();
+  const staggerMs = parallelCycles ? 0 : readBotSymbolStaggerMs();
+  const settled: PromiseSettledResult<CycleRunResult>[] = [];
+  const runOne = (botIndex: number) => {
+    const row = activeBots[botIndex];
+    return runSingleBotCycleWithTimeout(
+      (signal) =>
+        executeSymbolCycle({
+          row,
+          botIndex,
+          signal,
+          supabase,
+          symbolFilter,
+          symbolCache,
+          lastAiPriceBySymbol,
+          paperScenario,
+          cycleId,
+          btcOverbought,
+          symbolMatrixIndex,
+        }),
       botCycleTimeoutMs,
       row,
       symbolFilter,
@@ -74,9 +100,25 @@ export async function orchestrateSymbolBatch(params: {
           meta: { event: "late_completion_after_timeout", timeout_ms: timeoutMs, detail, cycle_id: cycleId },
           created_at: new Date().toISOString(),
         }]), undefined),
-    )
-  );
-  const settled = await Promise.allSettled(cycleRuns);
+    );
+  };
+  if (parallelCycles && activeBots.length > 0) {
+    settled.push(
+      ...(await Promise.allSettled(activeBots.map((_, botIndex) => runOne(botIndex)))),
+    );
+  } else {
+    for (let botIndex = 0; botIndex < activeBots.length; botIndex++) {
+      if (botIndex > 0 && staggerMs > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, staggerMs));
+      }
+      const cyclePromise = runOne(botIndex);
+      try {
+        settled.push({ status: "fulfilled", value: await cyclePromise });
+      } catch (reason) {
+        settled.push({ status: "rejected", reason });
+      }
+    }
+  }
   settled.forEach((entry, botIndex) => {
     const row = activeBots[botIndex] as { user_id?: unknown; symbol?: unknown };
     const userId = toStringValue(row.user_id) ?? "unknown";

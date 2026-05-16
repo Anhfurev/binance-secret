@@ -36,3 +36,19 @@ Deno.test("ghost legs are ignored for paper reconcile", () => {
   ]);
   assertEquals(expected, 10_000);
 });
+
+Deno.test("open partial realized pnl counts toward expected paper cash", () => {
+  const expected = computeExpectedPaperDemoBalance(10_000, [
+    {
+      status: "open",
+      pnl: 0,
+      value: 500,
+      extra: {
+        trade_mode: "paper",
+        is_ghost: false,
+        realized_pnl_usd: 12.5,
+      },
+    },
+  ]);
+  assertEquals(expected, 9512.5);
+});

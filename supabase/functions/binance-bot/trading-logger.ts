@@ -5,6 +5,12 @@ import { sendTelegramAlert } from "./notifier.ts";
 
 type LogLevel = "info" | "warn" | "error";
 
+const HANDLED_CCXT_ERROR_NAMES = new Set([
+  "InsufficientFunds",
+  "InvalidOrder",
+  "NetworkError",
+]);
+
 const COLORS: Record<LogLevel, string> = {
   info: "\x1b[36m",
   warn: "\x1b[33m",
@@ -63,16 +69,12 @@ export async function logCcxtOrderError(params: {
   const { supabase, userId, symbol, side, amount, error } = params;
   const errorName = toStringValue((error as any)?.name) ?? "UnknownError";
   const errorMessage = toStringValue((error as any)?.message) ?? String(error);
-  const isHandled =
-    errorName === "InsufficientFunds" ||
-    errorName === "InvalidOrder" ||
-    errorName === "NetworkError";
-  if (!isHandled) return;
+  const handled = HANDLED_CCXT_ERROR_NAMES.has(errorName);
 
   await logTradeAction({
     supabase,
     action: `[${errorName}] ${errorMessage}`,
-    level: "error",
+    level: handled ? "error" : "warn",
     userId,
     symbol,
     source: "ccxt",
@@ -80,8 +82,11 @@ export async function logCcxtOrderError(params: {
       side,
       amount,
       error_name: errorName,
+      handled,
     },
   });
+
+  if (!handled) return;
 
   await sendTelegramAlert(
     `*Critical Trading Error*\n` +

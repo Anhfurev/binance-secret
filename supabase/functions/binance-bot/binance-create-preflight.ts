@@ -30,12 +30,13 @@ export async function preflightCreateOrderIdempotencyAndLock(params: {
 
   const existing = await supabase
     .from("trades")
-    .select("id, exchange_order_id, signalId")
+    .select("id, exchange_order_id, signalId, status")
     .eq("user_id", userId)
     .eq("symbol", symbol)
     .eq("type", sideType)
     .eq("extra->>bot_id", botId)
     .eq("extra->>cycle_id", cycleId)
+    .ilike("status", "open")
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();

@@ -6,6 +6,25 @@ import { botError } from "./bot-debug.ts";
 import { toNumber } from "./utils.ts";
 import { MIN_1H_BARS_FOR_LIVE_MTF } from "./buy-helpers.ts";
 
+export function evaluateLiveMtfStatus(params: {
+  bars1h: number;
+  ema200: number | null;
+  last1h: number;
+}): {
+  mtfDataRejected: boolean;
+  bearish1hCap: boolean;
+} {
+  const barsOk = params.bars1h >= MIN_1H_BARS_FOR_LIVE_MTF;
+  const emaOk = params.ema200 != null && Number.isFinite(Number(params.ema200));
+  const lastOk = Number.isFinite(params.last1h);
+  const mtfDataRejected = !barsOk || !emaOk || !lastOk;
+  const bearish1hCap = !mtfDataRejected
+    && params.ema200 != null
+    && Number.isFinite(params.last1h)
+    && Number(params.last1h) < Number(params.ema200);
+  return { mtfDataRejected, bearish1hCap };
+}
+
 /**
  * Resolve the 1h bearish-cap context for a BUY decision. Live mode requires
  * ≥201 1h closes plus a finite EMA200 — when missing, returns
@@ -58,15 +77,14 @@ export async function resolveBuyFlowMtfContext(params: {
     const closes1h = c1h.map((x) => x.close);
     const ema200 = computeEmaLastFromCloses(closes1h, 200);
     const last1h = closes1h.length ? closes1h[closes1h.length - 1] : NaN;
-    const barsOk = c1h.length >= MIN_1H_BARS_FOR_LIVE_MTF;
+    const { mtfDataRejected, bearish1hCap: bearish } = evaluateLiveMtfStatus({
+      bars1h: c1h.length,
+      ema200,
+      last1h,
+    });
     const emaOk = ema200 != null && Number.isFinite(Number(ema200));
     const lastOk = Number.isFinite(last1h);
-    const mtfDataRejected = !barsOk || !emaOk || !lastOk;
-    const bearish =
-      !mtfDataRejected &&
-      ema200 != null &&
-      Number.isFinite(last1h) &&
-      Number(last1h) < Number(ema200);
+    const barsOk = c1h.length >= MIN_1H_BARS_FOR_LIVE_MTF;
     return {
       bearish1hCap: bearish,
       mtfDataRejected,

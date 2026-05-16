@@ -1,3 +1,7 @@
+import { aggregateWatchdogBlockers } from "./blocker-watchdog.mjs";
+import { buildAuditDiagnostics, computePartialExitStats } from "./audit-diagnostics.mjs";
+import { buildQuantMetrics, median } from "./quant-metrics.mjs";
+
 const WIN_REASONS = new Set([
   "take_profit",
   "signal_exit",
@@ -74,6 +78,8 @@ function bump(map, key, delta = 1) {
 
 export function buildAuditMetrics({
   trades,
+  trades24h,
+  trades7d,
   wallet,
   blockerLogs,
   warRoomAudits,
@@ -148,9 +154,12 @@ export function buildAuditMetrics({
   const blockerCounts = new Map();
   for (const row of blockerLogs) {
     const meta = row.meta && typeof row.meta === "object" ? row.meta : {};
-    const holdReason = meta.hold_reason ?? meta.reason ?? meta.detail;
+    const holdReason = meta.hold_reason ?? meta.reason ?? meta.detail ?? meta.skipDetail;
     if (holdReason) bump(blockerCounts, holdReason);
     else bump(blockerCounts, row.message);
+    for (const reason of parseVetoReasons(meta.veto_details ?? meta.vetoDetails)) {
+      bump(blockerCounts, reason);
+    }
   }
   for (const row of warRoomAudits) {
     const decision = String(row.final_decision ?? "").toUpperCase();
@@ -170,6 +179,21 @@ export function buildAuditMetrics({
     imbalanceSamples.length > 0
       ? imbalanceSamples.reduce((a, b) => a + b, 0) / imbalanceSamples.length
       : null;
+  const medianHoldMinutes = median(holdMinutesList);
+  const quant = buildQuantMetrics({
+    trades,
+    trades24h,
+    trades7d,
+    feesUsd,
+    netPnl,
+  });
+  const partialExit = computePartialExitStats(trades);
+  const diagnostics = buildAuditDiagnostics({
+    quant,
+    partialExit,
+    topBlockers,
+  });
+  const watchdogBlockers = aggregateWatchdogBlockers(blockerCounts);
 
   return {
     window,
@@ -182,6 +206,7 @@ export function buildAuditMetrics({
     losses,
     neutral,
     avgHoldMinutes,
+    medianHoldMinutes,
     drawdownUsd,
     startingEquity,
     endingEquity,
@@ -190,5 +215,9 @@ export function buildAuditMetrics({
     whaleSentiment,
     bySymbol: [...bySymbol.values()].sort((a, b) => b.netPnl - a.netPnl),
     maxDrawdownLimitPct: toNum(wallet?.max_drawdown_limit, 5),
+    quant,
+    partialExit,
+    diagnostics,
+    watchdogBlockers,
   };
 }

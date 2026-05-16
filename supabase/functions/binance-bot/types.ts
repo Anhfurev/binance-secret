@@ -161,6 +161,8 @@ export type ExitReason =
   | "roi_target_hit"
   | "stoploss_hit"
   | "trailing_stop_hit"
+  | "partial_tp"
+  | "be_stop_hit"
   | "money_machine_hard_stop"
   | "money_machine_trailing_lock"
   | "rsi_overbought"
@@ -181,7 +183,24 @@ export type StrategyReason =
   | "hold_technical_sell_block"
   | "hold_no_strategy_buy"
   | "hold_open_position"
-  | "strategy_trend_momentum_entry";
+  | "strategy_trend_momentum_entry"
+  | "strategy_trend_grind_entry"
+  | "strategy_ema50_bounce_entry"
+  | "strategy_oversold_bounce_entry"
+  | "strategy_ranging_pullback_entry"
+  | "strategy_structure_recovery_entry"
+  | "strategy_paper_exploration_entry"
+  | "strategy_hybrid_neutral_momentum_entry"
+  | "strategy_hybrid_breakout_entry"
+  | "strategy_sideways_grinder_entry"
+  | "strategy_sideways_ai_grinder_entry";
+
+/** Result from `checkEntryConditions` (`strategy-entry-conditions.ts`). */
+export type EntryCheckResult = {
+  signal: SignalDecision;
+  strategy_reason: StrategyReason;
+  strategy_fail_detail?: string;
+};
 
 export type AiTrend = "bullish" | "bearish" | "neutral";
 export type AiAction = "BUY" | "SELL" | "HOLD";
@@ -254,6 +273,7 @@ export type BotActionResult = {
     rsi: number;
     macd: number;
     macdSignal: number;
+    macdHistogram?: number;
     emaFast: number;
     emaSlow: number;
     ema200?: number;

@@ -1,6 +1,6 @@
 // @ts-nocheck
 import ccxt from "ccxt";
-import { ATR_PERIOD, KLINE_INTERVAL, KLINE_LIMIT } from "./constants.ts";
+import { ATR_PERIOD, KLINE_INTERVAL } from "./constants.ts";
 import type { IndicatorSnapshot } from "./types.ts";
 import { formatUnknownError, toNumber } from "./utils.ts";
 import {
@@ -28,6 +28,13 @@ import { withBoundedPublicExchangeTimeout } from "./market-data-timeout.ts";
 
 let sharedPublicBinance: InstanceType<typeof ccxt.binance> | null = null;
 
+/** 1m bars from Binance (EMA200 needs ≥200). Env `MARKET_OHLCV_1M_LIMIT` clamped 200–400; default 200. */
+function readOhlcv1mFetchLimit(): number {
+  const raw = Number(Deno.env.get("MARKET_OHLCV_1M_LIMIT") ?? "");
+  if (!Number.isFinite(raw) || raw < 200) return 200;
+  return Math.min(400, Math.floor(raw));
+}
+
 function getSharedPublicBinance(): InstanceType<typeof ccxt.binance> {
   if (!sharedPublicBinance) {
     sharedPublicBinance = new ccxt.binance({
@@ -48,7 +55,8 @@ export async function fetchIndicatorSnapshotFromMarket(
   }
   const exchange = getSharedPublicBinance();
   const ccxtSymbol = toCcxtSymbol(symbol);
-  const ohlcvLimit = Math.max(KLINE_LIMIT, 220);
+  const ohlcv1mLimit = readOhlcv1mFetchLimit();
+  const ohlcv15mLimit = Math.min(72, Math.max(40, Math.floor(ohlcv1mLimit / 3)));
   const [
     ohlcv1m,
     ohlcv15m,
@@ -62,25 +70,25 @@ export async function fetchIndicatorSnapshotFromMarket(
         ccxtSymbol,
         normalizeCcxtTimeframe(KLINE_INTERVAL),
         undefined,
-        ohlcvLimit,
+        ohlcv1mLimit,
       ),
       exchange.fetchOHLCV(
         ccxtSymbol,
         "15m",
         undefined,
-        Math.max(100, Math.floor(ohlcvLimit / 2)),
+        ohlcv15mLimit,
       ),
       exchange.fetchOHLCV(
         ccxtSymbol,
         "1h",
         undefined,
-        80,
+        55,
       ),
       exchange.fetchOHLCV(
         ccxtSymbol,
         "4h",
         undefined,
-        48,
+        32,
       ),
       exchange.fetchOrderBook(ccxtSymbol, 5),
       exchange.fetchTicker(ccxtSymbol),
@@ -108,15 +116,22 @@ export async function fetchIndicatorSnapshotFromMarket(
     throw new Error(`Not enough 1h candles for ${symbol} (need >= 50)`);
   }
 
-  const latestPrice = await resolveLatestPrice({
-    exchange,
-    ccxtSymbol,
-    tickerLast: ticker?.last,
-    fallbackClose: closes[closes.length - 1] ?? 0,
-    streamSymbol: symbol,
-    signal,
-  });
+  const bestBid = toNumber(orderBook?.bids?.[0]?.[0], 0);
+  const bestAsk = toNumber(orderBook?.asks?.[0]?.[0], 0);
+  const latestPrice = await withBoundedPublicExchangeTimeout(exchange, signal, () =>
+    resolveLatestPrice({
+      exchange,
+      ccxtSymbol,
+      tickerLast: ticker?.last,
+      fallbackClose: closes[closes.length - 1] ?? 0,
+      streamSymbol: symbol,
+      bestBid,
+      bestAsk,
+      signal,
+    }),
+  );
   const rsi = calculateRsi(closes);
+
   const rsi15m = calculateRsi(closes15m);
   const bb = calculateBollingerBands(closes, 20, 2);
   const ema200 = calculateEma(closes, 200);
@@ -177,8 +192,6 @@ export async function fetchIndicatorSnapshotFromMarket(
     (ticker as { baseVolume?: unknown })?.baseVolume ?? (ticker as { volume?: unknown })?.volume,
     NaN,
   );
-  const bestBid = toNumber(orderBook?.bids?.[0]?.[0], 0);
-  const bestAsk = toNumber(orderBook?.asks?.[0]?.[0], 0);
   const spreadMid = bestBid > 0 && bestAsk > 0
     ? (bestBid + bestAsk) / 2
     : 0;
@@ -191,11 +204,11 @@ export async function fetchIndicatorSnapshotFromMarket(
   const totalAskVolume = (orderBook?.asks ?? [])
     .slice(0, 5)
     .reduce((sum, level) => sum + Math.max(0, toNumber(level?.[1], 0)), 0);
-  const imbalance_ratio = Number(
-    (
-      totalBidVolume / Math.max(totalAskVolume, Number.EPSILON)
-    ).toFixed(6),
-  );
+  const imbalance_ratio = totalAskVolume > 0
+    ? Number((totalBidVolume / totalAskVolume).toFixed(6))
+    : totalBidVolume > 0
+    ? 99
+    : 1;
 
   const burst = computeVolatilityBurstGuard(candles);
 

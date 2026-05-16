@@ -4,6 +4,7 @@ import {
   DEFAULT_MIN_AI_CONFIDENCE,
   DEFAULT_MIN_TECH_SCORE,
 } from "./constants.ts";
+import { resolveMarketRegimeMinAiConfidence } from "./confidence-policy.ts";
 
 export function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -68,21 +69,7 @@ export function resolveMinAiConfidenceForRegime(
   row: Record<string, unknown>,
   marketRegime: string,
 ): number {
-  const base = Math.max(
-    1,
-    Math.min(100, toNumber(row.min_ai_confidence, DEFAULT_MIN_AI_CONFIDENCE)),
-  );
-  if (marketRegime === "TRENDING") {
-    const t = row.min_ai_confidence_trending;
-    if (t === null || t === undefined) return base;
-    return Math.max(1, Math.min(100, toNumber(t, base)));
-  }
-  if (marketRegime === "RANGING") {
-    const r = row.min_ai_confidence_ranging;
-    if (r === null || r === undefined) return base;
-    return Math.max(1, Math.min(100, toNumber(r, base)));
-  }
-  return base;
+  return resolveMarketRegimeMinAiConfidence(row, marketRegime);
 }
 
 /**
@@ -150,6 +137,14 @@ export function normalizeGatewayOrHtmlError(text: string): string {
   return "non_json_upstream_html_error";
 }
 
+/** Labels for `catch` / unhandled paths — never silent for `null` / `undefined` rejections. */
+export function describeThrownValue(value: unknown): string {
+  if (value === null) return "[thrown: null]";
+  if (value === undefined) return "[thrown: undefined]";
+  const s = formatUnknownError(value).trim();
+  return s.length > 0 ? s : "[thrown: empty_message]";
+}
+
 export function formatUnknownError(error: unknown): string {
   if (error instanceof Error) {
     return error.message || error.name || "Unknown Error";
@@ -195,5 +190,11 @@ export function formatUnknownError(error: unknown): string {
     }
   }
   return String(error);
+}
+
+/** Promise-based sleep for serialized LLM / cron pacing. */
+export function sleepMs(ms: number): Promise<void> {
+  const n = Math.max(0, Math.floor(ms));
+  return new Promise((resolve) => setTimeout(resolve, n));
 }
 

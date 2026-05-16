@@ -7,10 +7,18 @@ import { sendTelegramAlert } from "./notifier.ts";
 import { parsePaperScenarioRequest, runPaperScenario } from "./paper-scenario-runner.ts";
 import { parsePaperScenarioSuiteRequest, runPaperScenarioSuite } from "./paper-scenario-suite.ts";
 import { collectHealthSnapshot, runRetentionCleanup, runStaleTradeGuard, type RetentionRunResult } from "./health-check.ts";
+import {
+  edgePingPayload,
+  handleFunctionHealthRequest,
+  readFunctionHealthFlags,
+  wantsFunctionHealth,
+} from "./function-health.ts";
 import { runDebuggerHealthAndFix } from "./health-debugger.ts";
 import { handleMaintenanceOnly } from "./index-maintenance.ts";
 import { isTradingViewWebhookRequest, parseSymbolsFromBody, resolveTradingViewAuth } from "./middleware-factory.ts";
 import { runPostBatchBalanceSync } from "./run-symbol-batch.ts";
+import { runFunctionVitalityCheck } from "./function-health.ts";
+import { readReconciliationEnabled, runReconciliationJob } from "./reconciler.ts";
 
 async function handleHealthCheckOnly(supabase: ReturnType<typeof createClient>): Promise<Response> {
   const startedAtMs = Date.now();
@@ -61,6 +69,9 @@ export async function routeRequest(params: {
     return new Response("ok", { headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-binance-bot-secret" } });
   }
   const requestUrl = new URL(req.url);
+  if (req.method === "GET" && requestUrl.searchParams.get("ping") === "1") {
+    return jsonResponse(edgePingPayload());
+  }
   let parsedBody = await safeReadJsonBody(req) as Record<string, unknown> | null;
   if ((parsedBody as any)?._invalidJson) {
     const qSym = toStringValue(requestUrl.searchParams.get("symbol")) ?? toStringValue(requestUrl.searchParams.get("ticker"));
@@ -72,10 +83,12 @@ export async function routeRequest(params: {
   const probeSymbol = symbols[0] ?? "unknown";
   const healthCheckOnly = Boolean((parsedBody as any)?.health_check_only);
   const maintenanceOnly = Boolean((parsedBody as any)?.maintenance_only);
+  const reconcileOnly = Boolean((parsedBody as any)?.reconcile_only);
   const debuggerHealthOnly = Boolean((parsedBody as any)?.debugger_health_only);
-  const debuggerApplyFixes = (parsedBody as any)?.debugger_apply_fixes !== false;
+  const debuggerApplyFixes = (parsedBody as any)?.debugger_apply_fixes === true;
   const debuggerIncludeRetention = Boolean((parsedBody as any)?.debugger_include_retention);
-  botDebug("index", "function_started", { method: req.method, sym: probeSymbol, n_symbols: symbols.length, health_check_only: healthCheckOnly, maintenance_only: maintenanceOnly, debugger_health_only: debuggerHealthOnly, debugger_apply_fixes: debuggerApplyFixes, debugger_include_retention: debuggerIncludeRetention });
+  const functionHealthRequested = wantsFunctionHealth(parsedBody, requestUrl.searchParams);
+  botDebug("index", "function_started", { method: req.method, sym: probeSymbol, n_symbols: symbols.length, health_check_only: healthCheckOnly, maintenance_only: maintenanceOnly, debugger_health_only: debuggerHealthOnly, debugger_apply_fixes: debuggerApplyFixes, debugger_include_retention: debuggerIncludeRetention, function_health: functionHealthRequested });
   void emitSentryBootProbe({ method: req.method, symbol: probeSymbol });
   const botSecret = (Deno.env.get("BOT_SECRET") ?? "").trim();
   const providedSecret = (req.headers.get("x-binance-bot-secret") ?? "").trim();
@@ -94,6 +107,23 @@ export async function routeRequest(params: {
     await sendTelegramAlert("Telegram ping OK — binance-bot received telegram_ping (check HTML/plain fallback if you see this as plain text).");
     return jsonResponse({ ok: true, mode: "telegram_ping", detail: "Sent one test message via Telegram API" });
   }
+  if (functionHealthRequested) {
+    if (!botAuthed) {
+      return jsonResponse({
+        ok: false,
+        error: "Unauthorized",
+        detail: "function_health requires x-binance-bot-secret matching BOT_SECRET.",
+      }, 401);
+    }
+    const flags = readFunctionHealthFlags(parsedBody);
+    const payload = await handleFunctionHealthRequest({
+      supabase: sharedSupabase,
+      applyFixes: flags.applyFixes,
+      includeStale: flags.includeStale,
+      runDebugger: flags.runDebugger,
+    });
+    return jsonResponse(payload, payload.ok ? 200 : 503);
+  }
   if (healthCheckOnly) {
     if (!botAuthed) return jsonResponse({ ok: false, error: "Unauthorized", detail: "health_check_only requires x-binance-bot-secret matching BOT_SECRET." }, 401);
     return await handleHealthCheckOnly(sharedSupabase);
@@ -102,6 +132,24 @@ export async function routeRequest(params: {
     if (!botAuthed) return jsonResponse({ ok: false, error: "Unauthorized", detail: "maintenance_only requires x-binance-bot-secret matching BOT_SECRET." }, 401);
     const maintenance = await handleMaintenanceOnly(sharedSupabase);
     return jsonResponse({ ok: true, mode: "maintenance_only", ...maintenance });
+  }
+  if (reconcileOnly) {
+    if (!botAuthed) {
+      return jsonResponse({
+        ok: false,
+        error: "Unauthorized",
+        detail: "reconcile_only requires x-binance-bot-secret matching BOT_SECRET.",
+      }, 401);
+    }
+    if (!readReconciliationEnabled()) {
+      return jsonResponse({
+        ok: false,
+        error: "reconciliation_disabled",
+        detail: "Set RECONCILER_ENABLED=1 on the binance-bot Edge function before reconcile_only.",
+      }, 503);
+    }
+    const reconciliation = await runReconciliationJob({ supabase: sharedSupabase });
+    return jsonResponse({ ok: true, mode: "reconcile_only", reconciliation });
   }
   if (debuggerHealthOnly) {
     if (!botAuthed) return jsonResponse({ ok: false, error: "Unauthorized", detail: "debugger_health_only requires x-binance-bot-secret matching BOT_SECRET." }, 401);
@@ -119,6 +167,12 @@ export async function routeRequest(params: {
     if (!botAuthed) return jsonResponse({ ok: false, error: "Unauthorized", detail: "paper_scenario requires x-binance-bot-secret matching BOT_SECRET." }, 401);
     const scenarioResult = await runPaperScenario({ supabase: sharedSupabase, request: parsedScenario.value, lastAiPriceBySymbol });
     return jsonResponse(scenarioResult, scenarioResult.ok ? 200 : 400);
+  }
+  if (toStringValue((parsedBody as Record<string, unknown>)?.paper_scenario)) {
+    return jsonResponse(
+      { ok: false, error: "invalid_paper_scenario", detail: parsedScenario.error },
+      400,
+    );
   }
   if (!symbols.length) return jsonResponse({ ok: true, skipped: true, reason: "Missing symbol or symbols in request body", ...(tvWant ? { hint: "For TradingView, add symbol or ticker in JSON or ?symbol= / ?ticker= on the URL." } : {}) });
   const wakeTrigger = toStringValue((parsedBody as any)?.trigger);

@@ -7,14 +7,23 @@ import {
   withBinanceGatewayFetchHeaders,
 } from "./binance-rest-base.ts";
 import { gatewayFetch } from "./gateway-http-client.ts";
+import { getGroqKeysFromEnv, getGeminiKeySlotsFromEnv } from "./ai-keys.ts";
 import {
   computeExpectedPaperDemoBalance,
   readPaperWalletReconcileToleranceUsd,
 } from "./paper-wallet-reconcile.ts";
 import type { DebuggerIssue } from "./health-debugger.ts";
+import { runBuyPathProbes } from "./debugger-buy-probes.ts";
+import { classifyTightTrailingExitIssue } from "./debugger-issue-rules.ts";
+import {
+  readGeminiRotationPerKey2hBudget,
+  readGroqRotationPerKey2hBudget,
+  readGroqRotationWarnThreshold,
+  readGeminiRotationWarnThreshold,
+} from "./debugger-error-triage.ts";
 import { toNumber } from "./utils.ts";
 
-function readCronStaleMinutes(): number {
+export function readCronStaleMinutes(): number {
   const raw = String(Deno.env.get("DEBUGGER_CRON_STALE_MINUTES") ?? "8").trim();
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return 8;
@@ -29,7 +38,7 @@ export async function runOpsProbes(
   const staleMinutes = readCronStaleMinutes();
   const cronSinceIso = new Date(Date.now() - staleMinutes * 60 * 1000).toISOString();
 
-  const [cronPulse, autopilot, groqLimits, profiles, trades] = await Promise.all([
+  const [cronPulse, autopilot, groqLimits, geminiLimits, profiles, trades, recentStops] = await Promise.all([
     supabase
       .from("logs")
       .select("id", { count: "exact", head: true })
@@ -43,12 +52,25 @@ export async function runOpsProbes(
       .from("logs")
       .select("id", { count: "exact", head: true })
       .gte("created_at", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
-      .ilike("message", "%LIMIT HIT%"),
-    supabase.from("profiles").select("id,demo_balance,starting_balance").limit(20),
+      .eq("meta->>event", "groq_key_rotated"),
+    supabase
+      .from("logs")
+      .select("id", { count: "exact", head: true })
+      .gte("created_at", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+      .eq("meta->>event", "gemini_key_rotated"),
+    supabase.from("profiles").select("id,demo_balance,starting_balance").limit(100),
     supabase
       .from("trades")
-      .select("status,pnl,value,extra,user_id")
+      .select("status,pnl,value,extra,user_id,entryPrice,symbol,exit_reason,closed_at")
       .limit(5000),
+    supabase
+      .from("trades")
+      .select("symbol,entryPrice,extra,exit_reason,closed_at")
+      .eq("status", "stopped")
+      .in("exit_reason", ["stoploss_hit", "trailing_stop_hit"])
+      .gte("closed_at", new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString())
+      .order("closed_at", { ascending: false })
+      .limit(40),
   ]);
 
   const cronPulseCount = Number(cronPulse.count ?? 0);
@@ -76,13 +98,54 @@ export async function runOpsProbes(
 
   const groqLimitHits = Number(groqLimits.count ?? 0);
   summary.groq_limit_hits_last_2h = groqLimitHits;
-  if (groqLimitHits >= 12) {
+  const groqKeyCount = Math.max(1, getGroqKeysFromEnv().length);
+  const perKeyBudget = readGroqRotationPerKey2hBudget();
+  const groqWarnThreshold = Math.max(readGroqRotationWarnThreshold(), groqKeyCount * perKeyBudget);
+  if (groqLimitHits >= groqWarnThreshold) {
     issues.push({
       code: "GROQ_LIMIT_ROTATION_HIGH",
       severity: "warn",
-      message: "Groq key rotation / limit hits are elevated",
-      detail: { hits_last_2h: groqLimitHits },
+      message:
+        `Groq key rotation is high (${groqLimitHits} logs / 2h vs threshold ${groqWarnThreshold}, ${groqKeyCount} keys) — ` +
+        `DB cooldown cycling is active; BUY veto traffic drives most rotations`,
+      detail: {
+        hits_last_2h: groqLimitHits,
+        warn_threshold: groqWarnThreshold,
+        groq_key_count: groqKeyCount,
+        per_key_budget: perKeyBudget,
+        note:
+          "Each BUY can call Groq veto; rate limits emit `groq_key_rotated` (throttled to 1 row / key / 5m). Failover is expected.",
+        hint:
+          "Tune DEBUGGER_GROQ_PER_KEY_2H_BUDGET (default 120), DEBUGGER_GROQ_ROTATION_WARN_THRESHOLD, widen AI_PRICE_MOVE_THRESHOLD_PCT, or add GROQ_API_KEYn.",
+      },
     });
+  } else if (groqLimitHits > 0) {
+    summary.groq_rotation_note = "within_normal_rotation";
+  }
+
+  const geminiLimitHits = Number(geminiLimits.count ?? 0);
+  summary.gemini_limit_hits_last_2h = geminiLimitHits;
+  const geminiKeyCount = Math.max(1, getGeminiKeySlotsFromEnv().length);
+  const geminiPerKeyBudget = readGeminiRotationPerKey2hBudget();
+  const geminiWarnThreshold = Math.max(readGeminiRotationWarnThreshold(), geminiKeyCount * geminiPerKeyBudget);
+  if (geminiLimitHits >= geminiWarnThreshold) {
+    issues.push({
+      code: "GEMINI_LIMIT_ROTATION_HIGH",
+      severity: "warn",
+      message:
+        `Gemini key rotation is high (${geminiLimitHits} logs / 2h vs threshold ${geminiWarnThreshold}) — ` +
+        `cycling + per-key DB cooldowns are active`,
+      detail: {
+        hits_last_2h: geminiLimitHits,
+        warn_threshold: geminiWarnThreshold,
+        gemini_key_count: geminiKeyCount,
+        per_key_budget: geminiPerKeyBudget,
+        hint:
+          "Tune DEBUGGER_GEMINI_PER_KEY_2H_BUDGET (default 120), DEBUGGER_GEMINI_ROTATION_WARN_THRESHOLD, or add GEMINI_KEYS_POOL / GEMINI_API_KEYn / GEMINI_KEY_n.",
+      },
+    });
+  } else if (geminiLimitHits > 0) {
+    summary.gemini_rotation_note = "within_normal_rotation";
   }
 
   const quota = await getAiQuotaState("global");
@@ -179,6 +242,17 @@ export async function runOpsProbes(
       detail: { profiles: drifts.slice(0, 5), tolerance_usd: tolerance },
     });
   }
+
+  const tightTrailIssue = classifyTightTrailingExitIssue(
+    (Array.isArray(recentStops.data) ? recentStops.data : []).filter((row: {
+      extra?: Record<string, unknown> | null;
+    }) => row?.extra?.is_paper === true || row?.extra?.trade_mode === "paper"),
+  );
+  if (tightTrailIssue) issues.push(tightTrailIssue);
+
+  const buyPath = await runBuyPathProbes(supabase);
+  issues.push(...(buyPath.issues as DebuggerIssue[]));
+  summary.buy_path = buyPath.summary;
 
   return { issues, summary };
 }

@@ -9,16 +9,47 @@ import { safeExecute } from "./safe-execute.ts";
 import { formatUnknownError } from "./utils.ts";
 import { validateSymbolBatchInput } from "./batch-validator.ts";
 import { orchestrateSymbolBatch } from "./batch-orchestrator.ts";
+import { assertExpectedEgressIpOrThrow } from "./exchange-client.ts";
+
+export type BalanceSyncTarget = {
+  isLiveMode: boolean;
+  hasPaperMode: boolean;
+  symbols: Set<string>;
+};
 
 export type SymbolBatchResult = {
   symbolFilter: string;
   actions: BotActionResult[];
-  balanceSyncTargets: Map<string, { isLiveMode: boolean; symbols: Set<string> }>;
+  balanceSyncTargets: Map<string, BalanceSyncTarget>;
   cycleEmergencyAbort: boolean;
   cycleId: string;
   allSettledElapsedMs: number;
   scanned: number;
+  batchTimeouts: number;
+  batchErrors: number;
 };
+
+export function summarizeBatchActions(actions: BotActionResult[]): {
+  batchTimeouts: number;
+  batchErrors: number;
+} {
+  let batchTimeouts = 0;
+  let batchErrors = 0;
+  for (const action of actions) {
+    const detail = String(action.detail ?? "");
+    if (action.action === "skip" && detail.startsWith("TIMEOUT_HOLD:")) {
+      batchTimeouts += 1;
+    } else if (action.action === "error") {
+      batchErrors += 1;
+    }
+  }
+  return { batchTimeouts, batchErrors };
+}
+
+export function readPostBatchBalanceSyncEnabled(): boolean {
+  const raw = String(Deno.env.get("POST_BATCH_BALANCE_SYNC") ?? "1").trim().toLowerCase();
+  return raw !== "0" && raw !== "false";
+}
 
 export async function runSymbolBatch(params: {
   supabase: ReturnType<typeof createClient>;
@@ -26,11 +57,27 @@ export async function runSymbolBatch(params: {
   lastAiPriceBySymbol: Map<string, number>;
   marketCache?: Map<string, import("./types.ts").IndicatorSnapshot>;
   paperScenario?: { name: import("./paper-scenario-snapshot.ts").PaperScenarioName; execute: boolean } | null;
+  symbolMatrixIndex?: number;
+  btcOverbought?: boolean;
 }): Promise<SymbolBatchResult> {
-  const { supabase, symbolFilter, lastAiPriceBySymbol, marketCache, paperScenario } = params;
-  const validated = await validateSymbolBatchInput({ supabase, symbolFilter, marketCache });
+  const {
+    supabase,
+    symbolFilter,
+    lastAiPriceBySymbol,
+    marketCache,
+    paperScenario,
+    symbolMatrixIndex,
+    btcOverbought: btcOverboughtHint,
+  } = params;
+  const validated = await validateSymbolBatchInput({
+    supabase,
+    symbolFilter,
+    marketCache,
+    btcOverbought: btcOverboughtHint,
+  });
   if (validated.empty) return validated.result;
   const { activeBots, symbolCache, cycleId, btcOverbought, botCycleTimeoutMs, balanceSyncTargets } = validated;
+  const ownsMarketCache = !marketCache;
   setActiveTelegramCycleId(cycleId);
   try {
     const orchestrated = await orchestrateSymbolBatch({
@@ -43,21 +90,33 @@ export async function runSymbolBatch(params: {
       cycleId,
       btcOverbought,
       botCycleTimeoutMs,
+      symbolMatrixIndex,
     });
-    return { symbolFilter, balanceSyncTargets, cycleId, ...orchestrated };
+    const { batchTimeouts, batchErrors } = summarizeBatchActions(orchestrated.actions);
+    return {
+      symbolFilter,
+      balanceSyncTargets,
+      cycleId,
+      batchTimeouts,
+      batchErrors,
+      ...orchestrated,
+    };
   } finally {
     setActiveTelegramCycleId(null);
-    symbolCache.clear();
+    if (ownsMarketCache) {
+      symbolCache.clear();
+    }
   }
 }
 
 export function mergeBalanceSyncTargets(
-  into: Map<string, { isLiveMode: boolean; symbols: Set<string> }>,
-  chunk: Map<string, { isLiveMode: boolean; symbols: Set<string> }>,
+  into: Map<string, BalanceSyncTarget>,
+  chunk: Map<string, BalanceSyncTarget>,
 ) {
   for (const [uid, t] of chunk) {
-    const prev = into.get(uid) ?? { isLiveMode: false, symbols: new Set<string>() };
+    const prev = into.get(uid) ?? { isLiveMode: false, hasPaperMode: false, symbols: new Set<string>() };
     prev.isLiveMode = prev.isLiveMode || t.isLiveMode;
+    prev.hasPaperMode = prev.hasPaperMode || t.hasPaperMode;
     for (const s of t.symbols) prev.symbols.add(s);
     into.set(uid, prev);
   }
@@ -65,22 +124,61 @@ export function mergeBalanceSyncTargets(
 
 export async function runPostBatchBalanceSync(params: {
   supabase: ReturnType<typeof createClient>;
-  balanceSyncTargets: Map<string, { isLiveMode: boolean; symbols: Set<string> }>;
+  balanceSyncTargets: Map<string, BalanceSyncTarget>;
   fallbackSymbol: string;
-}) {
+}): Promise<{ synced: number; skipped: boolean; liveTotalBalance?: number }> {
   const { supabase, balanceSyncTargets, fallbackSymbol } = params;
-  for (const [userId, target] of balanceSyncTargets.entries()) {
-    if (!target.isLiveMode) continue;
+  if (!readPostBatchBalanceSyncEnabled()) {
+    return { synced: 0, skipped: true };
+  }
+
+  const liveTargets = [...balanceSyncTargets.entries()].filter(([, target]) => target.isLiveMode);
+  if (!liveTargets.length) {
+    return { synced: 0, skipped: true };
+  }
+
+  let liveTotalBalance = 0;
+  try {
+    await assertExpectedEgressIpOrThrow();
+    liveTotalBalance = await getTotalAccountBalanceUsdt(false);
+  } catch (error) {
+    const detail = formatUnknownError(error);
+    botError("index", "balance_sync_prefetch_failed", { detail, live_users: liveTargets.length });
+    await safeExecute("catch_balance_sync_prefetch_failed_log", () => supabase.from("logs").insert([{
+      user_id: null,
+      symbol: fallbackSymbol,
+      level: "warn",
+      source: "balance-sync",
+      message: "profile_balance_sync_prefetch_failed",
+      meta: { event: "profile_balance_sync_prefetch_failed", detail, live_users: liveTargets.length },
+      created_at: new Date().toISOString(),
+    }]), undefined);
+    return { synced: 0, skipped: true };
+  }
+
+  if (!Number.isFinite(liveTotalBalance) || liveTotalBalance <= 0) {
+    return { synced: 0, skipped: true };
+  }
+
+  const sharedWallet = liveTargets.length > 1;
+  const syncedAt = new Date().toISOString();
+  const roundedBalance = Number(liveTotalBalance.toFixed(2));
+  let synced = 0;
+
+  for (const [userId, target] of liveTargets) {
     const logSymbol = [...target.symbols][0] ?? fallbackSymbol;
     try {
-      const liveTotalBalance = await getTotalAccountBalanceUsdt(false);
-      if (!Number.isFinite(liveTotalBalance) || liveTotalBalance <= 0) continue;
       await updateProfileBalance(supabase, userId, liveTotalBalance);
       await supabase.from("account_balances").insert([{
         user_id: userId,
-        balance: Number(liveTotalBalance.toFixed(2)),
-        timestamp: new Date().toISOString(),
-        extra: { source: "balance-sync", symbols: [...target.symbols] },
+        balance: roundedBalance,
+        timestamp: syncedAt,
+        extra: {
+          source: "balance-sync",
+          symbols: [...target.symbols],
+          shared_wallet: sharedWallet,
+          live_users_in_batch: liveTargets.length,
+        },
       }]);
       await supabase.from("logs").insert([{
         user_id: userId,
@@ -88,9 +186,15 @@ export async function runPostBatchBalanceSync(params: {
         level: "info",
         source: "balance-sync",
         message: "profile_balance_synced_from_binance",
-        meta: { event: "profile_balance_synced_from_binance", live_total_balance: Number(liveTotalBalance.toFixed(2)) },
-        created_at: new Date().toISOString(),
+        meta: {
+          event: "profile_balance_synced_from_binance",
+          live_total_balance: roundedBalance,
+          shared_wallet: sharedWallet,
+          live_users_in_batch: liveTargets.length,
+        },
+        created_at: syncedAt,
       }]);
+      synced += 1;
     } catch (error) {
       const detail = formatUnknownError(error);
       botError("index", "balance_sync_failed", { userId, symbol: logSymbol, detail });
@@ -105,4 +209,6 @@ export async function runPostBatchBalanceSync(params: {
       }]), undefined);
     }
   }
+
+  return { synced, skipped: false, liveTotalBalance: roundedBalance };
 }

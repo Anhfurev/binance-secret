@@ -1,29 +1,15 @@
 // @ts-nocheck
 import type { AiAnalysis, Candle, IndicatorSnapshot } from "./types.ts";
+import { isGroqTieredTrapConfigured } from "./ai-groq-models.ts";
+import { GLOBAL_BOT_CONFIG } from "./config.ts";
 import { toNumber } from "./utils.ts";
 
-const VETO_STALE_ON = () =>
-  String(Deno.env.get("VETO_STALE_SIGNAL") ?? "1").trim() !== "0";
-
-function numEnv(key: string, fallback: number): number {
-  const n = Number(String(Deno.env.get(key) ?? "").trim());
-  return Number.isFinite(n) ? n : fallback;
-}
-
-/** Gemini BUY at or above this weighted score skips the Groq LLM veto (fast-track). */
-export function readGroqVetoFastTrackMinConfidence(): number {
-  const raw = String(Deno.env.get("GROQ_VETO_FAST_TRACK_MIN_CONFIDENCE") ?? "").trim();
-  if (!raw) return 98;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return 98;
-  return Math.min(100, Math.max(70, Math.floor(n)));
-}
-
 export function shouldFastTrackGroqBuyVeto(ai: AiAnalysis): boolean {
+  if (isGroqTieredTrapConfigured()) return false;
   if (String(ai.action ?? "").toUpperCase() !== "BUY") return false;
   const conf = Number(ai.ai_confidence);
   if (!Number.isFinite(conf)) return false;
-  return conf >= readGroqVetoFastTrackMinConfidence();
+  return conf >= GLOBAL_BOT_CONFIG.GROQ_VETO_FAST_TRACK_MIN_CONFIDENCE;
 }
 
 function tailBars(candles: Candle[] | undefined, n: number): Candle[] {
@@ -89,15 +75,14 @@ export function buildVetoTechnicalWindow(snapshot: IndicatorSnapshot) {
   };
 }
 
-/** Reject before Groq when very recent 1m structure contradicts a fresh long. */
 export function evaluateStaleSignalVeto(snapshot: IndicatorSnapshot): {
   reject: boolean;
   reason: string;
 } | null {
-  if (!VETO_STALE_ON()) return null;
+  if (!GLOBAL_BOT_CONFIG.VETO_STALE_SIGNAL) return null;
   const win = buildVetoTechnicalWindow(snapshot);
-  const fiveTh = numEnv("VETO_FAST_1M_5BAR_RETURN_PCT", -0.08);
-  const gapTh = numEnv("VETO_FAST_GAP_FROM_LAST_1M_CLOSE_PCT", -0.08);
+  const fiveTh = GLOBAL_BOT_CONFIG.VETO_FAST_1M_5BAR_RETURN_PCT;
+  const gapTh = GLOBAL_BOT_CONFIG.VETO_FAST_GAP_FROM_LAST_1M_CLOSE_PCT;
   if (
     win.computed.five_1m_return_pct != null &&
     win.computed.five_1m_return_pct < fiveTh
@@ -121,4 +106,26 @@ export function evaluateStaleSignalVeto(snapshot: IndicatorSnapshot): {
     };
   }
   return null;
+}
+
+export function hasFinalGroqBuyVeto(ai: AiAnalysis): boolean {
+  const verdict = String(ai.groq_verdict ?? "").toUpperCase();
+  return verdict === "APPROVE" || verdict === "REJECT" || verdict === "SKIPPED";
+}
+
+export function applyStaleSignalBuyVeto(
+  snapshot: IndicatorSnapshot,
+  ai: AiAnalysis,
+): AiAnalysis {
+  if (String(ai.action ?? "").toUpperCase() !== "BUY") return ai;
+  const stale = evaluateStaleSignalVeto(snapshot);
+  if (!stale?.reject) return ai;
+  return {
+    ...ai,
+    action: "HOLD",
+    trend_alignment: false,
+    groq_verdict: "REJECT",
+    groq_reason: stale.reason,
+    raw_groq_veto_response: { action: "REJECT", reason: stale.reason, fast_path: true },
+  };
 }

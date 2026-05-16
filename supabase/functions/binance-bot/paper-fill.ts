@@ -16,9 +16,13 @@ const PAPER_SLIPPAGE_BPS_BY_REGIME: Record<string, number> = {
   RANGING: 8,
 };
 
-function regimeSlippageBps(regime?: string): number {
+export function readPaperRegimeSlippageBps(regime?: string): number {
   const key = String(regime ?? "NEUTRAL").toUpperCase();
   return PAPER_SLIPPAGE_BPS_BY_REGIME[key] ?? PAPER_SLIPPAGE_BPS_BY_REGIME.NEUTRAL;
+}
+
+function regimeSlippageBps(regime?: string): number {
+  return readPaperRegimeSlippageBps(regime);
 }
 
 export async function simulatePaperFill(params: {
@@ -78,6 +82,11 @@ export async function simulatePaperFill(params: {
   const fillPrice = await normalizePriceForSymbol(symbol, rawFillPrice);
   const filledAmountStr = await formatAmount(symbol, amount);
   const filledAmount = Number(filledAmountStr);
+  if (!Number.isFinite(filledAmount) || filledAmount <= 0) {
+    throw new Error(
+      `simulatePaperFill: amount rounds to zero after lot precision for ${symbol}`,
+    );
+  }
 
   const grossNotional = filledAmount * fillPrice;
   const feeUsd = Number((grossNotional * feePct).toFixed(8));

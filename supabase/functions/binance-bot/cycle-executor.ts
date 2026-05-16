@@ -2,6 +2,7 @@
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { processBot } from "./bot.ts";
 import { logCycleSummary, logDecisionTrace, logExecutionOutcome } from "./index-logging.ts";
+import { maybeSendDecisionTraceTelegram } from "./telegram-decision-trace.ts";
 import { safeExecute } from "./safe-execute.ts";
 import { toStringValue } from "./utils.ts";
 import { insertWarRoomAudit } from "./veto-transparency.ts";
@@ -20,9 +21,29 @@ export async function executeSymbolCycleActions(params: {
 }) {
   const { row, supabase, userId, symbol, cycleId, snapshot, paperScenario, outcome, signal } = params;
   const {
-    ai, bbPosition, decision, reason, strategyFailDetail, technicalScore, strategySignal, technical, minAiConfidence,
-    effectiveStrategyExit, combinedStrategyReason, executionUsdScale, demoProbeBuyFlag, strategyEntry, forceBuyReason, openTrade,
-    dbLoadOpenTradeMs, aiVerdictMs, vetoDetailsPayload,
+    ai,
+    bbPosition,
+    decision,
+    reason,
+    strategyFailDetail,
+    technicalScore,
+    strategySignal,
+    technical,
+    minAiConfidence,
+    effectiveStrategyExit,
+    combinedStrategyReason,
+    executionUsdScale,
+    demoProbeBuyFlag,
+    strategyEntry,
+    forceBuyReason,
+    openTrade,
+    dbLoadOpenTradeMs,
+    aiVerdictMs,
+    vetoDetailsPayload,
+    preflight,
+    aiQuotaFallback,
+    aiVerdictErrorDetail,
+    grinderTakeProfitPct,
   } = outcome;
   await insertWarRoomAudit({
     supabase,
@@ -65,6 +86,36 @@ export async function executeSymbolCycleActions(params: {
     reason,
     minAiConfidence,
   });
+  void maybeSendDecisionTraceTelegram({
+    row,
+    symbol,
+    cycleId,
+    snapshot: {
+      marketRegime: snapshot.marketRegime,
+      rsi: snapshot.rsi,
+      latestPrice: snapshot.latestPrice,
+    },
+    snapshotFull: snapshot,
+    ai,
+    finalDecision: decision,
+    reason: reason ?? null,
+    technicalScore,
+    strategySignal,
+    technicalSignal: technical,
+    hasOpenTrade: !!openTrade,
+    minAiConfidence,
+    strategyEntry,
+    strategyFailDetail,
+    combinedStrategyReason,
+    preflight: {
+      scorecard: preflight.scorecard,
+      veto_reasons: preflight.veto_reasons,
+      passedCount: preflight.passedCount,
+      totalGates: preflight.totalGates,
+    },
+    aiQuotaFallback,
+    aiVerdictErrorDetail: aiVerdictErrorDetail ?? null,
+  });
   if (paperScenario && !paperScenario.execute) {
     await logDecisionTrace({
       supabase,
@@ -79,6 +130,37 @@ export async function executeSymbolCycleActions(params: {
       finalDecision: decision,
       reason: `${reason ?? "n/a"}|paper_scenario_dry_run`,
       minAiConfidence,
+    });
+    void maybeSendDecisionTraceTelegram({
+      row,
+      symbol,
+      cycleId,
+      snapshot: {
+        marketRegime: snapshot.marketRegime,
+        rsi: snapshot.rsi,
+        latestPrice: snapshot.latestPrice,
+      },
+      snapshotFull: snapshot,
+      ai,
+      finalDecision: decision,
+      reason: `${reason ?? "n/a"}|paper_scenario_dry_run`,
+      technicalScore,
+      strategySignal,
+      technicalSignal: technical,
+      hasOpenTrade: !!openTrade,
+      minAiConfidence,
+      strategyEntry,
+      strategyFailDetail,
+      combinedStrategyReason,
+      preflight: {
+        scorecard: preflight.scorecard,
+        veto_reasons: preflight.veto_reasons,
+        passedCount: preflight.passedCount,
+        totalGates: preflight.totalGates,
+      },
+      aiQuotaFallback,
+      aiVerdictErrorDetail: aiVerdictErrorDetail ?? null,
+      force: true,
     });
     await logExecutionOutcome({
       supabase,
@@ -121,6 +203,7 @@ export async function executeSymbolCycleActions(params: {
     executionUsdScale,
     signal,
     demoProbeBuy: demoProbeBuyFlag,
+    takeProfitPctOverride: grinderTakeProfitPct ?? null,
   });
   await logExecutionOutcome({
     supabase,

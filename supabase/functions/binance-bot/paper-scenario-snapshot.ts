@@ -2,8 +2,15 @@
 import type { Candle, IndicatorSnapshot } from "./types.ts";
 import type { AiAnalysis } from "./types.ts";
 
+/**
+ * Paper-only synthetic tapes (see `applyPaperScenarioOverlay`).
+ * - `growth_rally`: strong uptrend / “things are growing” snapshot — use to see if the bot would take a good opportunity (dry-run or execute).
+ * - `momentum_buy` / `oversold_buy`: softer scenario tapes.
+ * - `force_paper_buy`: end-of-pipeline BUY override for plumbing checks only.
+ */
 export const PAPER_SCENARIO_NAMES = [
   "momentum_buy",
+  "growth_rally",
   "oversold_buy",
   "force_paper_buy",
 ] as const;
@@ -12,6 +19,16 @@ export type PaperScenarioName = (typeof PAPER_SCENARIO_NAMES)[number];
 
 export function isPaperScenarioName(value: string): value is PaperScenarioName {
   return (PAPER_SCENARIO_NAMES as readonly string[]).includes(value);
+}
+
+/**
+ * When `1` / `true`, paper scenarios keep **real** LLM output (no `buildPaperScenarioAiStub`)
+ * and **skip AI cache** for that verdict so you drill “good tape + real Binance snapshot + real AI”.
+ * Edge secret on `binance-bot`. Costs quota; use for manual tests only.
+ */
+export function readPaperScenarioUseLiveAi(): boolean {
+  const v = String(Deno.env.get("PAPER_SCENARIO_USE_LIVE_AI") ?? "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
 }
 
 function candle(ts: number, close: number, volume = 1000): Candle {
@@ -144,6 +161,40 @@ export function applyPaperScenarioOverlay(
       ...common,
       rsi: 58,
       rsi15m: 52,
+    };
+  }
+
+  if (scenario === "growth_rally") {
+    const px = Number(Math.max(anchorPrice, common.ema50 * 1.002).toFixed(8));
+    return {
+      ...common,
+      marketRegime: "TRENDING",
+      latestPrice: px,
+      emaFast: Number((px * 0.9985).toFixed(8)),
+      emaSlow: Number((px * 0.997).toFixed(8)),
+      ema50: Number((px * 0.996).toFixed(8)),
+      ema200: Number((px * 0.985).toFixed(8)),
+      rsi: 58,
+      rsi15m: 56,
+      adx14: 32,
+      spreadBps: Math.min(finitePositive(base.spreadBps, 4), 5),
+      imbalance_ratio: Math.max(finitePositive(base.imbalance_ratio, 1.05), 1.08),
+      bbLower: Number((px * 0.98).toFixed(8)),
+      bbMiddle: Number((px * 0.995).toFixed(8)),
+      bbUpper: Number((px * 1.012).toFixed(8)),
+      macd: {
+        macd: Math.max(Number(base.macd?.macd ?? 0), 0.45),
+        signal: Math.min(Number(base.macd?.signal ?? 0), 0.15),
+        histogram: 0.35,
+      },
+      trend_htf: {
+        trend_1h: "bull",
+        trend_4h: "bull",
+        mtf_aligned: true,
+        trend_15m: "bull",
+        mtf_ltf_aligned: true,
+        mtf_effective_ok: true,
+      },
     };
   }
 

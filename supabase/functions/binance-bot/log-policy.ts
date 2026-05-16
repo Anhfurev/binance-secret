@@ -1,8 +1,10 @@
 // @ts-nocheck
 /** Central toggles so `public.logs` stays small unless you opt into verbose auditing. */
 
+import { readTelegramVerboseLogging } from "./telegram-notify-policy.ts";
+
 export function isVerboseDbLogs(): boolean {
-  return String(Deno.env.get("VERBOSE_DB_LOGS") ?? "").trim() === "1";
+  return readTelegramVerboseLogging();
 }
 
 /** decision-trace + cycle-summary rows (large meta, every symbol × cron). */
@@ -51,8 +53,11 @@ export function shouldPersistAiKeySuccessLog(): boolean {
 
 /** Per-symbol HOLD Telegram (noisy with 3+ symbols/min). Cron digest replaces it unless enabled. */
 export function shouldTelegramHoldHeartbeat(): boolean {
-  return String(Deno.env.get("TELEGRAM_HOLD_HEARTBEAT") ?? "0").trim() === "1" ||
-    isVerboseDbLogs();
+  const raw = String(Deno.env.get("TELEGRAM_HOLD_HEARTBEAT") ?? "").trim();
+  if (raw === "1") return true;
+  if (isVerboseDbLogs()) return true;
+  const tg = String(Deno.env.get("TG_SUPPRESS_HOLDS") ?? "").trim().toLowerCase();
+  return tg === "0" || tg === "false";
 }
 
 /** Trailing-stop DB sync → trade row Telegram (very noisy while price moves). */

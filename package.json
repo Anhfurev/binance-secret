@@ -11,7 +11,9 @@
     "test:edge": "cd supabase/functions/binance-bot && deno task test",
     "check": "npm run lint && npm run test:edge",
     "tune:atr": "node scripts/walk-forward-atr-tune.mjs",
-    "audit:daily": "node scripts/daily-salary-audit/run.mjs"
+    "audit:daily": "node scripts/daily-salary-audit/run.mjs",
+    "check:bot": "node scripts/decision-health-check.mjs",
+    "audit:vetoes": "npx tsx scripts/audit-historical-vetoes.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",

@@ -3,6 +3,7 @@ import type { createClient } from "npm:@supabase/supabase-js@2";
 import { botDebug, botError } from "./bot-debug.ts";
 import { applyBinanceCycleJitter, fetchIndicatorSnapshot } from "./binance.ts";
 import { getCachedSnapshot, isEmergencyAbortQuotaError } from "./index-ai.ts";
+import { isGeminiTerminalAuthError } from "./llm-key-backoff.ts";
 import { safeExecute } from "./safe-execute.ts";
 import { formatUnknownError, normalizeSymbol, resolveMinAiConfidenceForRegime, toStringValue } from "./utils.ts";
 import { applyPaperScenarioOverlay } from "./paper-scenario-snapshot.ts";
@@ -10,6 +11,7 @@ import { decideSymbolCycleOutcome } from "./cycle-decider.ts";
 import { executeSymbolCycleActions, handleCriticalSnapshotError } from "./cycle-executor.ts";
 import { hasValidNonZeroEma } from "./cycle-indicator-helpers.ts";
 import { logCycleSummary } from "./index-logging.ts";
+import { sendDebuggerExceptionTelegram } from "./debugger-alerts.ts";
 
 export async function executeSymbolCycle(params: {
   row: any;
@@ -22,8 +24,9 @@ export async function executeSymbolCycle(params: {
   paperScenario?: { name: import("./paper-scenario-snapshot.ts").PaperScenarioName; execute: boolean } | null;
   cycleId: string;
   btcOverbought: boolean;
+  symbolMatrixIndex?: number;
 }) {
-  const { row, botIndex, signal, supabase, symbolFilter, symbolCache, lastAiPriceBySymbol, paperScenario, cycleId, btcOverbought } = params;
+  const { row, botIndex, signal, supabase, symbolFilter, symbolCache, lastAiPriceBySymbol, paperScenario, cycleId, btcOverbought, symbolMatrixIndex } = params;
   const userId = toStringValue(row.user_id) ?? "unknown";
   const symbol = normalizeSymbol(row.symbol, symbolFilter);
   let minAiConfidence = resolveMinAiConfidenceForRegime(row as Record<string, unknown>, "NEUTRAL");
@@ -53,10 +56,18 @@ export async function executeSymbolCycle(params: {
       lastAiPriceBySymbol,
       paperScenario,
       btcOverbought,
+      symbolMatrixIndex,
     });
+    if (signal.aborted) {
+      return { tag: "err" as const, userId, symbol, detail: `CYCLE_ABORTED:${symbol}` };
+    }
     return await executeSymbolCycleActions({ row, supabase, userId, symbol, cycleId, snapshot, paperScenario, outcome, signal });
   } catch (error) {
     const detail = formatUnknownError(error);
+    if (isGeminiTerminalAuthError(error)) {
+      console.warn(`[AI DEBUG] ${symbol} symbol cycle skipped — Gemini terminal auth (${detail.slice(0, 200)})`);
+      return { tag: "err" as const, userId, symbol, detail: `GEMINI_TERMINAL_AUTH:${detail.slice(0, 300)}` };
+    }
     if (isEmergencyAbortQuotaError(error)) return { tag: "emergency" as const, userId, symbol, detail };
     if (detail.startsWith("CRITICAL_PRICE_ZERO:") || detail.startsWith("CRITICAL_INDICATOR_ZERO:")) return { tag: "critical" as const, error };
     botError("index", "bot_cycle_error", { userId, symbol, detail, rawError: error });
@@ -93,6 +104,11 @@ export async function executeSymbolCycle(params: {
       minAiConfidence,
       marketRegime: "NEUTRAL",
     }), undefined);
+    void sendDebuggerExceptionTelegram({
+      scope: `bot_cycle|${symbol}|${userId}`,
+      detail,
+      batchId: cycleId,
+    });
     return { tag: "err" as const, userId, symbol, detail };
   }
 }

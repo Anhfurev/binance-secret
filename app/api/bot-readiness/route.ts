@@ -1,12 +1,18 @@
 import { NextResponse } from "next/server";
 import { binanceSignedSpotGet, getBinanceCredentials } from "@/lib/binance";
 
-type DebuggerPayload = {
+type FunctionHealthPayload = {
   ok?: boolean;
-  debugger?: {
-    ok?: boolean;
-    issues?: Array<{ code?: string; message?: string }>;
-    summary?: Record<string, unknown>;
+  function_health?: {
+    status?: "alive" | "degraded" | "broken";
+    alive?: boolean;
+    headline?: string;
+    snapshot?: Record<string, unknown>;
+    debugger?: {
+      ok?: boolean;
+      issues?: Array<{ code?: string; message?: string; severity?: string }>;
+      summary?: Record<string, unknown>;
+    };
   };
 };
 
@@ -19,7 +25,7 @@ export async function GET() {
   const botSecret = (process.env.BOT_SECRET ?? "").trim();
   const { configured: binanceConfigured } = getBinanceCredentials();
 
-  let edge: DebuggerPayload | null = null;
+  let edge: FunctionHealthPayload | null = null;
   let edgeError: string | null = null;
   if (supabaseUrl && botSecret) {
     try {
@@ -30,16 +36,16 @@ export async function GET() {
           "x-binance-bot-secret": botSecret,
         },
         body: JSON.stringify({
-          debugger_health_only: true,
+          function_health: true,
           debugger_apply_fixes: false,
         }),
         cache: "no-store",
       });
-      const body = (await res.json().catch(() => ({}))) as DebuggerPayload & {
+      const body = (await res.json().catch(() => ({}))) as FunctionHealthPayload & {
         error?: string;
       };
       if (!res.ok) {
-        edgeError = body?.error ?? `Edge debugger failed (${res.status})`;
+        edgeError = body?.error ?? `Edge function health failed (${res.status})`;
       } else {
         edge = body;
       }
@@ -75,7 +81,7 @@ export async function GET() {
     }
   }
 
-  const edgeOk = Boolean(edge?.ok && edge?.debugger?.ok);
+  const edgeOk = Boolean(edge?.ok && edge?.function_health?.alive);
   const accountOk = Boolean(account?.canTrade) && !account?.error;
   const readyForLiveToggle = edgeOk && accountOk;
 
@@ -83,9 +89,13 @@ export async function GET() {
     ready_for_live_toggle: readyForLiveToggle,
     edge: {
       ok: edgeOk,
+      status: edge?.function_health?.status ?? null,
+      alive: edge?.function_health?.alive ?? null,
+      headline: edge?.function_health?.headline ?? null,
       error: edgeError,
-      issues: edge?.debugger?.issues ?? [],
-      summary: edge?.debugger?.summary ?? null,
+      snapshot: edge?.function_health?.snapshot ?? null,
+      issues: edge?.function_health?.debugger?.issues ?? [],
+      summary: edge?.function_health?.debugger?.summary ?? null,
     },
     binance: {
       configured: binanceConfigured,

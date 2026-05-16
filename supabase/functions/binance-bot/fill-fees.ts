@@ -2,12 +2,26 @@
 import { resolvePaperTakerFeeSimulationPct } from "./constants.ts";
 import { toNumber } from "./utils.ts";
 
+function isPaperFillOrder(order: Record<string, unknown>): boolean {
+  if ((order as { testMode?: boolean }).testMode === true) return true;
+  const meta = (order as { smart_execution_meta?: Record<string, unknown> })
+    .smart_execution_meta;
+  if (meta?.paper === true) return true;
+  const executionType = String(
+    (order as { execution_type?: unknown }).execution_type ?? "",
+  ).toLowerCase();
+  return executionType.startsWith("paper");
+}
+
 export function extractLegFeeUsd(order: Record<string, unknown>): number {
   const meta = (order as { smart_execution_meta?: Record<string, unknown> })
     ?.smart_execution_meta;
   const fromMeta = toNumber(meta?.fee_usd, NaN);
   if (Number.isFinite(fromMeta) && fromMeta >= 0) {
     return Number(fromMeta.toFixed(8));
+  }
+  if (!isPaperFillOrder(order)) {
+    return 0;
   }
   const amt = toNumber((order as { amount?: unknown }).amount, NaN);
   const px = toNumber(

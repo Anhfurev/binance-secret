@@ -7,6 +7,10 @@ function readMode(): "skip" | "wait" {
   return mode === "wait" ? "wait" : "skip";
 }
 
+export function readBankrollMutexMode(): "skip" | "wait" {
+  return readMode();
+}
+
 function readWaitTimeoutMs(): number {
   const n = Number(String(Deno.env.get("BANKROLL_MUTEX_WAIT_TIMEOUT_MS") ?? "").trim());
   return Number.isFinite(n) && n >= 500 ? Math.min(60_000, Math.floor(n)) : 8_000;
@@ -39,6 +43,15 @@ async function detectConflicts(params: {
     const sym = toStringValue(r?.symbol);
     return !sym || sym !== symbol;
   });
+  if (reservationRows.error || lockRows.error) {
+    return {
+      blocked: true,
+      reservations: otherReservations.length,
+      locks: otherLocks.length,
+      reservationError: reservationRows.error?.message ?? null,
+      lockError: lockRows.error?.message ?? null,
+    };
+  }
   return {
     blocked: otherReservations.length > 0 || otherLocks.length > 0,
     reservations: otherReservations.length,
@@ -66,7 +79,9 @@ export async function enforceBankrollMutex(params: {
         allowed: false as const,
         mode,
         waitedMs: Date.now() - started,
-        detail: `bankroll_mutex_skip: other_symbol_inflight reservations=${conflicts.reservations} locks=${conflicts.locks}`,
+        detail: conflicts.reservationError || conflicts.lockError
+          ? `bankroll_mutex_unavailable: reservations=${conflicts.reservationError ?? "ok"} locks=${conflicts.lockError ?? "ok"}`
+          : `bankroll_mutex_skip: other_symbol_inflight reservations=${conflicts.reservations} locks=${conflicts.locks}`,
       };
     }
     if (Date.now() - started >= timeoutMs) {

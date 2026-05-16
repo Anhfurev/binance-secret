@@ -1,7 +1,7 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import type { AiAnalysis, BotSettingsRow, MarketRegime } from "./types.ts";
-import { resolveMinAiConfidenceForRegime } from "./utils.ts";
+import type { ConfidencePolicy } from "./confidence-policy.ts";
 import { evaluateWarRoomConsensus } from "./war-room.ts";
 import { sentryWarRoomVetoBreadcrumb, botDebug } from "./bot-debug.ts";
 import { logWarRoomGhostSnapshot, safeInsertLog } from "./buy-logging.ts";
@@ -21,11 +21,36 @@ export async function resolveWarRoomOutcome(params: {
   demoProbePaper: boolean;
   snapshotImbalanceRatio?: number;
   snapshotVolume24hQuote?: number | null;
+  confidencePolicy: ConfidencePolicy;
 }) {
   const {
     supabase, row, userId, symbol, ai, regime, rawWeighted, effectiveConfidence,
     mtf, bearish1hCap, ghostMode, demoProbePaper, snapshotImbalanceRatio, snapshotVolume24hQuote,
+    confidencePolicy,
   } = params;
+
+  if (demoProbePaper) {
+    const baseFloor = confidencePolicy.war_room_base_floor;
+    return {
+      warRoom: {
+        agent_votes: {
+          technician: rawWeighted,
+          news: "pass",
+          whale: "pass",
+        },
+        final_governance: "quorum_met",
+        base_floor: baseFloor,
+        governance_floor: baseFloor,
+        whale_warning: false,
+        news_veto: false,
+        technician_score: rawWeighted,
+        effective_chart_confidence: effectiveConfidence,
+        effective_confidence_after_governance: effectiveConfidence,
+        quorum_passed: true,
+      },
+      executionConfidence: effectiveConfidence,
+    };
+  }
 
   const imb = Number(snapshotImbalanceRatio);
   const warRoomMarket = {
@@ -35,10 +60,7 @@ export async function resolveWarRoomOutcome(params: {
         ? null
         : Number(snapshotVolume24hQuote),
   };
-  const baseRegimeFloor = resolveMinAiConfidenceForRegime(
-    row as Record<string, unknown>,
-    String(regime),
-  );
+  const baseRegimeFloor = confidencePolicy.war_room_base_floor;
   const warRoom = evaluateWarRoomConsensus({
     rawWeightedConfidence: rawWeighted,
     effectiveChartConfidence: effectiveConfidence,
@@ -98,6 +120,35 @@ export async function resolveWarRoomOutcome(params: {
     const goldenRatioBounceCandidate =
       bearish1hCap &&
       rawWeighted >= warRoom.governance_floor;
+    if (goldenRatioBounceCandidate) {
+      const executionConfidence = Number.isFinite(warRoom.effective_confidence_after_governance) &&
+          warRoom.effective_confidence_after_governance > 0
+        ? warRoom.effective_confidence_after_governance
+        : effectiveConfidence;
+      if (!Number.isFinite(executionConfidence) || executionConfidence <= 0) {
+        return {
+          skipDetail:
+            "BUY blocked: post–War Room guard — effective_confidence_after_governance is not finite/positive (would not call exchange).",
+          warRoom,
+        };
+      }
+      botDebug("buyFlow", "war_room_golden_ratio_bounce", {
+        userId,
+        symbol,
+        executionConfidence,
+        governance_floor: warRoom.governance_floor,
+        raw_weighted: rawWeighted,
+        effective_chart: effectiveConfidence,
+      });
+      return {
+        warRoom: {
+          ...warRoom,
+          quorum_passed: true,
+          final_governance: "quorum_met",
+        },
+        executionConfidence,
+      };
+    }
     if (ghostMode) {
       await logWarRoomGhostSnapshot({
         supabase,

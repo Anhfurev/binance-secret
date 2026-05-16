@@ -1,5 +1,12 @@
 // @ts-nocheck
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { buildQuantMetrics, median } from "./quant-metrics.ts";
+import {
+  buildAuditDiagnostics,
+  computePartialExitStats,
+  formatPlaybookLines,
+} from "./audit-diagnostics.ts";
+import { aggregateWatchdogBlockers } from "./blocker-watchdog.ts";
 
 const WIN_REASONS = new Set([
   "take_profit",
@@ -65,20 +72,44 @@ function money(value: number): string {
   return `${sign}$${Math.abs(value).toFixed(2)}`;
 }
 
+function ratio(value: number | null | undefined): string {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "n/a";
+  return n.toFixed(2);
+}
+
 export async function runDailySalaryAudit(supabase: ReturnType<typeof createClient>) {
   const hours = Math.min(168, Math.max(1, Number(Deno.env.get("DAILY_SALARY_LOOKBACK_HOURS") ?? "24")));
   const end = new Date();
   const start = new Date(end.getTime() - hours * 60 * 60 * 1000);
+  const start24h = new Date(end.getTime() - 24 * 60 * 60 * 1000);
+  const start7d = new Date(end.getTime() - 168 * 60 * 60 * 1000);
   const startIso = start.toISOString();
   const endIso = end.toISOString();
+  const start24hIso = start24h.toISOString();
+  const start7dIso = start7d.toISOString();
   const labelUtc = endIso.slice(0, 10);
 
-  const [tradesRes, walletRes, logsRes, warRes] = await Promise.all([
+  const [tradesRes, trades24hRes, trades7dRes, walletRes, logsRes, warRes] = await Promise.all([
     supabase
       .from("trades")
       .select("symbol,exit_reason,pnl,opened_at,closed_at,extra")
       .in("status", ["closed", "stopped"])
       .gte("closed_at", startIso)
+      .lte("closed_at", endIso)
+      .order("closed_at", { ascending: true }),
+    supabase
+      .from("trades")
+      .select("symbol,exit_reason,pnl,opened_at,closed_at,extra")
+      .in("status", ["closed", "stopped"])
+      .gte("closed_at", start24hIso)
+      .lte("closed_at", endIso)
+      .order("closed_at", { ascending: true }),
+    supabase
+      .from("trades")
+      .select("symbol,exit_reason,pnl,opened_at,closed_at,extra")
+      .in("status", ["closed", "stopped"])
+      .gte("closed_at", start7dIso)
       .lte("closed_at", endIso)
       .order("closed_at", { ascending: true }),
     supabase
@@ -108,11 +139,15 @@ export async function runDailySalaryAudit(supabase: ReturnType<typeof createClie
       .limit(2000),
   ]);
   if (tradesRes.error) throw tradesRes.error;
+  if (trades24hRes.error) throw trades24hRes.error;
+  if (trades7dRes.error) throw trades7dRes.error;
   if (walletRes.error) throw walletRes.error;
   if (logsRes.error) throw logsRes.error;
   if (warRes.error) throw warRes.error;
 
   const trades = tradesRes.data ?? [];
+  const trades24h = trades24hRes.data ?? [];
+  const trades7d = trades7dRes.data ?? [];
   let grossPnl = 0;
   let feesUsd = 0;
   let wins = 0;
@@ -150,8 +185,11 @@ export async function runDailySalaryAudit(supabase: ReturnType<typeof createClie
 
   for (const row of logsRes.data ?? []) {
     const meta = (row.meta as Record<string, unknown> | undefined) ?? {};
-    const key = String(meta.hold_reason ?? meta.reason ?? meta.detail ?? row.message);
+    const key = String(meta.hold_reason ?? meta.reason ?? meta.detail ?? meta.skipDetail ?? row.message);
     blockerCounts.set(key, (blockerCounts.get(key) ?? 0) + 1);
+    for (const reason of parseVetoReasons(meta.veto_details ?? meta.vetoDetails)) {
+      blockerCounts.set(reason, (blockerCounts.get(reason) ?? 0) + 1);
+    }
   }
   for (const row of warRes.data ?? []) {
     const decision = String(row.final_decision ?? "").toUpperCase();
@@ -170,13 +208,30 @@ export async function runDailySalaryAudit(supabase: ReturnType<typeof createClie
   const avgHoldMinutes = holdMinutesList.length
     ? holdMinutesList.reduce((a, b) => a + b, 0) / holdMinutesList.length
     : 0;
+  const medianHoldMinutes = median(holdMinutesList);
+  const quant = buildQuantMetrics({
+    trades,
+    trades24h,
+    trades7d,
+    feesUsd,
+    netPnl,
+  });
+  const partialExit = computePartialExitStats(trades);
+  const topBlockerRows = [...blockerCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([reason, count]) => ({ reason, count }));
+  const diagnostics = buildAuditDiagnostics({
+    quant,
+    partialExit,
+    topBlockers: topBlockerRows,
+  });
+  const watchdogBlockers = aggregateWatchdogBlockers(blockerCounts);
   const endingEquity = toNum(walletRes.data?.demo_balance, 0);
   const peakEquity = endingEquity - netPnl + peakNet;
   const drawdownUsd = Math.max(0, peakEquity - endingEquity);
-  const topBlockers = [...blockerCounts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([reason, count]) => `${reason} (${count})`)
+  const topBlockers = topBlockerRows
+    .map((row) => `${row.reason} (${row.count})`)
     .join(", ") || "None recorded";
   const whale = imbalanceSamples.length
     ? (imbalanceSamples.reduce((a, b) => a + b, 0) / imbalanceSamples.length).toFixed(2)
@@ -192,16 +247,57 @@ export async function runDailySalaryAudit(supabase: ReturnType<typeof createClie
     ? `\n\n⚠️ <b>Risk Warning</b>\nRealized net is ${money(netPnl)}. Daily loss guardrail: ${money(lossLimit)}.`
     : "";
 
+  const pfLabel = quant.profitFactor == null ? "n/a" : ratio(quant.profitFactor);
+  const pfFlag = quant.profitFactor != null && quant.profitFactor < quant.profitFactorTarget
+    ? " ⚠️"
+    : "";
+  const wfeLabel = quant.walkForwardEfficiency == null
+    ? "n/a"
+    : ratio(quant.walkForwardEfficiency);
+  const frictionPct = quant.frictionTaxPctOfNet == null
+    ? "n/a"
+    : `${quant.frictionTaxPctOfNet.toFixed(1)}%`;
+  const frictionFlag = diagnostics.frictionElevated ? " ⚠️" : "";
+  const wfeFlag = diagnostics.wfeRegimeShift ? " ⚠️" : "";
+  const beRatioLabel = partialExit.partialTpCloses > 0
+    ? `${partialExit.beStopAfterPartial}/${partialExit.partialTpCloses} (${partialExit.beStopAfterPartialPct == null ? "n/a" : `${partialExit.beStopAfterPartialPct.toFixed(0)}%`})`
+    : partialExit.beStopHits > 0
+    ? `${partialExit.beStopHits} BE-stop closes (no partial_tp flags)`
+    : "n/a";
+  const playbookLines = formatPlaybookLines(diagnostics);
+  const watchdogLines = watchdogBlockers.rows.map(
+    (row) => `• <b>${escapeHtml(row.label)}:</b> ${row.count} — ${escapeHtml(row.hint)}`,
+  );
+  if (!watchdogBlockers.isActive) {
+    watchdogLines.push(
+      `• ${escapeHtml("No War Room / confidence / spread blocks in this window — if there are still no buys, check upstream strategy or max-open-trades gates.")}`,
+    );
+  }
+  const watchdogTitle = watchdogBlockers.isActive
+    ? "🟢 <b>Activity Watchdog</b> (gates firing — bot is not frozen)"
+    : "⚪ <b>Activity Watchdog</b>";
+
   const text = [
     "--- 🏢 <b>ITHM DAILY PERFORMANCE REPORT</b> 🏢 ---",
     `📅 <b>UTC day:</b> ${escapeHtml(labelUtc)}`,
     `💰 <b>Net Salary Today:</b> ${money(netPnl)}`,
     `📈 <b>Win Rate:</b> ${winRatePct.toFixed(1)}% (${wins}W / ${losses}L)`,
-    `⏱️ <b>Avg Hold Time:</b> ${avgHoldMinutes.toFixed(1)} min`,
+    `📊 <b>Profit Factor:</b> ${pfLabel} (target &gt; ${ratio(quant.profitFactorTarget)})${pfFlag}`,
+    `🎯 <b>Expectancy:</b> ${money(quant.expectancyUsd)}/trade`,
+    `🔁 <b>Walk-Forward Eff:</b> ${wfeLabel} (24h PF ${ratio(quant.profitFactor24h)} vs 7d avg ${ratio(quant.avgProfitFactor7d)})${wfeFlag}`,
+    `🧾 <b>Friction Tax:</b> ${money(feesUsd)} fees · ${frictionPct} of net${frictionFlag}`,
+    `🛡️ <b>BE-Stop After Partial:</b> ${beRatioLabel}`,
+    `⏱️ <b>Hold Time:</b> avg ${avgHoldMinutes.toFixed(1)} min · median ${medianHoldMinutes.toFixed(1)} min`,
     `📉 <b>Intraday Drawdown:</b> ${money(drawdownUsd)}`,
     `🚫 <b>Top Blockers:</b> ${escapeHtml(topBlockers)}`,
     `🐳 <b>Whale Sentiment:</b> ${whale}`,
     `<b>By symbol</b>\n${escapeHtml(symbolLines)}`,
+    ...(playbookLines.length
+      ? ["", "🧠 <b>Playbook</b>", ...playbookLines.map((line) => escapeHtml(line))]
+      : []),
+    "",
+    watchdogTitle,
+    ...watchdogLines,
     "--------------------------------------------",
     `<i>${trades.length} closes · fees ${money(feesUsd)} · equity ${money(endingEquity)}</i>`,
     risk,
@@ -214,7 +310,12 @@ export async function runDailySalaryAudit(supabase: ReturnType<typeof createClie
       winRatePct,
       closedCount: trades.length,
       avgHoldMinutes,
+      medianHoldMinutes,
       drawdownUsd,
+      quant,
+      partialExit,
+      diagnostics,
+      watchdogBlockers,
     },
   };
 }

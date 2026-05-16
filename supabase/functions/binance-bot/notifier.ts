@@ -2,6 +2,8 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { SERVICE_ROLE_KEY, SUPABASE_URL } from "./constants.ts";
 import { formatTelegramCycleFooter } from "./bot-shared.ts";
+import { describeThrownValue } from "./utils.ts";
+import { postTelegramSendMessage } from "./telegram-post-message.ts";
 
 const TELEGRAM_MAX_RETRIES = 4;
 const TELEGRAM_BASE_DELAY_MS = 800;
@@ -18,6 +20,12 @@ function resolveTelegramChatId(): string {
     (Deno.env.get("TELEGRAM_CHAT_ID") ?? "").trim() ||
     (Deno.env.get("TELEGRAM_BOT_CHAT_ID") ?? "").trim()
   );
+}
+
+/** Optional separate channel for cron math / debug traces (`CRON_MATH_TRACE_TELEGRAM`). */
+export function resolveTelegramDebugChatId(): string {
+  const dbg = (Deno.env.get("TELEGRAM_DEBUG_CHAT_ID") ?? "").trim();
+  return dbg || resolveTelegramChatId();
 }
 
 function warnTelegramEnvOnce(token: string, chatId: string) {
@@ -71,30 +79,12 @@ export type SendTelegramAlertOpts = {
   cycleId?: string | null;
 };
 
-async function postTelegramSendMessage(params: {
-  token: string;
-  chatId: string;
-  text: string;
-  parseMode: "HTML" | null;
-}): Promise<Response> {
-  const { token, chatId, text, parseMode } = params;
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const payload: Record<string, unknown> = {
-    chat_id: chatId,
-    text,
-    disable_web_page_preview: true,
-  };
-  if (parseMode) payload.parse_mode = parseMode;
-  return await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function sendTelegramAlert(message: string, opts?: SendTelegramAlertOpts) {
+async function sendTelegramHtmlToChat(
+  chatId: string,
+  message: string,
+  opts?: SendTelegramAlertOpts,
+): Promise<void> {
   const token = resolveTelegramToken();
-  const chatId = resolveTelegramChatId();
   if (!token || !chatId) {
     warnTelegramEnvOnce(token, chatId);
     return;
@@ -114,7 +104,12 @@ export async function sendTelegramAlert(message: string, opts?: SendTelegramAler
         return;
       }
 
-      let body = await response.text();
+      let body = "";
+      try {
+        body = await response.text();
+      } catch (textErr) {
+        body = `<<response.body_unreadable:${describeThrownValue(textErr)}>>`;
+      }
       const looksLikeParseError =
         response.status === 400 &&
         /parse|entity|html|tag/i.test(body);
@@ -127,7 +122,11 @@ export async function sendTelegramAlert(message: string, opts?: SendTelegramAler
           parseMode: null,
         });
         if (retryPlain.ok) return;
-        body = await retryPlain.text();
+        try {
+          body = await retryPlain.text();
+        } catch (textErr) {
+          body = `<<retry.body_unreadable:${describeThrownValue(textErr)}>>`;
+        }
         response = retryPlain;
       }
 
@@ -145,7 +144,7 @@ export async function sendTelegramAlert(message: string, opts?: SendTelegramAler
       }
     } catch (error) {
       if (attempt === TELEGRAM_MAX_RETRIES - 1) {
-        const msg = error instanceof Error ? error.message : String(error);
+        const msg = describeThrownValue(error);
         console.error(
           `[binance-bot] telegram alert failed: ${msg}`,
         );
@@ -157,10 +156,18 @@ export async function sendTelegramAlert(message: string, opts?: SendTelegramAler
     await delayWithJitter(attempt);
   }
 
-  // Exhausted retries.
   console.error(
     "[binance-bot] telegram alert failed: retries exhausted",
   );
+}
+
+export async function sendTelegramAlert(message: string, opts?: SendTelegramAlertOpts) {
+  await sendTelegramHtmlToChat(resolveTelegramChatId(), message, opts);
+}
+
+/** Same transport as alerts; targets `TELEGRAM_DEBUG_CHAT_ID` when set, else primary chat. */
+export async function sendTelegramDebugMessage(message: string, opts?: SendTelegramAlertOpts) {
+  await sendTelegramHtmlToChat(resolveTelegramDebugChatId(), message, opts);
 }
 
 export async function sendTrailingStopAlert(params: {

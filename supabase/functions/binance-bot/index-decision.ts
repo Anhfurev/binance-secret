@@ -1,7 +1,11 @@
 // @ts-nocheck
 import { DEFAULT_MIN_AI_CONFIDENCE, DEFAULT_MIN_TECH_SCORE } from "./constants.ts";
 import type { AiAnalysis, IndicatorSnapshot, SignalDecision } from "./types.ts";
+import { GLOBAL_BOT_CONFIG } from "./config.ts";
 import { passesMeanReversionBuyGate } from "./regime-detection.ts";
+import { evaluateNoTradeStrategyScoutBuy } from "./no-trade-fallback.ts";
+import { allowsAdaptiveNeutralRsiBuy } from "./strategy-hybrid-gates.ts";
+import type { RegimeGatePolicy } from "./dynamic-regime-switcher.ts";
 
 export function decideHybridMatrix(params: {
   strategySignal: SignalDecision;
@@ -33,6 +37,15 @@ export function decideHybridMatrix(params: {
   /** Prior consecutive cycles with weak bid/ask imbalance (open position). */
   orderBookImbalanceExitWeakStreak?: number;
   openTradeOpenedAt?: string | null;
+  noTradeScoutActive?: boolean;
+  /** BB+RSI dip line: from `resolveStrategyBuyRsiMax(row)` vs `GLOBAL_BOT_CONFIG.STRATEGY_BUY_RSI_THRESHOLD`. */
+  strategyBuyRsiThreshold?: number;
+  /** Paper-only: softer ranging scout + strategy exploration path (not used for live). */
+  paperExploration?: boolean;
+  strategyReason?: string | null;
+  /** Deep oversold bounce: skip EMA200 macro gate when true. */
+  oversoldBounceActive?: boolean;
+  gatePolicy?: RegimeGatePolicy | null;
 }): {
   decision: SignalDecision;
   reason: string;
@@ -63,6 +76,12 @@ export function decideHybridMatrix(params: {
     orderBookImbalanceMinHoldMs = 120_000,
     orderBookImbalanceExitWeakStreak = 0,
     openTradeOpenedAt = null,
+    noTradeScoutActive = false,
+    paperExploration = false,
+    strategyBuyRsiThreshold = GLOBAL_BOT_CONFIG.STRATEGY_BUY_RSI_THRESHOLD,
+    strategyReason = null,
+    oversoldBounceActive = false,
+    gatePolicy = null,
   } = params;
 
   const withObStreak = (result: { decision: SignalDecision; reason: string }) => (
@@ -84,12 +103,26 @@ export function decideHybridMatrix(params: {
     reason: string;
   } | null => {
     if (marketRegime !== "RANGING") return null;
+    if (gatePolicy?.regime === "REGIME_SIDEWAYS" && strategySignal === "BUY") {
+      return null;
+    }
     if (
       passesMeanReversionBuyGate({
         regime: marketRegime,
         rsi,
         latestPrice,
         bbLower,
+      })
+    ) {
+      return null;
+    }
+    if (
+      allowsAdaptiveNeutralRsiBuy({
+        rsi,
+        aiConfidence: Number(ai.ai_confidence),
+        strategyBuyRsiThreshold,
+        marketRegime,
+        strategySignal,
       })
     ) {
       return null;
@@ -189,16 +222,27 @@ export function decideHybridMatrix(params: {
       passesAggressiveTechGate;
     const dipBuyConfidenceOverride =
       Number.isFinite(rsi) &&
-      rsi < 30 &&
+      rsi < strategyBuyRsiThreshold &&
       technicalScore > 8 &&
       Number.isFinite(aiConf) &&
       aiConf >= Math.max(55, minAiConfidence - 15) &&
       ai.groq_verdict !== "REJECT";
+    const oversoldBounceTechOk = Boolean(oversoldBounceActive) &&
+      strategyReason === "strategy_oversold_bounce_entry";
+    const adaptiveNeutralRsiOk = allowsAdaptiveNeutralRsiBuy({
+      rsi,
+      aiConfidence: aiConf,
+      strategyBuyRsiThreshold,
+      marketRegime,
+      strategySignal,
+    });
     if (
       technicalScore < minTechnicalScore &&
       (!aggressiveModeEnabled || !highConfidenceAiOverride) &&
       !tieBreakerQualityBuy &&
-      !memeVolatilityOverride
+      !memeVolatilityOverride &&
+      !oversoldBounceTechOk &&
+      !adaptiveNeutralRsiOk
     ) {
       return { decision: "HOLD", reason: "hold_technical_score_gate" };
     }
@@ -213,6 +257,9 @@ export function decideHybridMatrix(params: {
     }
     if (dipBuyConfidenceOverride) {
       return { decision: "BUY", reason: "oversold_dip_buy_confidence_override" };
+    }
+    if (adaptiveNeutralRsiOk && aiConf >= minAiConfidence && ai.groq_verdict !== "REJECT" && ai.trend !== "bearish") {
+      return { decision: "BUY", reason: "hybrid_adaptive_neutral_rsi_buy" };
     }
     if (aiConf < minAiConfidence) {
       return { decision: "HOLD", reason: "strategy_buy_rejected_low_conviction" };
@@ -235,7 +282,7 @@ export function decideHybridMatrix(params: {
         if (!aggressiveModeEnabled && !ai.trend_alignment) {
           return { decision: "HOLD", reason: "hold_ai_trend_not_aligned" };
         }
-        if (!aggressiveModeEnabled && isBelowEma200) {
+        if (!aggressiveModeEnabled && isBelowEma200 && !oversoldBounceActive) {
           return { decision: "HOLD", reason: "hold_ema200_gate" };
         }
         if (marketRegime === "RANGING" && isBreakout) {
@@ -244,7 +291,8 @@ export function decideHybridMatrix(params: {
         if (
           marketRegime === "TRENDING" &&
           technical !== "BUY" &&
-          technicalScore < minTechnicalScore + 2
+          technicalScore < minTechnicalScore + 2 &&
+          !oversoldBounceActive
         ) {
           return { decision: "HOLD", reason: "hold_regime_mismatch" };
         }
@@ -266,7 +314,7 @@ export function decideHybridMatrix(params: {
       }
       return { decision: "HOLD", reason: "hold_technical_sell_block" };
     }
-    if (!aggressiveModeEnabled && isBelowEma200) {
+    if (!aggressiveModeEnabled && isBelowEma200 && !oversoldBounceActive) {
       return { decision: "HOLD", reason: "hold_ema200_gate" };
     }
     if (marketRegime === "RANGING" && isBreakout) {
@@ -275,12 +323,16 @@ export function decideHybridMatrix(params: {
     if (
       marketRegime === "TRENDING" &&
       technical !== "BUY" &&
-      (!aggressiveModeEnabled || !highConfidenceAiOverride)
+      (!aggressiveModeEnabled || !highConfidenceAiOverride) &&
+      !oversoldBounceActive
     ) {
       return { decision: "HOLD", reason: "hold_regime_mismatch" };
     }
     const rangingHold = rangingMeanReversionBlock();
     if (rangingHold) return rangingHold;
+    if (oversoldBounceTechOk) {
+      return { decision: "BUY", reason: "oversold_bounce_confirmed_buy" };
+    }
     return { decision: "BUY", reason: "hybrid_confirmed_buy" };
   }
 
@@ -330,6 +382,23 @@ export function decideHybridMatrix(params: {
       reason: ai.action === "BUY" ? "aggressive_buy_confirmed" : "aggressive_buy_confirmed_fallback",
     };
   }
+
+  const scoutBuy = evaluateNoTradeStrategyScoutBuy({
+    active: noTradeScoutActive,
+    hasOpenTrade,
+    strategySignal,
+    technical,
+    technicalScore,
+    minTechnicalScore: minTechnicalScore,
+    minAiConfidence,
+    marketRegime: String(marketRegime ?? "NEUTRAL"),
+    rsi,
+    latestPrice,
+    bbLower,
+    ai,
+    paperChopRelaxed: paperExploration,
+  });
+  if (scoutBuy) return scoutBuy;
 
   return { decision: "HOLD", reason: "hold_no_strategy_buy" };
 }

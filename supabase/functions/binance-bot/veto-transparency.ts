@@ -5,6 +5,12 @@
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { decideHybridMatrix } from "./index-decision.ts";
 import type { AiAnalysis, IndicatorSnapshot, SignalDecision } from "./types.ts";
+import { allowsEma200HybridBypass } from "./strategy-hybrid-gates.ts";
+import type { RegimeGatePolicy } from "./dynamic-regime-switcher.ts";
+import {
+  passesRegimeEma200Gate,
+  passesRegimePreflightRsi,
+} from "./dynamic-regime-switcher.ts";
 
 export type HybridMatrixParams = Parameters<typeof decideHybridMatrix>[0];
 
@@ -21,6 +27,11 @@ export type PreflightGateInput = {
   isSandboxMode?: boolean;
   /** Hard override: ghost execution must never FAIL_VOLUME. */
   isGhostExecution?: boolean;
+  strategyReason?: string | null;
+  /** When set (post-AI audit), relaxes neutral RSI band for high conviction. */
+  aiConfidence?: number;
+  buyRsiMax?: number;
+  gatePolicy?: RegimeGatePolicy | null;
 };
 
 /** Build scorecard + veto_reasons from snapshot-only checks (before LLM). */
@@ -41,6 +52,10 @@ export function collectPreflightVetoChecks(input: PreflightGateInput): {
     minVolume24hQuote = 0,
     isSandboxMode = false,
     isGhostExecution = false,
+    strategyReason = null,
+    aiConfidence,
+    buyRsiMax,
+    gatePolicy = null,
   } = input;
   const price = snapshot.latestPrice;
   const ema200 = snapshot.ema200;
@@ -65,19 +80,48 @@ export function collectPreflightVetoChecks(input: PreflightGateInput): {
   const ema200RecoveryOk =
     price >= ema200 ||
     (price < ema200 && price > ema50 && rsiClimbing);
-  const ema200_ok = ema200RecoveryOk;
-  const highConvictionRsiBuffer = technicalScore >= 8 && strategySignal === "BUY";
-  const rsiUpperBound = highConvictionRsiBuffer ? 75 : 70;
-  let rsi_ok = rsi < rsiUpperBound && rsi > 30;
-  let rsiFailCode = "FAIL_RSI_BAND";
-  if (rsi >= rsiUpperBound) rsiFailCode = "FAIL_RSI_OVERBOUGHT";
-  else if (rsi <= 30) rsiFailCode = "FAIL_RSI_OVERSOLD";
+  const lastVol = Number(last?.volume ?? 0);
+  const avg1m = Number(snapshot.avgVolume1m ?? 0);
+  /** Strategy already long + 5m thrust near EMA50: do not hard-veto on EMA200 distance (controlled aggression). */
+  const scalpTapeBypass =
+    strategySignal === "BUY" &&
+    avg1m > 0 &&
+    lastVol >= avg1m * 1.06 &&
+    price >= ema50 * 0.97;
+  const hybridEma200 = allowsEma200HybridBypass({
+    snapshot,
+    strategySignal,
+    strategyReason,
+    technicalScore,
+    aiConfidence,
+    gatePolicy,
+  });
+  const regimeEmaOk = gatePolicy
+    ? passesRegimeEma200Gate({
+      policy: gatePolicy,
+      snapshot,
+      strategySignal,
+      ema200RecoveryOk,
+      hybridMomentumBypass: hybridEma200,
+    })
+    : false;
+  const ema200_ok = ema200RecoveryOk || scalpTapeBypass || hybridEma200 || regimeEmaOk;
+  const rsiBounds = gatePolicy
+    ? passesRegimePreflightRsi({
+      policy: gatePolicy,
+      rsi,
+      strategySignal,
+      technicalScore,
+      aiConfidence,
+    })
+    : { ok: rsi < 70 && rsi > 28, failCode: "FAIL_RSI_BAND" };
+  const rsi_ok = rsiBounds.ok;
+  const rsiFailCode = rsiBounds.failCode;
   const th = snapshot.trend_htf;
   const mtfShortBullishOverride = Boolean(
     th?.trend_15m === "flat" && shortTapeBullish
   );
   const mtf_ok = Boolean(th?.mtf_effective_ok) || mtfShortBullishOverride;
-  const lastVol = Number(last?.volume ?? 0);
   const vol_ok = isSandboxMode || minVolume24hQuote <= 0
     ? true
     : Number(snapshot.volume24hQuote ?? 0) >= minVolume24hQuote ||
@@ -136,6 +180,10 @@ export function formatVetoDetailsPayload(parts: {
   min_tech_score?: number;
   /** Effective 24h quote-volume floor for this cycle (`bot_settings.min_volume_24h_quote`). */
   min_volume_24h_quote?: number;
+  /** Unified policy snapshot for `war_room_audits` (TRADING_POLICY keys). */
+  trading_policy_audit?: Record<string, unknown>;
+  /** Which policy keys likely blocked the cycle (best-effort from gates + HOLD reason). */
+  blocked_trading_policy_rules?: string[];
 }): Record<string, unknown> {
   return {
     ...parts,

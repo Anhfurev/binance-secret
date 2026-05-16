@@ -43,3 +43,18 @@ export function readSmartLimitMaxSlippagePct(symbol: string): number {
   const configured = readPctEnv(keys, chase);
   return Math.max(configured, chase);
 }
+
+export function computeAdverseSlippageFrac(params: {
+  side: "buy" | "sell";
+  signalPrice: number;
+  referencePrice: number;
+}): number {
+  const signalPrice = Number(params.signalPrice);
+  const referencePrice = Number(params.referencePrice);
+  if (!Number.isFinite(signalPrice) || signalPrice <= 0) return 0;
+  if (!Number.isFinite(referencePrice) || referencePrice <= 0) return 0;
+  if (params.side === "buy") {
+    return Math.max(0, (referencePrice - signalPrice) / signalPrice);
+  }
+  return Math.max(0, (signalPrice - referencePrice) / signalPrice);
+}

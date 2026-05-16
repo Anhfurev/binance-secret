@@ -127,6 +127,8 @@ export type AiQuotaState = {
   gemini_cooldown_until: string | null;
   current_gemini_key_index: number;
   current_groq_key_index: number;
+  /** Index into `GROQ_API_KEY_SCAN*` pool when present; else mirrors scan rotation over main Groq keys. */
+  current_groq_scan_key_index: number;
   gemini_key_cooldowns: Record<string, number>;
   groq_key_cooldowns: Record<string, number>;
   updated_at?: string | null;
@@ -142,9 +144,14 @@ function fromNewSchemaRow(data: Record<string, unknown>, scope: string): AiQuota
     consecutive_gemini_failures: Number(data.consecutive_failures ?? 0),
     gemini_cooldown_until: typeof data.cooldown_until === "string" ? data.cooldown_until : null,
     current_gemini_key_index: Number(data.current_key_index ?? 0),
-    current_groq_key_index: 0,
-    gemini_key_cooldowns: {},
-    groq_key_cooldowns: {},
+    current_groq_key_index: Number(data.current_groq_key_index ?? 0),
+    current_groq_scan_key_index: Number(data.current_groq_scan_key_index ?? 0),
+    gemini_key_cooldowns: (data.gemini_key_cooldowns && typeof data.gemini_key_cooldowns === "object")
+      ? (data.gemini_key_cooldowns as Record<string, number>)
+      : {},
+    groq_key_cooldowns: (data.groq_key_cooldowns && typeof data.groq_key_cooldowns === "object")
+      ? (data.groq_key_cooldowns as Record<string, number>)
+      : {},
     updated_at: typeof data.updated_at === "string" ? data.updated_at : null,
     last_failure_at: typeof data.last_failure_at === "string" ? data.last_failure_at : null,
   };
@@ -157,6 +164,7 @@ function fromLegacyRow(data: Record<string, unknown>, scope: string): AiQuotaSta
     gemini_cooldown_until: typeof data.gemini_cooldown_until === "string" ? data.gemini_cooldown_until : null,
     current_gemini_key_index: Number(data.current_gemini_key_index ?? 0),
     current_groq_key_index: Number(data.current_groq_key_index ?? 0),
+    current_groq_scan_key_index: Number(data.current_groq_scan_key_index ?? 0),
     gemini_key_cooldowns: (data.gemini_key_cooldowns && typeof data.gemini_key_cooldowns === "object")
       ? (data.gemini_key_cooldowns as Record<string, number>)
       : {},
@@ -259,7 +267,10 @@ export async function patchAiQuotaState(
   if (!supabase) return;
   const nowIso = new Date().toISOString();
 
-  const buildNewPayload = (includeLastFailureAt: boolean) => {
+  const buildNewPayload = (
+    includeLastFailureAt: boolean,
+    includeGroqScanKeyIndex: boolean,
+  ) => {
     const payload: Record<string, unknown> = {
       id: scope,
       updated_at: nowIso,
@@ -267,40 +278,78 @@ export async function patchAiQuotaState(
     if (patch.consecutive_gemini_failures != null) payload.consecutive_failures = patch.consecutive_gemini_failures;
     if (patch.gemini_cooldown_until !== undefined) payload.cooldown_until = patch.gemini_cooldown_until;
     if (patch.current_gemini_key_index != null) payload.current_key_index = patch.current_gemini_key_index;
+    if (patch.current_groq_key_index != null) payload.current_groq_key_index = patch.current_groq_key_index;
+    if (
+      includeGroqScanKeyIndex &&
+      patch.current_groq_scan_key_index != null
+    ) {
+      payload.current_groq_scan_key_index = patch.current_groq_scan_key_index;
+    }
+    if (patch.gemini_key_cooldowns != null) payload.gemini_key_cooldowns = patch.gemini_key_cooldowns;
+    if (patch.groq_key_cooldowns != null) payload.groq_key_cooldowns = patch.groq_key_cooldowns;
     if (includeLastFailureAt && patch.last_failure_at !== undefined) {
       payload.last_failure_at = patch.last_failure_at;
     }
     return payload;
   };
 
+  let includeScan = true;
+  let includeLastFailureAt = true;
   let preferred = await supabase
     .from("ai_quota_state")
-    .upsert(buildNewPayload(true), { onConflict: "id" });
+    .upsert(buildNewPayload(includeLastFailureAt, includeScan), { onConflict: "id" });
 
-  // Retry without `last_failure_at` if the column does not exist yet.
-  if (preferred.error && isMissingColumnError(preferred.error.message)) {
+  while (preferred.error && isMissingColumnError(preferred.error.message)) {
+    const msg = String(preferred.error.message ?? "").toLowerCase();
+    let progressed = false;
+    if (includeScan && msg.includes("current_groq_scan_key_index")) {
+      includeScan = false;
+      progressed = true;
+    } else if (includeLastFailureAt && msg.includes("last_failure")) {
+      includeLastFailureAt = false;
+      progressed = true;
+    }
+    if (!progressed) break;
     preferred = await supabase
       .from("ai_quota_state")
-      .upsert(buildNewPayload(false), { onConflict: "id" });
+      .upsert(buildNewPayload(includeLastFailureAt, includeScan), { onConflict: "id" });
   }
 
   if (!preferred.error) return;
 
-  const legacyPayload: Record<string, unknown> = {
-    scope,
-    updated_at: nowIso,
+  const buildLegacyPayload = (includeGroqScanKeyIndex: boolean) => {
+    const lp: Record<string, unknown> = {
+      scope,
+      updated_at: nowIso,
+    };
+    if (patch.consecutive_gemini_failures != null) lp.consecutive_gemini_failures = patch.consecutive_gemini_failures;
+    if (patch.gemini_cooldown_until !== undefined) lp.gemini_cooldown_until = patch.gemini_cooldown_until;
+    if (patch.current_gemini_key_index != null) lp.current_gemini_key_index = patch.current_gemini_key_index;
+    if (patch.current_groq_key_index != null) lp.current_groq_key_index = patch.current_groq_key_index;
+    if (includeGroqScanKeyIndex && patch.current_groq_scan_key_index != null) {
+      lp.current_groq_scan_key_index = patch.current_groq_scan_key_index;
+    }
+    if (patch.gemini_key_cooldowns != null) lp.gemini_key_cooldowns = patch.gemini_key_cooldowns;
+    if (patch.groq_key_cooldowns != null) lp.groq_key_cooldowns = patch.groq_key_cooldowns;
+    if (patch.last_failure_at !== undefined) lp.last_failure_at = patch.last_failure_at;
+    return lp;
   };
-  if (patch.consecutive_gemini_failures != null) legacyPayload.consecutive_gemini_failures = patch.consecutive_gemini_failures;
-  if (patch.gemini_cooldown_until !== undefined) legacyPayload.gemini_cooldown_until = patch.gemini_cooldown_until;
-  if (patch.current_gemini_key_index != null) legacyPayload.current_gemini_key_index = patch.current_gemini_key_index;
-  if (patch.current_groq_key_index != null) legacyPayload.current_groq_key_index = patch.current_groq_key_index;
-  if (patch.gemini_key_cooldowns != null) legacyPayload.gemini_key_cooldowns = patch.gemini_key_cooldowns;
-  if (patch.groq_key_cooldowns != null) legacyPayload.groq_key_cooldowns = patch.groq_key_cooldowns;
-  if (patch.last_failure_at !== undefined) legacyPayload.last_failure_at = patch.last_failure_at;
 
-  const legacy = await supabase
+  let legacyScan = true;
+  let legacy = await supabase
     .from("ai_quota_state")
-    .upsert(legacyPayload, { onConflict: "scope" });
+    .upsert(buildLegacyPayload(legacyScan), { onConflict: "scope" });
+  if (
+    legacy.error &&
+    isMissingColumnError(legacy.error.message) &&
+    legacyScan &&
+    String(legacy.error.message).toLowerCase().includes("current_groq_scan_key_index")
+  ) {
+    legacyScan = false;
+    legacy = await supabase
+      .from("ai_quota_state")
+      .upsert(buildLegacyPayload(false), { onConflict: "scope" });
+  }
   if (legacy.error) {
     console.warn(
       `[binance-bot] ai_quota_state patch failed: ${preferred.error.message}; legacy_fallback=${legacy.error.message}`,
@@ -334,7 +383,7 @@ export async function logAiCacheHit(symbol: string, ageMs: number) {
  * a per-key counter in memory and flush at most one row per provider+key per
  * window with the aggregated count.
  */
-const KEY_ROTATION_LOG_WINDOW_MS = 60_000;
+const KEY_ROTATION_LOG_WINDOW_MS = 5 * 60 * 1000;
 type KeyRotationStats = {
   /** Wall-clock ms of the most recent flushed insert. */
   lastEmitMs: number;

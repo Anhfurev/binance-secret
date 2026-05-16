@@ -21,6 +21,17 @@ Deno.test("extractLegFeeUsd reads paper meta fee", () => {
   );
 });
 
+Deno.test("extractLegFeeUsd avoids paper fee estimate on live fills", () => {
+  assertEquals(
+    extractLegFeeUsd({
+      amount: 1,
+      average: 100,
+      execution_type: "limit_chase",
+    }),
+    0,
+  );
+});
+
 Deno.test("computeNetTradePnl subtracts both legs", () => {
   const pnl = computeNetTradePnl({
     qty: 2,

@@ -2,6 +2,7 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   applyConfidenceSizedTradeUsd,
   resolveConfidenceTradeUsdScale,
+  scaleTradeUsdByGovernanceConfidence,
 } from "../trade-size-confidence.ts";
 
 Deno.test("resolveConfidenceTradeUsdScale grows with blended confidence", () => {
@@ -35,4 +36,15 @@ Deno.test("applyConfidenceSizedTradeUsd respects balance and min trade", () => {
   });
   assertEquals(sized > 500, true);
   assertEquals(sized <= 1000, true);
+});
+
+Deno.test("scaleTradeUsdByGovernanceConfidence shrinks when War Room lowers confidence", () => {
+  const sized = scaleTradeUsdByGovernanceConfidence({
+    tradeUsd: 1_000,
+    executionConfidence: 70,
+    effectiveConfidence: 80,
+    minTradeUsd: 10,
+    currentBalance: 2_000,
+  });
+  assertEquals(sized, 875);
 });

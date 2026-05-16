@@ -73,11 +73,12 @@ export async function resolveSellFillFinancials(params: {
   const exitNotional = soldBase * exitPx;
   const feeUsdBuy = toNumber(openTradeExtra?.fee_usd_buy, 0);
   const feeUsdSell = extractLegFeeUsd(sellOrder);
+  const allocatedBuyFeeUsd = Number((feeUsdBuy * fillRatio).toFixed(8));
   const pnl = computeNetTradePnl({
     qty: soldBase,
     entryPrice,
     exitPrice: exitPx,
-    feeUsdBuy,
+    feeUsdBuy: allocatedBuyFeeUsd,
     feeUsdSell,
   });
   const notionalForPct = soldBase * entryPrice;

@@ -48,6 +48,40 @@ export function widenTrailingStopBelowHigh(
 
 /** Skip BUY when ADX(14) below this AND regime != TRENDING — chop bleeds via tight SLs. */
 export const MIN_ADX_FOR_NON_TRENDING_BUY = 18;
+
+export function readMinAdxForNonTrendingBuy(paperLiveStyle = false): number {
+  const envKey = paperLiveStyle ? "PAPER_MIN_ADX_CHOP" : "MIN_ADX_FOR_NON_TRENDING_BUY";
+  const fallback = paperLiveStyle ? 22 : MIN_ADX_FOR_NON_TRENDING_BUY;
+  const raw = String(Deno.env.get(envKey) ?? "").trim();
+  const n = raw.length ? Number(raw) : fallback;
+  if (!Number.isFinite(n)) return fallback;
+  return clamp(n, 12, 40);
+}
+
+/** ADX gate in `buy-context` (chop) — paper without live-style practice uses softer default so cycles are not starved. */
+export function readMinAdxForBuyContextGate(params: {
+  isPaperOnly: boolean;
+  paperLiveStylePractice: boolean;
+}): number {
+  if (params.paperLiveStylePractice) {
+    return readMinAdxForNonTrendingBuy(true);
+  }
+  if (params.isPaperOnly) {
+    const raw = String(Deno.env.get("PAPER_MIN_ADX_CHOP_GATE") ?? "14").trim();
+    const n = raw.length ? Number(raw) : 14;
+    if (!Number.isFinite(n)) return 14;
+    return clamp(Math.floor(n), 10, 22);
+  }
+  return readMinAdxForNonTrendingBuy(false);
+}
+
+/** Points subtracted from execution weighted floor on paper (default 7; 0–15). */
+export function readPaperWeightedFloorRelaxPoints(): number {
+  const raw = String(Deno.env.get("PAPER_WEIGHTED_FLOOR_RELAX_PCT") ?? "7").trim();
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 7;
+  return clamp(Math.floor(n), 0, 15);
+}
 /** TP must be >= this multiple of the stop-loss distance (positive R:R). */
 export const MIN_REWARD_RISK_RATIO = 2.0;
 /** When ATR is valid, default TP distance = `ATR × this` unless R:R floor lifts it higher. */

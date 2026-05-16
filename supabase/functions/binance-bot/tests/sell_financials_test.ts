@@ -3,6 +3,18 @@ import {
   isPartialSellFill,
   shouldApplyPaperBalanceOnSellFinancials,
 } from "../sell-financials.ts";
+import { computeNetTradePnl } from "../fill-fees.ts";
+
+Deno.test("partial sell allocates buy fee pro-rata", () => {
+  const pnl = computeNetTradePnl({
+    qty: 0.5,
+    entryPrice: 100,
+    exitPrice: 102,
+    feeUsdBuy: 0.2,
+    feeUsdSell: 0.1,
+  });
+  assertEquals(pnl, 0.7);
+});
 
 Deno.test("full fill when sold equals open amount", () => {
   assertEquals(isPartialSellFill(1, 1), false);

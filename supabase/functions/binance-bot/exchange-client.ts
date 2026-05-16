@@ -7,12 +7,21 @@ import {
 import {
   readSmartLimitMaxChasePct,
   readSmartLimitMaxSlippagePct,
+  computeAdverseSlippageFrac,
 } from "./smart-limit-chase-config.ts";
 
 export function toCcxtSymbol(symbol: string) {
   if (symbol.includes("/")) return symbol;
   if (symbol.endsWith("USDT")) return `${symbol.slice(0, -4)}/USDT`;
   return symbol;
+}
+
+/** Base asset for a spot USDT pair (e.g. BTCUSDT → BTC). */
+export function baseAssetFromUsdtSymbol(symbol: string): string {
+  const s = String(symbol ?? "").toUpperCase();
+  if (s.includes("/")) return s.split("/")[0] ?? s;
+  if (s.endsWith("USDT")) return s.slice(0, -4);
+  return s;
 }
 
 export function createBinanceExchange() {
@@ -525,18 +534,11 @@ export async function executeSmartLimitChaser(params: {
   let lastOrderId: string | undefined;
   let execution_type: SmartLimitExecutionResult["execution_type"] = "limit_chase";
 
-  function adverseMoveFrac(refPrice: number): number {
-    if (!Number.isFinite(refPrice) || refPrice <= 0 || !Number.isFinite(signalPrice) || signalPrice <= 0) {
-      return 0;
-    }
-    // Slippage guard should only react to adverse drift:
-    // - BUY adverse: ref > signal
-    // - SELL adverse (closing long): ref < signal
-    if (side === "buy") {
-      return Math.max(0, (refPrice - signalPrice) / signalPrice);
-    }
-    return Math.max(0, (signalPrice - refPrice) / signalPrice);
-  }
+  const adverseMoveFrac = (refPrice: number) => computeAdverseSlippageFrac({
+    side,
+    signalPrice,
+    referencePrice: refPrice,
+  });
 
   for (let round = 0; round < SMART_LIMIT_MAX_ROUNDS; round++) {
     if (remaining <= 1e-12) break;

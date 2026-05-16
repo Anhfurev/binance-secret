@@ -7,6 +7,8 @@ import {
   type RetentionRunResult,
   type StaleTradeGuardResult,
 } from "./health-check.ts";
+import { readReconciliationEnabled, runReconciliationJob } from "./reconciler.ts";
+import type { ReconciliationResult } from "./reconciler.ts";
 
 export async function handleMaintenanceOnly(
   supabase: ReturnType<typeof createClient>,
@@ -15,12 +17,13 @@ export async function handleMaintenanceOnly(
   stale_trade_guard: StaleTradeGuardResult | null;
   retention_cleanup: RetentionRunResult | null;
   capital_reservations_pruned: number | null;
+  reconciliation: ReconciliationResult | null;
 }> {
   const startedAtMs = Date.now();
   const batchId = `maint-${crypto.randomUUID().slice(0, 8)}`;
   const staleResCutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
-  const [staleResult, retentionResult, capitalDel] = await Promise.all([
+  const [staleResult, retentionResult, capitalDel, reconciliation] = await Promise.all([
     safeExecute(
       "maintenance_stale_guard",
       () => runStaleTradeGuard({ supabase, batchId }),
@@ -43,6 +46,9 @@ export async function handleMaintenanceOnly(
       },
       null,
     ),
+    readReconciliationEnabled()
+      ? safeExecute("maintenance_reconciliation", () => runReconciliationJob({ supabase }), null)
+      : Promise.resolve(null),
   ]);
 
   console.log("[MAINTENANCE] finished", {
@@ -58,5 +64,6 @@ export async function handleMaintenanceOnly(
     stale_trade_guard: staleResult,
     retention_cleanup: retentionResult,
     capital_reservations_pruned: capitalDel,
+    reconciliation,
   };
 }

@@ -4,6 +4,7 @@ import { DEFAULT_SYMBOL } from "./constants.ts";
 import { formatUnknownError, jsonResponse, normalizeSymbol, toStringValue } from "./utils.ts";
 import { safeExecute } from "./safe-execute.ts";
 import { botDebug, botError, botWarn, emitSentryFatalException } from "./bot-debug.ts";
+import { sendDebuggerExceptionTelegram } from "./debugger-alerts.ts";
 import { isTransientPostgrestError } from "./postgrest-errors.ts";
 
 export function parseSymbolsFromBody(parsedBody: Record<string, unknown> | null, searchParams?: URLSearchParams): string[] {
@@ -76,8 +77,9 @@ export async function persistEdgeFatalLog(
 export function readEdgeGlobalTimeoutMs(): number {
   const raw = String(Deno.env.get("EDGE_GLOBAL_TIMEOUT_MS") ?? "").trim();
   const n = raw.length ? Number(raw) : NaN;
-  if (!Number.isFinite(n)) return 90_000;
-  return Math.min(120_000, Math.max(30_000, Math.floor(n)));
+  /** Default 95s: typical batch ~32–40s; floor 60s avoids `previous_cycle_in_flight` while a batch still runs. */
+  if (!Number.isFinite(n)) return 95_000;
+  return Math.min(150_000, Math.max(60_000, Math.floor(n)));
 }
 
 export async function withFatalBoundary(
@@ -100,6 +102,12 @@ export async function withFatalBoundary(
     }]), undefined);
     await emitSentryFatalException(fatal, { stage: "deno_serve" });
     await persistEdgeFatalLog(sharedSupabase, message, { stage: "deno_serve", transient: transientDb }, transientDb ? "warn" : "error");
+    if (!transientDb) {
+      void sendDebuggerExceptionTelegram({
+        scope: "fatal_boundary|deno_serve",
+        detail: message,
+      });
+    }
     return jsonResponse({ ok: false, error: message, recovered: true }, 200);
   }
 }

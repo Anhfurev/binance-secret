@@ -81,6 +81,30 @@ Deno.test("aggressive fallback confirms buy on aligned AI HOLD", () => {
   assertEquals(result.reason, "aggressive_buy_confirmed_fallback");
 });
 
+Deno.test("no-trade scout buy bypasses hold_no_strategy_buy", () => {
+  const result = decideHybridMatrix({
+    strategySignal: "HOLD",
+    hasOpenTrade: false,
+    strategyExitTriggered: false,
+    aggressiveModeEnabled: false,
+    technical: "BUY",
+    technicalScore: 6,
+    rsi: 48,
+    imbalanceRatio: 0.8,
+    marketRegime: "TRENDING",
+    latestPrice: 100,
+    bbLower: 98,
+    isBreakout: false,
+    isBelowEma200: false,
+    ai: { ...baseAi, ai_confidence: 62, action: "HOLD" },
+    minAiConfidence: 58,
+    minTechnicalScore: 5,
+    symbol: "BTCUSDT",
+    noTradeScoutActive: true,
+  });
+  assertEquals(result.decision, "BUY");
+  assertEquals(result.reason, "no_trade_strategy_scout_buy");
+});
 Deno.test("tie-breaker accepts technical score above 8", () => {
   const result = decideHybridMatrix({
     strategySignal: "BUY",

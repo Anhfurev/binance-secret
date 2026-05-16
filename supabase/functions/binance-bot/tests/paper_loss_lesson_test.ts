@@ -28,6 +28,6 @@ Deno.test("paper loss lesson bumps confidence after recent losses", async () => 
     latestPrice: 100,
     bbLower: 98,
   });
-  assertEquals(result.confidenceBump, 4);
+  assertEquals(result.confidenceBump, 6);
   assertEquals(result.blockBuy, false);
 });

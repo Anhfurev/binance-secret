@@ -1,9 +1,10 @@
 // @ts-nocheck
 /**
  * Per-bot decision + execution. Market data is fetched once per symbol per cron
- * (`run-symbol-batch.ts` → `getCachedSnapshot`); all autopilot rows for that
- * symbol run in parallel via `Promise.allSettled`. Multi-symbol cron uses the
- * same pattern in `index.ts`. Keep heavy parallel work there, not here.
+ * (`run-symbol-batch.ts` → `getCachedSnapshot`); autopilot rows for one symbol may run
+ * in parallel when `BOT_PARALLEL_SYMBOL_CYCLES=1` unless Gemini quota serialization applies
+ * (`batch-orchestrator.ts`). Multi-symbol cron serializes by symbol when Gemini may run
+ * (`cron-runner.ts`). Keep heavy parallel work bounded there.
  */
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { sendTelegramAlert, sendTradeRowNotification } from "./notifier.ts";
@@ -40,7 +41,9 @@ import {
   shouldTelegramTrailingRowUpdate,
 } from "./log-policy.ts";
 import { executeBuyFlow } from "./bot-buy-v2.ts";
-import { applyBreakEvenTrigger, executeSellFlow } from "./bot-sell.ts";
+import { executeSellFlow } from "./bot-sell.ts";
+import { tryPartialTakeProfitIfDue } from "./sell-partial-tp.ts";
+import { maybeArmClassicBreakEven } from "./sell-break-even.ts";
 import { canFireDbStopLoss } from "./strategy-stop-hold.ts";
 import { botDebug, botError } from "./bot-debug.ts";
 import { assertExpectedEgressIpOrThrow } from "./exchange-client.ts";
@@ -90,6 +93,8 @@ export async function processBot(params: {
   /** Paper/demo only: bypass War Room + ranging gates so a probe BUY can execute. */
   demoProbeBuy?: boolean;
   signal?: AbortSignal;
+  /** Sideways grinder tight take-profit (% points). */
+  takeProfitPctOverride?: number | null;
 }): Promise<BotActionResult> {
   const {
     supabase,
@@ -104,6 +109,7 @@ export async function processBot(params: {
     executionUsdScale,
     demoProbeBuy = false,
     signal,
+    takeProfitPctOverride = null,
   } = params;
   const strategyNotes = resolveCombinedStrategyNotes(strategyReason);
   if (signal?.aborted) {
@@ -148,17 +154,25 @@ export async function processBot(params: {
       throw new Error(
         `profiles lookup failed for ${userId}: ${profileResult.error.message}`,
       );
-    const profile = (profileResult.data as ProfileRow | null) ?? null;
-    if (!profile) await ensureProfileRow(supabase, userId, 10000);
+    let profile = (profileResult.data as ProfileRow | null) ?? null;
+    if (!profile) {
+      await ensureProfileRow(supabase, userId, 10000);
+      profile = {
+        id: userId,
+        demo_balance: 10000,
+        starting_balance: 10000,
+        max_drawdown_limit: DEFAULT_MAX_DRAWDOWN_LIMIT_PCT,
+      };
+    }
 
     const paperOrGhost = resolveExchangeSkipped(row);
     const liveBalance = paperOrGhost
       ? null
       : await getLatestRecordedBalance(supabase, userId);
-    const currentBalance = paperOrGhost
-      ? toNumber(profile?.demo_balance, 10000)
-      : liveBalance ?? toNumber(profile?.demo_balance, 10000);
-    const currentStartingBalance = toNumber(profile?.starting_balance, 0);
+    let currentBalance = paperOrGhost
+      ? toNumber(profile.demo_balance, 10000)
+      : liveBalance ?? toNumber(profile.starting_balance, 0);
+    const currentStartingBalance = toNumber(profile.starting_balance, 0);
     const resolvedStartingBalance =
       currentStartingBalance > 0 ? currentStartingBalance : currentBalance;
     const shouldInitializeStartingBalance = currentStartingBalance <= 0;
@@ -166,7 +180,7 @@ export async function processBot(params: {
       0.1,
       Math.min(
         100,
-        toNumber(profile?.max_drawdown_limit, DEFAULT_MAX_DRAWDOWN_LIMIT_PCT),
+        toNumber(profile.max_drawdown_limit, DEFAULT_MAX_DRAWDOWN_LIMIT_PCT),
       ),
     );
 
@@ -174,6 +188,7 @@ export async function processBot(params: {
       rsi: snapshot.rsi,
       macd: snapshot.macd.macd,
       macdSignal: snapshot.macd.signal,
+      macdHistogram: snapshot.macd.histogram,
       emaFast: snapshot.emaFast,
       emaSlow: snapshot.emaSlow,
       ema200: snapshot.ema200,
@@ -192,20 +207,46 @@ export async function processBot(params: {
     let trailingStopTriggered = false;
 
     if (openTrade) {
-      const breakEvenResult = await applyBreakEvenTrigger({
+      const ptpResult = await tryPartialTakeProfitIfDue({
+        supabase,
+        row,
+        userId,
+        symbol: snapshot.symbol,
+        openTrade,
+        currentPrice: snapshot.latestPrice,
+        technical,
+        ai,
+        strategyNotes,
+        currentBalance,
+        resolvedStartingBalance,
+        shouldInitializeStartingBalance,
+        cycleId,
+        marketRegime: snapshot.marketRegime,
+        signal,
+      });
+      if (ptpResult.executed) {
+        if (typeof ptpResult.nextBalance === "number") currentBalance = ptpResult.nextBalance;
+        return {
+          userId,
+          symbol: snapshot.symbol,
+          decision: effectiveDecision,
+          technical,
+          ai,
+          indicators,
+          action: "sell",
+          detail: ptpResult.detail ?? "PARTIAL TP executed",
+          exit_reason: "partial_tp",
+          strategy_reason: strategyNotes,
+        };
+      }
+
+      await maybeArmClassicBreakEven({
         supabase,
         userId,
         symbol: snapshot.symbol,
         openTrade,
         currentPrice: snapshot.latestPrice,
       });
-      if (breakEvenResult.triggered) {
-        botDebug("processBot", "break_even_triggered", {
-          userId,
-          symbol: snapshot.symbol,
-          pnlPercent: breakEvenResult.pnlPercent,
-        });
-      }
 
       const trailingState = buildTrailingStopState(
         openTrade,
@@ -252,9 +293,16 @@ export async function processBot(params: {
         }
       }
       if (trailingState.shouldExit && canFireDbStopLoss(openTrade)) {
+        const entry = toNumber(openTrade.entryPrice, 0);
+        const stopLoss = toNumber(openTrade.stopLoss, 0);
+        const extra = (openTrade.extra as Record<string, unknown> | undefined) ?? {};
+        const beStopArmed = extra.break_even_after_partial_tp === true
+          && entry > 0
+          && stopLoss >= entry * 0.999
+          && snapshot.latestPrice <= stopLoss;
         effectiveDecision = "SELL";
-        effectiveExitReason = "trailing_stop_hit";
-        trailingStopTriggered = true;
+        effectiveExitReason = beStopArmed ? "be_stop_hit" : "trailing_stop_hit";
+        trailingStopTriggered = !beStopArmed;
       }
     }
 
@@ -269,10 +317,14 @@ export async function processBot(params: {
     }
 
     if (effectiveDecision === "HOLD") {
+      const aiWantsBuy = String(ai?.action ?? "").toUpperCase() === "BUY";
+      const holdDetail = aiWantsBuy
+        ? "No trade (confirmation layer held) — AI=BUY but final decision=HOLD; strategy/technical/matrix did not confirm entry (see strategy_reason)."
+        : "No trade (confirmation layer held)";
       botDebug("processBot", "hold_gate", {
         userId,
         symbol: snapshot.symbol,
-        detail: "No trade (confirmation layer held)",
+        detail: holdDetail,
       });
       const accountPnl = fromUsdCents(
         toUsdCents(currentBalance) - toUsdCents(resolvedStartingBalance),
@@ -296,7 +348,7 @@ export async function processBot(params: {
         userId,
         symbol: snapshot.symbol,
         action: "hold",
-        detail: "No trade (confirmation layer held)",
+        detail: holdDetail,
         balance: currentBalance,
       });
       return {
@@ -307,7 +359,7 @@ export async function processBot(params: {
         ai,
         indicators,
         action: "hold",
-        detail: "No trade (confirmation layer held)",
+        detail: holdDetail,
         exit_reason: effectiveExitReason,
         strategy_reason: strategyNotes,
       };
@@ -369,6 +421,7 @@ export async function processBot(params: {
         executionUsdScale,
         demoProbeBuy,
         signal,
+        takeProfitPctOverride,
       });
       if (buyResult.action === "skip") {
         botDebug("processBot", "buy_skipped", {

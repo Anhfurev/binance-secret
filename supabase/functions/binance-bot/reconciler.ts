@@ -12,7 +12,7 @@
  *   to `fetchBalance()` base totals for the symbols present in open trades.
  */
 import type { createClient } from "npm:@supabase/supabase-js@2";
-import { getSharedBinanceSignedExchange, toCcxtSymbol } from "./exchange-client.ts";
+import { getSharedBinanceSignedExchange, toCcxtSymbol, baseAssetFromUsdtSymbol } from "./exchange-client.ts";
 import { sendHighPriorityRedAlert } from "./notifier.ts";
 import { toNumber, toStringValue } from "./utils.ts";
 
@@ -20,10 +20,7 @@ const STALE_OPEN_MS = 5 * 60 * 1000;
 const DUST_BASE = 1e-8;
 
 function baseAssetFromSymbol(symbol: string): string {
-  const s = String(symbol ?? "").toUpperCase();
-  if (s.endsWith("USDT")) return s.slice(0, -4);
-  const [a] = toCcxtSymbol(s).split("/");
-  return a ?? s;
+  return baseAssetFromUsdtSymbol(symbol);
 }
 
 function isEffectivelyFlat(exchangeBaseTotal: number, dbAmount: number): boolean {
@@ -59,6 +56,19 @@ async function readPositionBaseMap(exchange: any): Promise<Map<string, number>> 
     // Spot accounts often throw or return empty — balance path below is authoritative.
   }
   return map;
+}
+
+export function readReconciliationEnabled(): boolean {
+  const raw = String(Deno.env.get("RECONCILER_ENABLED") ?? "0").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
+function isLiveExchangeBackedTrade(extra: Record<string, unknown> | null | undefined): boolean {
+  if (!extra || typeof extra !== "object") return true;
+  if (String(extra.is_ghost ?? "").toLowerCase() === "true") return false;
+  if (String(extra.is_paper ?? "").toLowerCase() === "true") return false;
+  const mode = String(extra.trade_mode ?? "").toLowerCase();
+  return mode !== "paper" && mode !== "ghost";
 }
 
 export type ReconciliationResult = {
@@ -110,8 +120,10 @@ export async function runReconciliationJob(params: {
   const now = Date.now();
 
   for (const row of rows) {
-    examined += 1;
     const id = toStringValue(row.id);
+    const extra = (row.extra as Record<string, unknown> | undefined) ?? {};
+    if (!isLiveExchangeBackedTrade(extra)) continue;
+    examined += 1;
     const symbol = String(row.symbol ?? "").toUpperCase();
     const dbAmount = toNumber(row.amount, 0);
     const openedAt = row.opened_at ? Date.parse(String(row.opened_at)) : NaN;
@@ -125,8 +137,8 @@ export async function runReconciliationJob(params: {
       }
 
       if (isEffectivelyFlat(exchangeBase, dbAmount) && ageMs > STALE_OPEN_MS) {
-        const extra = {
-          ...((row.extra as Record<string, unknown> | undefined) ?? {}),
+        const mergedExtra = {
+          ...extra,
           reconciled_at: new Date().toISOString(),
           reconciliation_job_id: jobId,
           reconciliation_reason: "db_open_exchange_flat_gt_5m",
@@ -137,7 +149,7 @@ export async function runReconciliationJob(params: {
           .update({
             status: "RECONCILED_CLOSED",
             closed_at: new Date().toISOString(),
-            extra,
+            extra: mergedExtra,
             notes: `Reconciler: marked RECONCILED_CLOSED (flat on exchange >5m after opened_at) job=${jobId}`,
           })
           .eq("id", id ?? "")

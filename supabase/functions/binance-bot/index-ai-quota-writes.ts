@@ -103,6 +103,9 @@ export async function registerGeminiFailureAndAbortIfNeeded(params: {
     last_failure_at: new Date().toISOString(),
   });
   if (nextFailures < MAX_CONSECUTIVE_GEMINI_FAILURES) return;
+  // Emergency abort disabled: keep rotating Gemini keys instead of stopping the cron batch.
   await logEmergencyAbort(params);
-  throw new EmergencyAbortQuotaError();
+  console.warn(
+    `[AI DEBUG] consecutive_gemini_failures=${nextFailures} (threshold ${MAX_CONSECUTIVE_GEMINI_FAILURES}) — continuing live Gemini fetch`,
+  );
 }

@@ -2,22 +2,32 @@
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import type { AiAnalysis, BotSettingsRow, MarketRegime } from "./types.ts";
 import { MIN_TRADE_USD, TRADING_AMOUNT_USD } from "./constants.ts";
-import { sendTelegramAlert } from "./notifier.ts";
+import { resolveDrawdownBreachSkip } from "./buy-drawdown-guard.ts";
 import { resolveTradeSizeUsd } from "./trade-store.ts";
 import {
   applyConfidenceSizedTradeUsd,
   resolveConfidenceTradeUsdScale,
 } from "./trade-size-confidence.ts";
-import { escapeHtml } from "./bot-shared.ts";
-import { botWarn } from "./bot-debug.ts";
 import { computeWeightedConfidenceForRegime, getResolvedScoreWeightsPack } from "./ai-scoring.ts";
 import { passesMeanReversionBuyGate } from "./regime-detection.ts";
 import { resolveBuyFlowMtfContext } from "./buy-mtf.ts";
-import { MIN_ADX_FOR_NON_TRENDING_BUY, ONE_H_BEARISH_MAX_CONFIDENCE, readGrinderMinWeightedEntry } from "./buy-helpers.ts";
-import { safeInsertLog } from "./buy-logging.ts";
+import {
+  ONE_H_BEARISH_MAX_CONFIDENCE,
+  readMinAdxForBuyContextGate,
+  readPaperWeightedFloorRelaxPoints,
+} from "./buy-helpers.ts";
+import { resolveConfidencePolicy } from "./confidence-policy.ts";
+import { paperLiveStylePracticeEnabled } from "./live-style-practice.ts";
 import { applySymbolTradeUsdFloor } from "./trade-size-floor.ts";
 import { resolveGhostMode, resolveTestMode } from "./bot-shared.ts";
-import { resolveMinAiConfidenceForRegime } from "./utils.ts";
+import {
+  resolveTradeRegime,
+} from "./regime-scaling.ts";
+import {
+  getRequiredConfidence,
+  TRADING_POLICY,
+} from "./config/trading-policy.ts";
+import { blockedByStoplossStreakBlacklist } from "./stop-reentry-cooldown.ts";
 
 export async function resolveBuyContextAndSizing(params: {
   supabase: ReturnType<typeof createClient>;
@@ -31,6 +41,7 @@ export async function resolveBuyContextAndSizing(params: {
   snapshotRsi: number;
   snapshotBbLower: number;
   adx14: number;
+  atr14: number;
   currentBalance: number;
   resolvedStartingBalance: number;
   maxDrawdownLimitPct: number;
@@ -40,7 +51,7 @@ export async function resolveBuyContextAndSizing(params: {
 }) {
   const {
     supabase, row, userId, symbol, ai, marketRegime, snapshotPrice, snapshotEma200,
-    snapshotRsi, snapshotBbLower, adx14, currentBalance, resolvedStartingBalance,
+    snapshotRsi, snapshotBbLower, adx14, atr14, currentBalance, resolvedStartingBalance,
     maxDrawdownLimitPct, executionUsdScale, demoProbeBuy = false, signal,
   } = params;
   const demoProbePaper =
@@ -48,6 +59,17 @@ export async function resolveBuyContextAndSizing(params: {
   if (signal?.aborted) return { skipDetail: "cycle_aborted" };
 
   const regime: MarketRegime = marketRegime ?? "NEUTRAL";
+  const tradeRegime = resolveTradeRegime(symbol, snapshotPrice, atr14);
+  const unifiedPolicyGate = getRequiredConfidence(currentBalance, tradeRegime);
+  const confidencePolicy = resolveConfidencePolicy(row as Record<string, unknown>, {
+    marketRegime: regime,
+    tradeRegime,
+  });
+  const streakBlacklist = await blockedByStoplossStreakBlacklist({ supabase, userId, symbol });
+  if (streakBlacklist.blocked) {
+    return { skipDetail: `BUY blocked: ${streakBlacklist.reason ?? "stoploss_streak_blacklist"}` };
+  }
+
   const scoreWeightProfile: "trend_following" | "mean_reversion" =
     regime === "RANGING" ? "mean_reversion" : "trend_following";
   const scorePack = getResolvedScoreWeightsPack(row as Record<string, unknown>);
@@ -60,11 +82,18 @@ export async function resolveBuyContextAndSizing(params: {
     : 0;
   const ghostMode = resolveGhostMode(row);
   const isPaperOnly = !Boolean((row as any)?.is_live_trading_enabled);
-  const minWeightedEntry = readGrinderMinWeightedEntry();
+  let minWeightedEntry = confidencePolicy.execution_weighted_floor;
+  if (isPaperOnly && !demoProbePaper) {
+    minWeightedEntry = Math.max(
+      TRADING_POLICY.confidence.paperWeightedAbsoluteFloor,
+      minWeightedEntry - readPaperWeightedFloorRelaxPoints(),
+    );
+  }
+  minWeightedEntry = Math.max(minWeightedEntry, unifiedPolicyGate.minAiConfidence);
   if (!demoProbePaper && rawWeighted < minWeightedEntry) {
     return {
       skipDetail:
-        `BUY blocked: weighted conviction ${rawWeighted.toFixed(2)}% < grinder floor ${minWeightedEntry}%`,
+        `BUY blocked: weighted conviction ${rawWeighted.toFixed(2)}% < policy floor ${minWeightedEntry}%`,
       rawWeighted,
       resolvedWeights,
       regime,
@@ -72,16 +101,20 @@ export async function resolveBuyContextAndSizing(params: {
       ghostMode,
       isPaperOnly,
       demoProbePaper,
+      trading_policy_rule_refs: unifiedPolicyGate.policy_rule_refs,
     };
   }
+  const holdModelMargin = isPaperOnly
+    ? TRADING_POLICY.confidence.holdModelMarginPaper
+    : TRADING_POLICY.confidence.holdModelMarginLive;
   if (
     !demoProbePaper &&
     String(ai.action ?? "").toUpperCase() === "HOLD" &&
-    rawWeighted < minWeightedEntry + 5
+    rawWeighted < minWeightedEntry + holdModelMargin
   ) {
     return {
       skipDetail:
-        `BUY blocked: model action HOLD with weighted conviction ${rawWeighted.toFixed(2)}% below ${minWeightedEntry + 5}%`,
+        `BUY blocked: model action HOLD with weighted conviction ${rawWeighted.toFixed(2)}% below ${minWeightedEntry + holdModelMargin}%`,
       rawWeighted,
       resolvedWeights,
       regime,
@@ -89,84 +122,36 @@ export async function resolveBuyContextAndSizing(params: {
       ghostMode,
       isPaperOnly,
       demoProbePaper,
+      trading_policy_rule_refs: unifiedPolicyGate.policy_rule_refs,
     };
   }
-  const hasDrawdownBreach = Number.isFinite(drawdownPct) && drawdownPct > maxDrawdownLimitPct;
-  if (hasDrawdownBreach) {
-    botWarn("buyFlow", "drawdown_breach_block", {
-      userId,
-      symbol,
-      drawdownPct,
-      maxDrawdownLimitPct,
-      ghostMode,
-      isPaperOnly,
-    });
-    if (ghostMode) {
-      return {
-        skipDetail:
-          `Ghost BUY skipped: drawdown ${drawdownPct.toFixed(2)}% would breach live safety (autopilot not changed).`,
-      };
-    }
-    if (isPaperOnly) {
-      await safeInsertLog(
-        supabase,
-        {
-          user_id: userId,
-          symbol,
-          level: "info",
-          source: "safety",
-          message: "drawdown_breach_paper_skip",
-          meta: {
-            event: "drawdown_breach_paper_skip",
-            balance_at_breach: Number(currentBalance.toFixed(2)),
-            starting_balance: Number(resolvedStartingBalance.toFixed(2)),
-            drawdown_pct: Number(drawdownPct.toFixed(2)),
-            limit: Number(maxDrawdownLimitPct.toFixed(2)),
-            note: "Paper mode: autopilot intentionally NOT disabled.",
-          },
-          created_at: new Date().toISOString(),
-        },
-        "drawdown_breach_paper_skip",
-      );
-      return {
-        skipDetail:
-          `Paper BUY skipped: drawdown ${drawdownPct.toFixed(2)}% > ${maxDrawdownLimitPct.toFixed(2)}% (autopilot kept ON for demo).`,
-      };
-    }
-    const nowIso = new Date().toISOString();
-    await sendTelegramAlert(
-      `CRITICAL: DRAWDOWN BREACH\nSymbol: ${escapeHtml(symbol)}\nCurrent Balance: ${currentBalance.toFixed(2)} USDT\nStarting Balance: ${resolvedStartingBalance.toFixed(2)} USDT\nDrawdown: ${drawdownPct.toFixed(2)}%\nLimit: ${maxDrawdownLimitPct.toFixed(2)}%\nAUTOPILOT DISABLED FOR SAFETY`,
-    );
-    await supabase.from("bot_settings").update({ is_autopilot_enabled: false, updated_at: nowIso } as any).eq("user_id", userId);
-    await safeInsertLog(
-      supabase,
-      {
-        user_id: userId,
-        symbol,
-        level: "warn",
-        source: "safety",
-        message: "drawdown_autopilot_disabled",
-        meta: {
-          event: "drawdown_autopilot_disabled",
-          balance_at_breach: Number(currentBalance.toFixed(2)),
-          drawdown_pct: Number(drawdownPct.toFixed(2)),
-          limit: Number(maxDrawdownLimitPct.toFixed(2)),
-        },
-        created_at: nowIso,
-      },
-      "drawdown_autopilot_disabled",
-    );
-    return { skipDetail: `BUY blocked by drawdown breach (${drawdownPct.toFixed(2)}% > ${maxDrawdownLimitPct.toFixed(2)}%)` };
-  }
+  const drawdownSkip = await resolveDrawdownBreachSkip({
+    supabase,
+    userId,
+    symbol,
+    drawdownPct,
+    maxDrawdownLimitPct,
+    currentBalance,
+    resolvedStartingBalance,
+    ghostMode,
+    isPaperOnly,
+  });
+  if (drawdownSkip) return drawdownSkip;
 
+  const paperLiveStyle = isPaperOnly && paperLiveStylePracticeEnabled(isPaperOnly);
+  const minAdxGate = readMinAdxForBuyContextGate({
+    isPaperOnly,
+    paperLiveStylePractice: paperLiveStyle,
+  });
   if (
     regime !== "TRENDING" &&
     Number.isFinite(adx14) &&
-    adx14 < MIN_ADX_FOR_NON_TRENDING_BUY
+    adx14 < minAdxGate
   ) {
+    const minAdx = minAdxGate;
     return {
       skipDetail:
-        `BUY blocked: regime=${regime} with ADX(14)=${adx14.toFixed(2)} < ${MIN_ADX_FOR_NON_TRENDING_BUY}. Chop is wider than the SL distance — wait for trending follow-through.`,
+        `BUY blocked: regime=${regime} with ADX(14)=${adx14.toFixed(2)} < ${minAdx}. Chop is wider than the SL distance — wait for trending follow-through.`,
       rawWeighted,
       resolvedWeights,
       regime,
@@ -176,15 +161,20 @@ export async function resolveBuyContextAndSizing(params: {
       demoProbePaper,
     };
   }
-  if (
+  const rangingMrOk = passesMeanReversionBuyGate({
+    regime,
+    rsi: snapshotRsi,
+    latestPrice: snapshotPrice,
+    bbLower: snapshotBbLower,
+  });
+  const paperRangingBypass =
+    isPaperOnly &&
+    !demoProbePaper &&
     regime === "RANGING" &&
-    !passesMeanReversionBuyGate({
-      regime,
-      rsi: snapshotRsi,
-      latestPrice: snapshotPrice,
-      bbLower: snapshotBbLower,
-    })
-  ) {
+    !rangingMrOk &&
+    rawWeighted >= TRADING_POLICY.confidence.paperRangingBypassMinWeighted &&
+    String(Deno.env.get("PAPER_RANGING_MR_BYPASS") ?? "1").trim() !== "0";
+  if (regime === "RANGING" && !rangingMrOk && !paperRangingBypass) {
     return {
       skipDetail:
         "BUY blocked: RANGING regime (ADX<20 + tight BB) — require mean-reversion (RSI<40, RSI<32, or price at lower BB); avoids trend-chasing in chop.",
@@ -229,6 +219,29 @@ export async function resolveBuyContextAndSizing(params: {
     ? Math.min(rawWeighted, ONE_H_BEARISH_MAX_CONFIDENCE)
     : rawWeighted;
 
+  const minAiConfidenceBuy = isPaperOnly && !demoProbePaper
+    ? minWeightedEntry
+    : Math.max(confidencePolicy.execution_weighted_floor, unifiedPolicyGate.minAiConfidence);
+  if (!demoProbePaper && effectiveConfidence < minAiConfidenceBuy) {
+    return {
+      skipDetail:
+        `BUY blocked: effective confidence ${effectiveConfidence.toFixed(2)}% < policy floor ${minAiConfidenceBuy}% (${tradeRegime})`,
+      rawWeighted,
+      resolvedWeights,
+      regime,
+      scoreWeightProfile,
+      ghostMode,
+      isPaperOnly,
+      demoProbePaper,
+      isTestMode,
+      mtf,
+      effectiveConfidence,
+      bearish1hCap,
+      tradeRegime,
+      trading_policy_rule_refs: unifiedPolicyGate.policy_rule_refs,
+    };
+  }
+
   const fixedUsd = Number((row as any)?.trade_size_usd ?? (row as any)?.fixed_trade_usd ?? 0);
   const envTradingAmount = Number(Deno.env.get("TRADING_AMOUNT") ?? TRADING_AMOUNT_USD ?? 0);
   const useEnvTradeAmount = fixedUsd <= 0 && envTradingAmount > 0;
@@ -240,14 +253,10 @@ export async function resolveBuyContextAndSizing(params: {
   }
   baseTradeUsd = Math.min(currentBalance, Math.max(MIN_TRADE_USD, baseTradeUsd));
 
-  const minAiConfidence = resolveMinAiConfidenceForRegime(
-    row as Record<string, unknown>,
-    regime,
-  );
   const confidenceSizing = resolveConfidenceTradeUsdScale({
     aiConfidence: Number(ai.ai_confidence),
     weightedConfidence: effectiveConfidence,
-    minAiConfidence,
+    minAiConfidence: minAiConfidenceBuy,
   });
   const tradeUsd = applySymbolTradeUsdFloor({
     symbol,
@@ -296,5 +305,9 @@ export async function resolveBuyContextAndSizing(params: {
     tradeUsd,
     baseTradeUsd,
     confidenceSizing,
+    tradeRegime,
+    confidencePolicy,
+    trading_policy_rule_refs: unifiedPolicyGate.policy_rule_refs,
+    trading_policy_unified_min_ai: unifiedPolicyGate.minAiConfidence,
   };
 }

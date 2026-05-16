@@ -48,6 +48,7 @@ export async function finalizeBuyExecution(params: {
   buyOrder: Record<string, unknown>;
   openedAt: string;
   feeUsdBuy?: number;
+  sizingMeta?: Record<string, unknown>;
 }) {
   const {
     supabase, userId, symbol, ai, strategyNotes, botId, cycleId, buyOrderId,
@@ -56,7 +57,7 @@ export async function finalizeBuyExecution(params: {
     stopLossPersist, takeProfitPersist, initialTrailingPersist, trailingStopPct, atr14,
     atrTrailEffective, vb, volBurstMeta, slDistance, trailDistance, effectiveConfidence,
     rawWeighted, bearish1hCap, aiReasoningJson, coinId, technical, buyOrder, openedAt,
-    feeUsdBuy = 0,
+    feeUsdBuy = 0, sizingMeta = {},
   } = params;
 
   const buyFeeUsd = Number.isFinite(Number(feeUsdBuy)) && Number(feeUsdBuy) >= 0
@@ -115,6 +116,21 @@ export async function finalizeBuyExecution(params: {
         ? vb > 1.002 ? "atr_burst_guard" : "atr_1p5x"
         : "pct_fallback",
       fee_usd_buy: buyFeeUsd,
+      risked_amount_usd: sizingMeta.risked_amount_usd ?? null,
+      notional_size_usd: sizingMeta.notional_size_usd ?? valueUsd,
+      sizing_model: sizingMeta.sizing_model ?? "risk_to_stop",
+      risk_per_trade_pct: sizingMeta.risk_per_trade_pct ?? null,
+      notional_cap_fraction: sizingMeta.notional_cap_fraction ?? null,
+      total_equity_usd: sizingMeta.total_equity_usd ?? null,
+      notional_capped: sizingMeta.notional_capped ?? null,
+      confidence_cap_usd: sizingMeta.confidence_cap_usd ?? null,
+      governance_execution_confidence: sizingMeta.governance_execution_confidence ?? null,
+      chart_execution_confidence: sizingMeta.chart_execution_confidence ?? null,
+      governance_trade_usd: sizingMeta.governance_trade_usd ?? null,
+      notional_after_confidence_cap_usd:
+        sizingMeta.notional_after_confidence_cap_usd ?? sizingMeta.notional_size_usd ?? valueUsd,
+      notional_after_symbol_floor_usd:
+        sizingMeta.notional_after_symbol_floor_usd ?? sizingMeta.notional_after_confidence_cap_usd ?? valueUsd,
     },
     followedSignal: true,
     notes:

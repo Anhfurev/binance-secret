@@ -7,6 +7,7 @@ import {
   toStringValue,
 } from "./utils.ts";
 import { formatCycleReason } from "./index-decision-format.ts";
+import { resolveStrategyBuyRsiMax } from "./config.ts";
 import {
   shouldPersistDecisionAuditLogs,
   shouldPersistExecutionOutcomeLog,
@@ -25,7 +26,7 @@ const DECISION_REASON_MAP: Record<string, string> = {
   hold_technical_bearish_override: "Skipped: Technical Bearish Override",
 };
 
-function buildNoStrategyBuyReason(snapshot: IndicatorSnapshot, technicalScore: number) {
+export function buildNoStrategyBuyReason(snapshot: IndicatorSnapshot, technicalScore: number) {
   const signals: string[] = [];
   if (Number.isFinite(snapshot.latestPrice) && Number.isFinite(snapshot.emaSlow)) {
     if (snapshot.latestPrice < snapshot.emaSlow) {
@@ -151,6 +152,7 @@ export async function logCycleSummary(params: {
     finalDecision,
     minAiConfidence,
     minTech,
+    resolveStrategyBuyRsiMax(row),
   );
   const aiProvider = String((ai as any)?.ai_provider ?? "unknown");
   const aiProviderPath = String((ai as any)?.ai_provider_path ?? "n/a");

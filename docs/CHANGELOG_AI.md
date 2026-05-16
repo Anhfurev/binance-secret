@@ -8,6 +8,162 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-15 — Groq tiered models (8B scan, 70B high-conviction veto)
+
+**Summary**
+
+- **`ai-groq-models.ts`:** When `GROQ_MODEL` is unset, primary Groq completions default to **`llama-3.1-8b-instant`**; BUY trap review uses **`llama-3.3-70b-versatile`** only when weighted scanner `ai_confidence` ≥ **`GROQ_EXECUTION_MIN_CONFIDENCE`** (default **90**), otherwise the same cheap scan model. Setting **`GROQ_MODEL`** keeps legacy single-model behavior for both paths; **`GROQ_EXECUTION_MODEL`** overrides the deep trap model id. Tiered mode disables Groq veto fast-skip so high-conviction BUYs still get the deep review.
+- **`ai-veto.ts`:** Longer default veto timeout when the trap model id matches **`70b`** (override with **`GROQ_VETO_TIMEOUT_MS`**).
+- **`ai-keys.ts` / `ai-core.ts` / `cron-runner.ts`:** Optional **`GROQ_API_KEY_SCAN1`…`SCANn`** pool for scan-only Groq completions; **`GROQ_API_KEY` / `GROQ_API_KEY2`** remain the veto / trap ring. DB **`current_groq_scan_key_index`** (`20260515180000_ai_quota_groq_scan_key_index.sql`) round-robins the scan pool separately from **`current_groq_key_index`**.
+- **`groq-request-spacing.ts`:** **`GROQ_MIN_REQUEST_GAP_MS`** default spacing **400ms** (was 1200); set **`0`** to disable.
+- **`batch-orchestrator.ts` / `batch-validator.ts`:** **`BOT_PARALLEL_SYMBOL_CYCLES`** (default **off**) runs per-symbol bot rows with **`Promise.allSettled`** when set to **`1`**; when Gemini may run (`AI_SKIP_GEMINI` / `GEMINI_DISABLED` unset), parallel cycles are **forced off** and cron runs symbols **sequentially** with **`GEMINI_CRON_SYMBOL_GAP_MS`** (default **2000**, min **2000**) between `runSymbolBatch` calls. When parallel, **`BOT_SYMBOL_STAGGER_MS`** is skipped for that batch.
+- **`market-data.ts`:** Lighter OHLCV fetches — default **200** × 1m (env **`MARKET_OHLCV_1M_LIMIT`**, clamp **200–400**), tighter 15m / 1h / 4h limits vs prior **220+** 1m fan-out.
+- **`ai-core.ts` / `cron-runner.ts`:** Multi-symbol Groq batch uses **`buildPayload(..., { omitAiScoringRubric: true })`** so the large rubric is not repeated per symbol in one JSON envelope.
+- **Multi-provider matrix routing:** `AI_PROVIDER_MATRIX=1` (default on) assigns even cron indices to **Groq-first** and odd to **Gemini-first** with cross-provider fallback gaps; skips consolidated multi-symbol LLM batch; serializes symbols with **`SYMBOL_MATRIX_GAP_MS`** (default **2500**). Wired via `symbolMatrixIndex` cron → `getAiAnalysis`.
+- **Groq→Gemini fallback pacing:** After Groq 429 / quota exhaustion, `enforceGroqToGeminiFallbackGap` waits **`GROQ_TO_GEMINI_FALLBACK_GAP_MS`** (default **3000**, min **3000**) before `tryGeminiFlow`. `tryGroqFlow` returns `{ ai, groqQuotaExhausted }` so limit-fallback no longer blocks Gemini. **`GeminiTerminalAuthError`** on `PERMISSION_DENIED` / `CONSUMER_SUSPENDED` aborts the symbol cycle with no per-key rotation backoff.
+- **Gemini emergency abort disabled:** `registerGeminiFailureAndAbortIfNeeded` no longer throws `EMERGENCY_ABORT_QUOTA_LIMIT_HIT`; `getAiVerdict` no longer short-circuits on global Gemini cooldown; `tryGeminiFlow` always rotates keys (ignores global + per-key cooldown skips) so multi-key pools keep live fetches.
+- **Gemini multi-symbol batch (Solution B):** When **`AI_PRIMARY_LLM` is not `groq`**, cron prefetches one consolidated **`geminiAnalyzeMultiSymbol`** call (`ai-gemini-multi-symbol.ts`) into the same in-memory map as Groq batch; **`getAiAnalysis`** traces **`gemini_multi_symbol_batch`** vs **`groq_multi_symbol_batch`**. Opt out with **`GEMINI_MULTI_SYMBOL_BATCH=0`**; tune **`GEMINI_MULTI_SYMBOL_TIMEOUT_MS`** (default **90s**), **`GEMINI_MULTI_SYMBOL_MAX_OUTPUT_TOKENS`** (default **8192**, cap **16384**). Shared **`ai-multi-symbol-parse.ts`** + **`ai-multi-symbol-batch-store.ts`**.
+- **`telegram-decision-trace.ts`:** Opt-in Telegram decision transparency — set **`DECISION_TRACE_TELEGRAM=1`**; quiet cycles throttle per symbol (**`DECISION_TRACE_HOLD_THROTTLE_MS`**, default **1h**); any **AI BUY** or **final BUY** sends immediately. Wired from **`cycle-executor.ts`** after `logDecisionTrace`.
+- **Tests:** `ai_groq_models_test.ts`; `ai_veto_policy_test` pins `GROQ_MODEL` for fast-track assertions; `ai_keys_test` covers `SCANn` ordering; `batch_orchestration_test` covers parallel-cycle flag; `telegram_decision_trace_test.ts`; `ai_gemini_multi_symbol_test.ts`; `ai_multi_symbol_parse_test.ts`.
+
+---
+
+## 2026-05-14 — Paper trade starvation fixes (gates + edge overlap)
+
+**Summary**
+
+- **Debugger → Telegram:** `sendDebuggerExceptionTelegram` in `debugger-alerts.ts` (per-scope throttle, `DEBUGGER_TELEGRAM_EXCEPTION_THROTTLE_MS`, opt-out `DEBUGGER_TELEGRAM_EXCEPTION_DISABLE`); wired from `symbol-cycle.ts` (bot cycle errors) and `middleware-factory.ts` (non-transient fatal boundary). Optional digest `info` rows via `DEBUGGER_TELEGRAM_INCLUDE_INFO=1`. **Next.js:** `lib/debugger-telegram-server.ts` + `instrumentation.ts` `onRequestError` wrapper (throttle `DEBUGGER_NEXT_TELEGRAM_THROTTLE_MS`, disable `DEBUGGER_NEXT_TELEGRAM_DISABLE`); requires server `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (or `TELEGRAM_BOT_CHAT_ID`).
+- **`middleware-factory.ts`:** Default / floor `EDGE_GLOBAL_TIMEOUT_MS` **95s** (min **60s**, max **150s**) so ~35s batches are not starved by `previous_cycle_in_flight` when secrets used a 30s window.
+- **`buy-helpers.ts` / `buy-context.ts`:** Paper-only softer ADX chop gate (`PAPER_MIN_ADX_CHOP_GATE`, default **14**), weighted floor relax (**7** pts, env `PAPER_WEIGHTED_FLOOR_RELAX_PCT`), HOLD-model margin **3** vs **5**, ranging MR bypass when `rawWeighted ≥ 58` and `PAPER_RANGING_MR_BYPASS` (default on).
+- **`strategy.ts`:** Optional `paperExploration` path → `strategy_paper_exploration_entry` (soft micro-momentum; not used for live).
+- **`cycle-decider.ts` / `index-decision.ts` / `no-trade-fallback.ts`:** Paper exploration wired; scout `paperChopRelaxed` for ranging near-BB band.
+- **Tests:** `buy_context_gate_test.ts`, `strategy_paper_exploration_test.ts`; **184** passing.
+
+---
+
+**Summary**
+
+- **`index-ai.ts`:** Import `withLlmConcurrency` so AI verdict no longer throws `withLlmConcurrency is not defined` (was driving `ERROR_SPIKE_RECENT`).
+- **`ai-veto.ts` / `ai-veto-helpers.ts` / `ai-core.ts` / `index-ai.ts`:** Groq veto rotates across keys on 429, skips cache-hit veto by default, fast-track default **90**, AI move threshold default **0.5%**.
+- **`no-trade-fallback.ts` / `index-decision.ts`:** `no_trade_strategy_scout_buy` when fallback is active and chart/AI align.
+- **`debugger-error-triage.ts` / `debugger-ops-probes.ts`:** Classify resolved `safe_execute` detail; Groq rotation warn scales with key count.
+- **Tests:** **180** passing. **Deploy:** `binance-bot` with JWT verification off.
+
+---
+
+## 2026-05-12 — Edge debugger hardening + tests
+
+**Summary**
+
+- **`debugger-issue-rules.ts`:** Pure issue classifiers for env gaps, error spikes, stale locks, dominant HOLD gates, and tight paper trailing exits.
+- **`health-debugger.ts` / `function-health.ts` / `router.ts`:** Debugger fixes are opt-in (`debugger_apply_fixes: true`); gateway-only missing Binance creds downgrade to warn.
+- **`debugger-ops-probes.ts`:** Broader paper wallet drift sample and recent tight-stop detection.
+- **`debugger-auto-run.ts`:** Removed duplicate Telegram alert pass.
+- **Tests:** `debugger_issue_rules_test.ts`, `debugger_config_test.ts`; updated `function_health_flags_test.ts`.
+- **Deploy:** `binance-bot` redeployed; Deno suite **177** passing.
+
+---
+
+## 2026-05-12 — Edge batch 20 (cron runner / janitor / function health)
+
+**Summary**
+
+- **`batch-validator.ts` / `run-symbol-batch.ts`:** Balance-sync targets track `hasPaperMode` separately from `isLiveMode` so mixed paper+live users still reconcile paper wallets.
+- **`cron-runner.ts`:** Paper wallet reconcile selects users with any paper leg, not only users with zero live bots.
+- **`cron-janitor.ts`:** Exported `readReservationStaleMs` for tests.
+- **Tests:** `tests/cron_janitor_test.ts`, `tests/function_health_flags_test.ts`; `run_symbol_batch_test` covers merged paper/live flags.
+- **Deploy:** `binance-bot` redeployed; Deno suite **167** passing.
+
+---
+
+## 2026-05-12 — Edge batch 19 (cycle orchestration / batch sync)
+
+**Summary**
+
+- **`symbol-cycle.ts`:** After a timed-out decision phase, the cycle skips `processBot` when the abort signal is already set.
+- **`run-symbol-batch.ts`:** Exported `summarizeBatchActions` and `readPostBatchBalanceSyncEnabled` for tests.
+- **Tests:** `tests/batch_orchestration_test.ts` (timeout clamp, batch summary, balance-sync toggle).
+- **Deploy:** `binance-bot` redeployed; Deno suite **163** passing.
+
+---
+
+## 2026-05-12 — Edge batch 18 (partial sell / close / fill quality)
+
+**Summary**
+
+- **`sell-partial.ts`:** Open-leg `value` after a partial exit uses exit mark via `resolveOpenLegRemainingValue`; partial `extra` stores sell fees.
+- **`sell-fill-quality.ts`:** Fill-quality logs use `extractLegFeeUsd` for paper and live.
+- **Tests:** `tests/sell_partial_state_test.ts`.
+- **Deploy:** `binance-bot` redeployed; Deno suite **160** passing.
+
+---
+
+## 2026-05-12 — Edge batch 17 (orders / paper fill / fees / locks)
+
+**Summary**
+
+- **`fill-fees.ts`:** `extractLegFeeUsd` uses paper taker estimates only for paper fills; live fills without fee meta return **0**.
+- **`paper-fill.ts`:** Rejects fills that round to zero base qty after lot precision.
+- **Tests:** Live fee guard in `tests/fill_fees_test.ts`.
+- **Deploy:** `binance-bot` redeployed; Deno suite **159** passing.
+
+---
+
+## 2026-05-12 — Edge batch 16 (buy prep / capital / finalize)
+
+**Summary**
+
+- **`buy-prep.ts`:** `notional_size_usd` in sizing meta matches post-cap notional after confidence and symbol floors.
+- **`bot-buy-v2.ts` / `buy-finalize.ts`:** Trade `extra` records governance vs chart confidence and governance-scaled trade USD.
+- **Tests:** Wallet/equity clamp in `tests/buy_prep_sizing_test.ts`.
+- **Deploy:** `binance-bot` redeployed; Deno suite **158** passing.
+
+---
+
+## 2026-05-12 — Edge batch 15 (confidence policy / War Room / buy context)
+
+**Summary**
+
+- **`buy-context.ts`:** Weighted conviction gates use `execution_weighted_floor` (aligned with War Room and sizing).
+- **`buy-warroom.ts`:** Under 1h bearish cap, raw weighted score at or above the governance floor can bypass quorum when the capped chart leg would block.
+- **Tests:** `tests/war_room_consensus_test.ts`; golden-ratio bounce in `tests/buy_warroom_test.ts`.
+- **Deploy:** `binance-bot` redeployed; Deno suite **157** passing.
+
+---
+
+## 2026-05-12 — Edge batch 14 (AI verdict / veto / decision tuning)
+
+**Summary**
+
+- **`index-ai.ts`:** Cheap cached-AI path runs `applyStaleSignalBuyVeto` before sentiment; `readAiPriceMoveThresholdPercent` defaults invalid env to **0.35%**.
+- **`ai-core.ts`:** Gemini stale-cache fallback re-applies stale BUY veto.
+- **Tests:** `tests/index_ai_move_threshold_test.ts`, `tests/decision_tuning_test.ts`.
+- **Deploy:** `binance-bot` redeployed; Deno suite **153** passing.
+
+---
+
+## 2026-05-12 — Edge batch 13 (exchange client / bot / execution)
+
+**Summary**
+
+- **`bot.ts`:** `currentBalance` is mutable after partial TP; live telemetry falls back to `starting_balance` instead of paper `demo_balance`; scaffold profile after `ensureProfileRow`.
+- **`exchange-client.ts`:** `baseAssetFromUsdtSymbol` for reconciler and tests.
+- **`execution.ts`:** Kelly helpers documented as legacy (live sizing uses `risk-to-stop-sizing.ts`); tests in `tests/execution_sizing_test.ts`.
+- **Tests:** `tests/exchange_client_helpers_test.ts` for symbol/min-notional/EMA helpers.
+- **Deploy:** `binance-bot` redeployed; Deno suite **145** passing.
+
+---
+
+## 2026-05-12 — Edge batch 12 (cycle decision / no-trade fallback)
+
+**Summary**
+
+- **`no-trade-fallback.ts`:** Documented relaxation clamps (−10 AI confidence, floor 55; −2 tech, floor 3) via `computeNoTradeFallbackFloors`; tests in `tests/no_trade_fallback_test.ts`.
+- **`cycle-decider.ts`:** `max_open_trades` counts only non-ghost open rows so shadow legs do not block live slots.
+- **Deploy:** `binance-bot` redeployed with JWT verification off; Deno suite **138** passing.
+
+---
+
 ## 2026-05-12 — Daily salary audit (00:00 UTC)
 
 **Summary**

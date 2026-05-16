@@ -8,6 +8,33 @@ import { botDebug } from "./bot-debug.ts";
 
 const BREAK_EVEN_TRIGGER_PCT = 1.5;
 
+export function readClassicBreakEvenEnabled(): boolean {
+  const raw = String(Deno.env.get("CLASSIC_BREAK_EVEN_ENABLED") ?? "0").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
+export function shouldArmClassicBreakEven(openTrade: OpenTradeRow): boolean {
+  if (!readClassicBreakEvenEnabled()) return false;
+  const extra = (openTrade.extra as Record<string, unknown> | undefined) ?? {};
+  if (extra.break_even_triggered === true) return false;
+  if (extra.break_even_after_partial_tp === true) return false;
+  if (extra.partial_tp_executed === true) return false;
+  return true;
+}
+
+export async function maybeArmClassicBreakEven(params: {
+  supabase: ReturnType<typeof createClient>;
+  userId: string;
+  symbol: string;
+  openTrade: OpenTradeRow;
+  currentPrice: number;
+}) {
+  if (!shouldArmClassicBreakEven(params.openTrade)) {
+    return { triggered: false as const, pnlPercent: 0 };
+  }
+  return applyBreakEvenTrigger(params);
+}
+
 /**
  * Arm a break-even stop on a profitable open position. Once unrealized PnL
  * crosses `BREAK_EVEN_TRIGGER_PCT`, raise `stopLoss` to entry (tick-aligned)
@@ -64,6 +91,7 @@ export async function applyBreakEvenTrigger(params: {
       },
     })
     .eq("id", openId)
+    .ilike("status", "open")
     .select("id");
 
   if (updateResult.error) {

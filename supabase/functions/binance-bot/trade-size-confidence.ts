@@ -78,3 +78,21 @@ export function applyConfidenceSizedTradeUsd(params: {
     Math.max(params.minTradeUsd, tradeUsd),
   );
 }
+
+export function scaleTradeUsdByGovernanceConfidence(params: {
+  tradeUsd: number;
+  executionConfidence: number;
+  effectiveConfidence: number;
+  minTradeUsd: number;
+  currentBalance: number;
+}): number {
+  const tradeUsd = Math.max(0, params.tradeUsd);
+  const effective = Math.max(0, params.effectiveConfidence);
+  const execution = Math.max(0, params.executionConfidence);
+  if (!(effective > 0) || !(execution > 0)) {
+    return Math.min(params.currentBalance, Math.max(params.minTradeUsd, tradeUsd));
+  }
+  const ratio = Math.min(1, execution / effective);
+  const scaled = tradeUsd * Math.max(0.25, ratio);
+  return Math.min(params.currentBalance, Math.max(params.minTradeUsd, scaled));
+}

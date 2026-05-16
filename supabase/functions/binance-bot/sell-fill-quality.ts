@@ -1,5 +1,6 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import { extractLegFeeUsd } from "./fill-fees.ts";
 
 export async function insertSellFillQualityLog(params: {
   supabase: ReturnType<typeof createClient>;
@@ -42,7 +43,7 @@ export async function insertSellFillQualityLog(params: {
       exit_price_effective: Number(exitPx.toFixed(8)),
       execution_type: (sellOrder as any)?.execution_type ?? null,
       slippage_pct: (sellOrder as any)?.actual_slippage_pct ?? null,
-      fee_usd: (sellOrder as any)?.smart_execution_meta?.fee_usd ?? null,
+      fee_usd: extractLegFeeUsd(sellOrder) || null,
       trade_mode: ghostMode ? "ghost" : isTestMode ? "paper" : "live",
       partial_fill: partialFill,
     },

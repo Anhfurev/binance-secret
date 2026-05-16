@@ -5,6 +5,7 @@
 import type { AiAnalysis } from "./types.ts";
 import { MIN_WEIGHTED_CONFIDENCE_TO_EXECUTE_BUY } from "./ai-scoring.ts";
 import { ONE_H_BEARISH_MAX_CONFIDENCE } from "./buy-helpers.ts";
+import { WAR_ROOM_WHALE_FLOOR_BOOST } from "./confidence-policy.ts";
 
 export type WarRoomMarketContext = {
   imbalance_ratio: number;
@@ -41,7 +42,7 @@ export type WarRoomConsensus = {
 };
 
 const WHALE_IMBALANCE_WARN_BELOW = 0.4;
-const WHALE_FLOOR_BOOST = 10;
+const WHALE_FLOOR_BOOST = WAR_ROOM_WHALE_FLOOR_BOOST;
 
 function isNegativeFearSentiment(
   sv: NonNullable<AiAnalysis["sentiment_vibe"]> | undefined,

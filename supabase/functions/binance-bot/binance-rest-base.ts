@@ -8,8 +8,23 @@ function readGatewayUrl(): string {
   );
 }
 
+function readStreamTickGatewayUrl(): string {
+  return (
+    (Deno.env.get("BINANCE_STREAM_TICK_GATEWAY_URL") ?? "").trim() ||
+    (Deno.env.get("BINANCE_STREAM_GATEWAY_URL") ?? "").trim() ||
+    readGatewayUrl()
+  );
+}
+
 export function resolveBinanceRestBaseUrl(): string {
   const gateway = readGatewayUrl();
+  if (!gateway) return BINANCE_BASE_URL;
+  return gateway.replace(/\/+$/, "");
+}
+
+/** Stream hub `/stream/tick` may live on the REST gateway or a dedicated tick base URL. */
+export function resolveBinanceStreamTickBaseUrl(): string {
+  const gateway = readStreamTickGatewayUrl();
   if (!gateway) return BINANCE_BASE_URL;
   return gateway.replace(/\/+$/, "");
 }

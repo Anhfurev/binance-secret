@@ -13,7 +13,35 @@ import { botDebug, botWarn } from "./bot-debug.ts";
 import { volatilityAdjustedDistanceDown, takeProfitDistanceUp } from "./buy-helpers.ts";
 import { resolveStopLossPctFraction, resolveTakeProfitPctPoints } from "./trade-stop-risk.ts";
 import { safeInsertLog } from "./buy-logging.ts";
+import {
+  calculateQuantityFromRiskToStop,
+  loadProfileDemoBalance,
+} from "./risk-to-stop-sizing.ts";
 import { formatBuyAmountWithinUsdCap } from "./exchange-client.ts";
+import { applySymbolTradeUsdFloor } from "./trade-size-floor.ts";
+
+export function resolveBuySizingEquityUsd(params: {
+  exchangeSkipped: boolean;
+  profileDemoBalance: number | null;
+  walletUsdt: number;
+}): number {
+  const wallet = Math.max(0, toNumber(params.walletUsdt, 0));
+  if (!params.exchangeSkipped) return wallet;
+  const profile = params.profileDemoBalance;
+  return Number.isFinite(profile) && profile > 0 ? profile : wallet;
+}
+
+export function capRiskToStopNotionalUsd(params: {
+  riskNotionalUsd: number;
+  confidenceCapUsd: number;
+  walletUsdt: number;
+  totalEquityUsd: number;
+}): number {
+  let tradeUsd = Math.max(0, toNumber(params.riskNotionalUsd, 0));
+  const confidenceCapUsd = toNumber(params.confidenceCapUsd, 0);
+  if (confidenceCapUsd > 0) tradeUsd = Math.min(tradeUsd, confidenceCapUsd);
+  return Math.min(tradeUsd, params.walletUsdt, params.totalEquityUsd);
+}
 
 export async function prepareBuyExecution(params: {
   supabase: ReturnType<typeof createClient>;
@@ -35,11 +63,14 @@ export async function prepareBuyExecution(params: {
   ghostMode: boolean;
   /** Profile cash for paper/ghost; live callers pass exchange free USDT. */
   walletUsdt: number;
+  /** Sideways grinder: tight TP override (% points, e.g. 1.0 = 1%). */
+  takeProfitPctOverride?: number | null;
 }) {
   const {
     supabase, row, userId, symbol, ai, marketRegime, snapshotPrice, atr14,
-    trailingStopPct, volBurstWidenMult = 1, volBurstMeta, tradeUsd,
+    trailingStopPct, volBurstWidenMult = 1, volBurstMeta,
     effectiveConfidence, rawWeighted, bearish1hCap, mtf, ghostMode, walletUsdt,
+    takeProfitPctOverride = null,
   } = params;
   /** Must match `resolveTestMode` / `is_live_trading_enabled` — not legacy `is_test_mode`. */
   const isTestMode = resolveTestMode(row);
@@ -48,19 +79,25 @@ export async function prepareBuyExecution(params: {
   const usdtBalance = exchangeSkipped
     ? resolvePaperWalletUsdt(walletUsdt)
     : walletUsdt;
-  if (usdtBalance < tradeUsd) {
-    const shortBy = Number((tradeUsd - usdtBalance).toFixed(2));
+  const profileEquity = exchangeSkipped
+    ? await loadProfileDemoBalance(supabase, userId)
+    : null;
+  const totalEquity = resolveBuySizingEquityUsd({
+    exchangeSkipped,
+    profileDemoBalance: profileEquity,
+    walletUsdt: usdtBalance,
+  });
+  if (!(totalEquity > 0)) {
     return {
-      skipDetail: isLiveMode
-        ? `LIVE ABORT: wallet_insufficient_funds — need ${tradeUsd.toFixed(2)} USDT, have ${usdtBalance.toFixed(2)} (short ${shortBy.toFixed(2)})`
-        : `Insufficient USDT balance (${usdtBalance.toFixed(2)} < ${tradeUsd.toFixed(2)})`,
+      skipDetail: "BUY skip: total equity unavailable for risk-to-stop sizing",
       usdtBalance,
     };
   }
 
-  const qty = await formatBuyAmountWithinUsdCap(symbol, tradeUsd, snapshotPrice);
   const stopLossPct = clamp(toNumber((row as any).stop_loss_pct, 2), 0.1, 50);
-  const takeProfitPctRaw = clamp(toNumber((row as any).take_profit_pct, 4), 0.1, 100);
+  const takeProfitPctRaw = takeProfitPctOverride != null && Number.isFinite(takeProfitPctOverride)
+    ? clamp(takeProfitPctOverride, 0.1, 100)
+    : clamp(toNumber((row as any).take_profit_pct, 4), 0.1, 100);
   const stopLossPctFraction = resolveStopLossPctFraction(stopLossPct, symbol);
   const takeProfitPct = resolveTakeProfitPctPoints(takeProfitPctRaw, stopLossPct, symbol);
   const gateFees = String(Deno.env.get("MIN_PROFIT_AFTER_FEES_GATE") ?? "1").trim() !== "0";
@@ -110,6 +147,49 @@ export async function prepareBuyExecution(params: {
   if (!(stopLossPrice < entryPriceFull)) {
     stopLossPrice = Number((entryPriceFull * (1 - stopLossPctFraction)).toFixed(8));
   }
+  const sized = await calculateQuantityFromRiskToStop({
+    symbol,
+    totalEquity,
+    entryPrice: entryPriceFull,
+    stopLossPrice,
+  });
+  const cappedTradeUsd = capRiskToStopNotionalUsd({
+    riskNotionalUsd: sized.notionalUsd,
+    confidenceCapUsd: params.tradeUsd,
+    walletUsdt: usdtBalance,
+    totalEquityUsd: totalEquity,
+  });
+  const tradeUsd = applySymbolTradeUsdFloor({
+    symbol,
+    tradeUsd: cappedTradeUsd,
+    currentBalance: usdtBalance,
+  });
+  let qty = sized.qty;
+  if (tradeUsd > 0 && Math.abs(tradeUsd - sized.notionalUsd) > 1e-8) {
+    qty = await formatBuyAmountWithinUsdCap(symbol, tradeUsd, entryPriceFull);
+  }
+  const sizingMeta = {
+    ...sized.sizingMeta,
+    confidence_cap_usd: Number(toNumber(params.tradeUsd, 0).toFixed(8)),
+    notional_after_confidence_cap_usd: Number(cappedTradeUsd.toFixed(8)),
+    notional_after_symbol_floor_usd: Number(tradeUsd.toFixed(8)),
+    notional_size_usd: Number(tradeUsd.toFixed(8)),
+  };
+  if (usdtBalance < tradeUsd) {
+    const shortBy = Number((tradeUsd - usdtBalance).toFixed(2));
+    return {
+      skipDetail: isLiveMode
+        ? `LIVE ABORT: wallet_insufficient_funds — need ${tradeUsd.toFixed(2)} USDT, have ${usdtBalance.toFixed(2)} (short ${shortBy.toFixed(2)})`
+        : `Insufficient USDT balance (${usdtBalance.toFixed(2)} < ${tradeUsd.toFixed(2)})`,
+      usdtBalance,
+    };
+  }
+  if (!(qty > 0) || !(tradeUsd > 0)) {
+    return {
+      skipDetail: "BUY skip: risk-to-stop sizing produced zero quantity",
+      usdtBalance,
+    };
+  }
   const tpDistance = takeProfitDistanceUp(
     entryPriceFull,
     atr14,
@@ -158,6 +238,8 @@ export async function prepareBuyExecution(params: {
           },
           qty,
           usd_size: Number(tradeUsd.toFixed(2)),
+          risked_amount_usd: sized.riskUsd,
+          notional_size_usd: Number(tradeUsd.toFixed(2)),
         },
         created_at: openedAt,
       },
@@ -182,6 +264,8 @@ export async function prepareBuyExecution(params: {
     exchangeSkipped,
     usdtBalance,
     qty,
+    tradeUsd,
+    sizingMeta,
     stopLossPctFraction,
     atrTrailEffective,
     vb,

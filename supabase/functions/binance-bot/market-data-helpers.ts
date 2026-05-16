@@ -2,11 +2,9 @@
 import ccxt from "ccxt";
 import type { Candle } from "./types.ts";
 import { toNumber } from "./utils.ts";
-import {
-  calculateEma,
-} from "./indicators.ts";
-
-const INDICATOR_ZERO_EPSILON = 0;
+import { calculateEma } from "./indicators.ts";
+import { minPositiveIndicatorMagnitude } from "./indicator-precision.ts";
+import { withBoundedPublicExchangeTimeout } from "./market-data-timeout.ts";
 
 export function applyLatestZeroVolumeCarryForward(candles: Candle[]): Candle[] {
   if (!Array.isArray(candles) || candles.length < 2) return candles;
@@ -51,7 +49,8 @@ export function validateIndicatorsOrThrow(params: {
     { key: "emaSlow", value: emaSlow },
     { key: "ema200", value: ema200 },
   ];
-  const bad = checks.find((c) => !Number.isFinite(c.value) || c.value <= INDICATOR_ZERO_EPSILON);
+  const minPositive = minPositiveIndicatorMagnitude(latestPrice);
+  const bad = checks.find((c) => !Number.isFinite(c.value) || c.value < minPositive);
   if (bad) {
     throw new Error(`CRITICAL_INDICATOR_ZERO:${symbol}:${bad.key}`);
   }
@@ -76,27 +75,55 @@ export function normalizeCcxtTimeframe(timeframe: string) {
   return timeframe;
 }
 
+export function midPriceFromBidAsk(bestBid: number, bestAsk: number): number | null {
+  const bid = toNumber(bestBid, 0);
+  const ask = toNumber(bestAsk, 0);
+  if (!(bid > 0) || !(ask > 0) || ask < bid) return null;
+  return Number(((bid + ask) / 2).toFixed(12));
+}
+
 export async function resolveLatestPrice(params: {
   exchange: InstanceType<typeof ccxt.binance>;
   ccxtSymbol: string;
   tickerLast: unknown;
   fallbackClose: number;
   streamSymbol?: string;
+  bestBid?: number;
+  bestAsk?: number;
   signal?: AbortSignal;
 }) {
-  const { exchange, ccxtSymbol, tickerLast, fallbackClose, streamSymbol, signal } = params;
+  const {
+    exchange,
+    ccxtSymbol,
+    tickerLast,
+    fallbackClose,
+    streamSymbol,
+    bestBid,
+    bestAsk,
+    signal,
+  } = params;
+  if (signal?.aborted) {
+    throw new Error(`CYCLE_ABORTED:${streamSymbol ?? ccxtSymbol}`);
+  }
   if (streamSymbol) {
     const { fetchStreamTickSnapshot } = await import("./stream-tick-snapshot.ts");
     const streamTick = await fetchStreamTickSnapshot(streamSymbol, signal);
     if (streamTick?.last > 0) return streamTick.last;
   }
+  const bookMid = midPriceFromBidAsk(Number(bestBid ?? 0), Number(bestAsk ?? 0));
+  if (bookMid != null && bookMid > 0) return bookMid;
   const fromTicker = toNumber(tickerLast, 0);
   if (fromTicker > 0) return fromTicker;
 
   const fromRecentClose = toNumber(fallbackClose, 0);
   if (fromRecentClose > 0) return fromRecentClose;
 
-  const lastCandle = await exchange.fetchOHLCV(ccxtSymbol, "1m", undefined, 1);
+  if (signal?.aborted) {
+    throw new Error(`CYCLE_ABORTED:${streamSymbol ?? ccxtSymbol}`);
+  }
+  const lastCandle = await withBoundedPublicExchangeTimeout(exchange, signal, () =>
+    exchange.fetchOHLCV(ccxtSymbol, "1m", undefined, 1),
+  );
   const lastClose = toNumber(lastCandle?.[0]?.[4], 0);
   return lastClose > 0 ? lastClose : 0;
 }

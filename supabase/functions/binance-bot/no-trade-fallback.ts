@@ -1,7 +1,12 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import type { AiAnalysis, SignalDecision } from "./types.ts";
+import { passesMeanReversionBuyGate } from "./regime-detection.ts";
 
 const NO_TRADE_FALLBACK_AFTER_DAYS = 10;
+const NO_TRADE_FALLBACK_CONFIDENCE_DROP = 10;
+const NO_TRADE_FALLBACK_MIN_AI_CONFIDENCE = 55;
+const NO_TRADE_FALLBACK_MIN_TECH_SCORE = 3;
 
 function readPaperNoTradeFallbackHours(): number {
   const raw = String(Deno.env.get("PAPER_NO_TRADE_FALLBACK_HOURS") ?? "1").trim();
@@ -38,6 +43,24 @@ export type NoTradeFallbackResult = {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+export function computeNoTradeFallbackFloors(
+  minAiConfidence: number,
+  minTechScore: number,
+): { adjustedMinAiConfidence: number; adjustedMinTechScore: number } {
+  return {
+    adjustedMinAiConfidence: clamp(
+      minAiConfidence - NO_TRADE_FALLBACK_CONFIDENCE_DROP,
+      NO_TRADE_FALLBACK_MIN_AI_CONFIDENCE,
+      95,
+    ),
+    adjustedMinTechScore: clamp(
+      minTechScore - 2,
+      NO_TRADE_FALLBACK_MIN_TECH_SCORE,
+      10,
+    ),
+  };
 }
 
 export async function resolveNoTradeFallback(params: {
@@ -115,11 +138,11 @@ export async function resolveNoTradeFallback(params: {
     };
   }
 
-  // Controlled relaxation:
-  // - confidence floor: at most -10 points, hard floor 55
-  // - technical floor: at most -2 points, hard floor 3
-  const adjustedMinAiConfidence = clamp(minAiConfidence - 12, 48, 95);
-  const adjustedMinTechScore = clamp(minTechScore - 2, 4, 10);
+  // Controlled relaxation: confidence floor at most -10 points (hard floor 55); tech at most -2 (hard floor 3).
+  const { adjustedMinAiConfidence, adjustedMinTechScore } = computeNoTradeFallbackFloors(
+    minAiConfidence,
+    minTechScore,
+  );
 
   return {
     active: true,
@@ -133,4 +156,69 @@ export async function resolveNoTradeFallback(params: {
       ? `no_trade_fallback_activated_${minutesSinceLastBuy}m`
       : `no_trade_fallback_activated_${daysSinceLastBuy}d`,
   };
+}
+
+export function evaluateNoTradeStrategyScoutBuy(params: {
+  active: boolean;
+  hasOpenTrade: boolean;
+  strategySignal: SignalDecision;
+  technical: SignalDecision;
+  technicalScore: number;
+  minTechnicalScore: number;
+  minAiConfidence: number;
+  marketRegime: string;
+  rsi: number;
+  latestPrice: number;
+  bbLower: number;
+  ai: AiAnalysis;
+  /** When true, RANGING scout may use near-BB + RSI band instead of strict mean-reversion. */
+  paperChopRelaxed?: boolean;
+}): { decision: "BUY"; reason: string } | null {
+  const {
+    active,
+    hasOpenTrade,
+    strategySignal,
+    technical,
+    technicalScore,
+    minTechnicalScore,
+    minAiConfidence,
+    marketRegime,
+    rsi,
+    latestPrice,
+    bbLower,
+    ai,
+    paperChopRelaxed = false,
+  } = params;
+  if (!active || hasOpenTrade || strategySignal === "BUY" || strategySignal === "SELL") {
+    return null;
+  }
+  if (technical === "SELL" || ai.trend === "bearish" || ai.groq_verdict === "REJECT") {
+    return null;
+  }
+  const aiConf = Number(ai.ai_confidence);
+  if (!Number.isFinite(aiConf) || aiConf < minAiConfidence) return null;
+  if (technicalScore < minTechnicalScore) return null;
+  if (technical !== "BUY" && technicalScore < minTechnicalScore + 1) return null;
+  if (
+    marketRegime === "RANGING" &&
+    !passesMeanReversionBuyGate({
+      regime: marketRegime,
+      rsi,
+      latestPrice,
+      bbLower,
+    })
+  ) {
+    if (
+      paperChopRelaxed &&
+      bbLower > 0 &&
+      latestPrice <= bbLower * 1.028 &&
+      rsi >= 34 &&
+      rsi <= 56
+    ) {
+      // allow scout through soft chop proxy
+    } else {
+      return null;
+    }
+  }
+  return { decision: "BUY", reason: "no_trade_strategy_scout_buy" };
 }

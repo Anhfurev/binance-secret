@@ -1,0 +1,24 @@
+[
+  {
+    "final_decision": "HOLD",
+    "symbol": "PEPEUSDT",
+    "ai_confidence": 68,
+    "technical_score": 7,
+    "veto_details": "{\"veto_reasons\":[\"FAIL_EMA200\",\"FAIL_LOW_VOLUME_VS_24H_AVG\",\"FAIL_STRATEGY:RSI_NOT_OVERSOLD\"],\"scorecard\":{\"ema200\":false,\"rsi_ok\":false,\"strategy_buy_ok\":false},\"reason\":\"hold_ema200_gate\",\"decision\":\"HOLD\"}",
+    "snapshot": { "adx14": 16, "rsi": 38, "marketRegime": "RANGING", "bbMiddle": 0.00001, "bbUpper": 0.0000102, "bbLower": 0.0000098 }
+  },
+  {
+    "final_decision": "HOLD",
+    "symbol": "BTCUSDT",
+    "ai_confidence": 72,
+    "technical_score": 8,
+    "veto_details": "{\"veto_reasons\":[\"FAIL_EMA200\",\"FAIL_MTF_ALIGNMENT\"],\"scorecard\":{\"ema200\":false,\"mtf_ok\":false,\"strategy_buy_ok\":true},\"reason\":\"hold_ema200_gate\",\"decision\":\"HOLD\"}",
+    "snapshot": { "adx14": 28, "rsi": 48, "marketRegime": "TRENDING" }
+  },
+  {
+    "final_decision": "BUY",
+    "symbol": "SOLUSDT",
+    "ai_confidence": 80,
+    "veto_details": "{\"veto_reasons\":[],\"decision\":\"BUY\"}"
+  }
+]

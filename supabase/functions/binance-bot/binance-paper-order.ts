@@ -72,7 +72,7 @@ export async function runPaperCreateOrder(params: {
       level: "info",
       userId,
       symbol,
-      source: "ccxt",
+      source: "paper",
       data: {
         side,
         amount: order.amount,
@@ -96,6 +96,7 @@ export async function runPaperCreateOrder(params: {
       execution_type: order.execution_type,
       actual_slippage_pct: order.actual_slippage_pct,
       smart_execution_meta: order.smart_execution_meta,
+      idempotent: false,
       testMode: true,
     };
   } catch (e) {
