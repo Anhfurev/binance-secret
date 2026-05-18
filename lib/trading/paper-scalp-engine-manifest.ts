@@ -20,7 +20,7 @@ import {
   humanPaperScalpReason,
   type PaperWorkspaceNav,
 } from "@/lib/trading/paper-scalp-nav";
-import { sendTelegramNotification } from "@/lib/trading/paper-scalp-telegram";
+import { sendTelegramNotificationAsync } from "@/lib/trading/paper-scalp-telegram";
 
 export type WorkspaceTickRow = {
   workspaceKey: string;
@@ -49,6 +49,8 @@ export type EngineManifestInput = {
   scanned: number;
   updated: number;
   persistQueued: number;
+  /** Explicit BTC gate telemetry (defaults to snapshot EMA check). */
+  btcRegimeActive?: boolean;
 };
 
 type SymbolGridRow = {
@@ -154,7 +156,8 @@ function buildGatesBlock(
 }
 
 export function buildUnifiedEngineManifest(input: EngineManifestInput): string {
-  const btcBearish = isBtcBearish1h(input.scalpSnapshots);
+  const btcBearish =
+    input.btcRegimeActive ?? isBtcBearish1h(input.scalpSnapshots);
   const account = input.masterAccount;
   const openLegCount = account?.openPositions.length ?? 0;
   const held = new Set(
@@ -242,8 +245,13 @@ export function buildUnifiedEngineManifest(input: EngineManifestInput): string {
   return lines.join("\n").slice(0, 4090);
 }
 
-export function dispatchUnifiedEngineManifest(input: EngineManifestInput): void {
+/** Always builds + logs + sends dashboard (never skips on HOLD/BLOCKED). */
+export async function dispatchUnifiedEngineManifest(
+  input: EngineManifestInput,
+): Promise<void> {
+  console.log("[paper-scalp-manifest] dispatch start");
   const text = buildUnifiedEngineManifest(input);
   console.log(`[paper-scalp-manifest]\n${text}`);
-  sendTelegramNotification(text);
+  await sendTelegramNotificationAsync(text);
+  console.log("[paper-scalp-manifest] telegram dispatch settled");
 }

@@ -37,50 +37,54 @@ function fmtNum(n: number, _digits = 6): string {
   return formatMicroPrice(n);
 }
 
-/** POST to Telegram without blocking callers. Missing env → silent no-op. */
-export function sendTelegramNotification(message: string): void {
+async function postTelegramMessage(text: string): Promise<void> {
   const token = resolveToken();
   const chatId = resolveChatId();
-  if (!token || !chatId || !message.trim()) return;
+  if (!token || !chatId) {
+    console.warn(
+      "[paper-scalp-telegram] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing — message logged only",
+    );
+    return;
+  }
+  if (!text.trim()) return;
 
-  const text = message.slice(0, 4096);
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: text.slice(0, 4096),
+      parse_mode: "Markdown",
+      disable_web_page_preview: true,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error(
+      `[paper-scalp-telegram] HTTP ${res.status}`,
+      body.slice(0, 400),
+    );
+    writeServerLogAsync({
+      level: "error",
+      source: "paper-scalp-telegram",
+      message: "telegram_send_failed",
+      meta: { http_status: res.status, detail: body.slice(0, 400) },
+    });
+  }
+}
 
+/** Awaited send — use at tick end so Next.js does not drop in-flight fetch. */
+export async function sendTelegramNotificationAsync(
+  message: string,
+): Promise<void> {
+  await postTelegramMessage(message);
+}
+
+/** Fire-and-forget POST for non-tick callers. */
+export function sendTelegramNotification(message: string): void {
   setImmediate(() => {
-    void fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: "Markdown",
-        disable_web_page_preview: true,
-      }),
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          const body = await res.text().catch(() => "");
-          console.error(
-            `[paper-scalp-telegram] HTTP ${res.status}`,
-            body.slice(0, 400),
-          );
-          writeServerLogAsync({
-            level: "error",
-            source: "paper-scalp-telegram",
-            message: "telegram_send_failed",
-            meta: { http_status: res.status, detail: body.slice(0, 400) },
-          });
-        }
-      })
-      .catch((err) => {
-        console.error("[paper-scalp-telegram] network error:", err);
-        writeServerLogAsync({
-          level: "error",
-          source: "paper-scalp-telegram",
-          message: "telegram_network_error",
-          meta: { detail: String(err) },
-        });
-      });
+    void postTelegramMessage(message);
   });
 }
 

@@ -9,6 +9,7 @@ import {
   type EngineManifestInput,
   type WorkspaceTickRow,
 } from "@/lib/trading/paper-scalp-engine-manifest";
+import { isBtcBearish1h } from "@/lib/trading/paper-scalp-correlation";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import { resolvePaperMomentumSettings } from "@/lib/trading/paper-scalp-momentum";
 import { preparePaperRun } from "@/lib/trading/paper-run-prepared";
@@ -103,7 +104,8 @@ async function executePaperScalpOrchestrator(): Promise<
       partialReason: "deadline_before_klines",
       workspacesSkipped: listResult.data.length,
     });
-    dispatchUnifiedEngineManifest(
+    return finalizePaperTickRun(
+      early,
       buildManifestPayload(early, {
         masterWorkspaceKey,
         masterAccount: null,
@@ -112,9 +114,9 @@ async function executePaperScalpOrchestrator(): Promise<
         momentum: resolvePaperMomentumSettings({}, 70),
         scalpSnapshots: new Map(),
         symbols: [],
+        btcRegimeActive: false,
       }),
     );
-    return early;
   }
 
   const prepared = await preparePaperRun(listResult.data);
@@ -219,6 +221,8 @@ async function executePaperScalpOrchestrator(): Promise<
     });
   }
 
+  const btcRegimeActive = isBtcBearish1h(prepared.scalpSnapshots);
+
   const outcome = buildPartialResult(startTime, {
     scanned,
     updated,
@@ -234,7 +238,8 @@ async function executePaperScalpOrchestrator(): Promise<
     persistQueued,
   });
 
-  dispatchUnifiedEngineManifest(
+  return finalizePaperTickRun(
+    outcome,
     buildManifestPayload(outcome, {
       masterWorkspaceKey,
       masterAccount,
@@ -243,9 +248,24 @@ async function executePaperScalpOrchestrator(): Promise<
       momentum,
       scalpSnapshots: prepared.scalpSnapshots,
       symbols: prepared.symbols,
+      btcRegimeActive,
     }),
   );
+}
 
+async function finalizePaperTickRun(
+  outcome: PaperRunOrchestratorResult,
+  manifest: EngineManifestInput,
+): Promise<PaperRunOrchestratorResult> {
+  try {
+    await dispatchUnifiedEngineManifest(manifest);
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("[paper-scalp-manifest] dispatch failed:", err.message);
+  }
+  console.log(
+    `✅ paper tick ${outcome.partial ? "PARTIAL" : "complete"} in ${outcome.durationMs}ms | scanned=${outcome.scanned} updated=${outcome.updated}`,
+  );
   return outcome;
 }
 
@@ -259,6 +279,7 @@ function buildManifestPayload(
     momentum: EngineManifestInput["momentum"];
     scalpSnapshots: EngineManifestInput["scalpSnapshots"];
     symbols: string[];
+    btcRegimeActive: boolean;
   },
 ): EngineManifestInput {
   return {
@@ -280,6 +301,7 @@ function buildManifestPayload(
     scanned: outcome.scanned,
     updated: outcome.updated,
     persistQueued: outcome.persistQueued ?? 0,
+    btcRegimeActive: ctx.btcRegimeActive,
   };
 }
 
