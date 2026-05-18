@@ -4,6 +4,11 @@
  */
 
 import { formatMicroPrice } from "@/lib/trading/micro-price";
+import {
+  formatNavTelegramBlock,
+  humanPaperScalpReason,
+  type PaperWorkspaceNav,
+} from "@/lib/trading/paper-scalp-nav";
 
 const SKIP_THROTTLE_MS = 90_000;
 const lastSkipSentAt = new Map<string, number>();
@@ -79,19 +84,20 @@ export function notifyPaperScalpBuy(params: {
   ema9: number;
   ema21: number;
   atr14: number;
+  nav?: PaperWorkspaceNav;
 }): void {
-  const { symbol, entryPrice, positionSizeUsd, stopLoss, takeProfit, ema9, ema21, atr14 } =
+  const { symbol, entryPrice, positionSizeUsd, stopLoss, takeProfit, ema9, ema21, atr14, nav } =
     params;
-  sendTelegramNotification(
-    [
-      `🚀 *[paper-scalp] BUY SIGNAL | ${symbol}*`,
-      `• Entry Price: ${fmtUsd(entryPrice, entryPrice >= 1 ? 4 : 6)}`,
-      `• Size Allocated: ${fmtUsd(positionSizeUsd)}`,
-      `• ATR Stop Loss: ${fmtUsd(stopLoss, stopLoss >= 1 ? 4 : 6)}`,
-      `• Target TP: ${fmtUsd(takeProfit, takeProfit >= 1 ? 4 : 6)}`,
-      `• Indicators: EMA9: ${fmtNum(ema9)} | EMA21: ${fmtNum(ema21)} | ATR: ${fmtNum(atr14, 8)}`,
-    ].join("\n"),
-  );
+  const lines = [
+    `🚀 *[paper-scalp] BUY SIGNAL | ${symbol}*`,
+    `• Entry Price: ${fmtUsd(entryPrice, entryPrice >= 1 ? 4 : 6)}`,
+    `• Size Allocated: ${fmtUsd(positionSizeUsd)}`,
+    `• ATR Stop Loss: ${fmtUsd(stopLoss, stopLoss >= 1 ? 4 : 6)}`,
+    `• Target TP: ${fmtUsd(takeProfit, takeProfit >= 1 ? 4 : 6)}`,
+    `• Indicators: EMA9: ${fmtNum(ema9)} | EMA21: ${fmtNum(ema21)} | ATR: ${fmtNum(atr14, 8)}`,
+  ];
+  if (nav) lines.push(formatNavTelegramBlock(nav));
+  sendTelegramNotification(lines.join("\n"));
 }
 
 export function notifyPaperScalpExit(params: {
@@ -101,11 +107,13 @@ export function notifyPaperScalpExit(params: {
   performancePct: number;
   entryPrice?: number;
   pnlUsd?: number;
+  nav?: PaperWorkspaceNav;
 }): void {
-  const { symbol, reason, exitPrice, performancePct, entryPrice, pnlUsd } = params;
+  const { symbol, reason, exitPrice, performancePct, entryPrice, pnlUsd, nav } = params;
   const lines = [
     `🔒 *[paper-scalp] POSITION CLOSED | ${symbol}*`,
     `• Reason: \`${reason}\``,
+    `• Why: ${humanPaperScalpReason(`closed:${symbol}:${reason}`)}`,
     `• Exit Price: ${fmtUsd(exitPrice, exitPrice >= 1 ? 4 : 6)}`,
     `• Performance: ${performancePct >= 0 ? "+" : ""}${fmtNum(performancePct, 3)}%`,
   ];
@@ -115,6 +123,7 @@ export function notifyPaperScalpExit(params: {
   if (pnlUsd != null) {
     lines.push(`• PnL: ${pnlUsd >= 0 ? "+" : ""}${fmtUsd(pnlUsd)}`);
   }
+  if (nav) lines.push(formatNavTelegramBlock(nav));
   sendTelegramNotification(lines.join("\n"));
 }
 
@@ -124,6 +133,7 @@ export function notifyPaperScalpDecision(params: {
   symbol?: string;
   details?: Record<string, string | number | boolean | null | undefined>;
   throttleKey?: string;
+  nav?: PaperWorkspaceNav;
 }): void {
   const key = params.throttleKey ?? `${params.kind}:${params.reason}:${params.symbol ?? "all"}`;
   if (
@@ -140,13 +150,27 @@ export function notifyPaperScalpDecision(params: {
         ? `ℹ️ *[paper-scalp] STATUS*`
         : `⏭️ *[paper-scalp] NO TRADE*`;
 
-  const lines = [title, `• Reason: \`${params.reason}\``];
+  const lines = [
+    title,
+    `• Reason: \`${params.reason}\``,
+    `• Why no trade: ${humanPaperScalpReason(params.reason)}`,
+  ];
   if (params.symbol) lines.push(`• Symbol: \`${params.symbol}\``);
+  if (params.nav) lines.push(formatNavTelegramBlock(params.nav));
 
   if (params.details) {
     for (const [k, v] of Object.entries(params.details)) {
       if (v === undefined || v === null) continue;
-      lines.push(`• ${k}: ${typeof v === "number" ? fmtNum(v, 4) : String(v)}`);
+      if (k === "balance") continue;
+      const label =
+        k === "scan"
+          ? "Market scan"
+          : k === "symbolsScanned"
+            ? "Symbols scanned"
+            : k;
+      lines.push(
+        `• ${label}: ${typeof v === "number" && k !== "symbolsScanned" ? fmtNum(v, 4) : String(v)}`,
+      );
     }
   }
 

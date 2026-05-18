@@ -24,6 +24,11 @@ import {
   safePaperScalpRouteTelegram,
 } from "@/lib/trading/paper-scalp-route-telegram";
 import { formatMicroPrice } from "@/lib/trading/micro-price";
+import {
+  alignPaperScalpWallet,
+  paperWalletWasAligned,
+  resolvePaperScalpWalletUsd,
+} from "@/lib/trading/paper-scalp-wallet";
 import type { CoinData } from "@/lib/types";
 
 type TradingAction = "BUY" | "SELL" | "HOLD" | "NO_TRADE";
@@ -88,6 +93,7 @@ function dispatchRouteTelegram(
   summary: string,
   account: ReturnType<typeof normalizeAccount>,
   scalpSnapshots: Map<string, Scalp1mSnapshot>,
+  marketCoins: CoinData[],
 ): void {
   try {
     safePaperScalpRouteTelegram(() => {
@@ -95,6 +101,7 @@ function dispatchRouteTelegram(
         summary,
         account,
         scalpSnapshots,
+        marketCoins,
       });
     });
   } catch (err) {
@@ -219,10 +226,18 @@ export async function GET(request: NextRequest) {
         continue;
       }
 
+      const alignedWallet = alignPaperScalpWallet(hydrated);
+      const walletReset = paperWalletWasAligned(hydrated, alignedWallet);
+      if (walletReset) {
+        console.log(
+          `[paper-scalp] workspace=${workspaceKey} | wallet realigned to $${resolvePaperScalpWalletUsd()} (was $${hydrated.currentBalance.toFixed(2)})`,
+        );
+      }
+
       console.log(`[paper-scalp] workspace=${workspaceKey} | scanning…`);
       logWorkspaceIndicators(workspaceKey, symbols, scalpSnapshots);
 
-      const account = normalizeAccount(hydrated);
+      const account = normalizeAccount(alignedWallet);
       const result = runPaperTradingAutomationTick({
         account,
         marketCoins,
@@ -236,13 +251,19 @@ export async function GET(request: NextRequest) {
         `[paper-scalp] workspace=${workspaceKey} | action=${action} | summary=${result.summary} | changed=${result.changed} | balance=${result.account.currentBalance.toFixed(2)}`,
       );
 
-      dispatchRouteTelegram(result.summary, result.account, scalpSnapshots);
+      dispatchRouteTelegram(
+        result.summary,
+        result.account,
+        scalpSnapshots,
+        marketCoins,
+      );
 
-      if (!result.changed) continue;
+      if (!result.changed && !walletReset) continue;
 
+      const accountToPersist = result.changed ? result.account : account;
       const nextProfiles = snapshot.profiles.map((profile) =>
         profile.id === snapshot.activeId
-          ? { ...profile, payload: serializeAccount(result.account) }
+          ? { ...profile, payload: serializeAccount(accountToPersist) }
           : profile,
       );
 
@@ -260,7 +281,11 @@ export async function GET(request: NextRequest) {
             return;
           }
           updated += 1;
-          actions.push(`${workspaceKey}:${result.summary}`);
+          actions.push(
+            walletReset && !result.changed
+              ? `${workspaceKey}:wallet-reset-$${resolvePaperScalpWalletUsd()}`
+              : `${workspaceKey}:${result.summary}`,
+          );
         }),
       );
     }

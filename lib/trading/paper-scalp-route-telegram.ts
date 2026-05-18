@@ -1,5 +1,6 @@
-import type { DemoAccount } from "@/lib/types";
+import type { CoinData, DemoAccount } from "@/lib/types";
 import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
+import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import {
   formatSnapshotScanLine,
   notifyPaperScalpBuy,
@@ -25,8 +26,10 @@ export function relayPaperScalpTickTelegram(params: {
   summary: string;
   account: DemoAccount;
   scalpSnapshots: Map<string, Scalp1mSnapshot>;
+  marketCoins?: CoinData[];
 }): void {
-  const { summary, account, scalpSnapshots } = params;
+  const { summary, account, scalpSnapshots, marketCoins = [] } = params;
+  const nav = computePaperWorkspaceNav(account, marketCoins);
 
   if (summary.startsWith("opened:")) {
     const trade = account.openPositions[0];
@@ -42,6 +45,7 @@ export function relayPaperScalpTickTelegram(params: {
       ema9: snap?.ema9 ?? 0,
       ema21: snap?.ema21 ?? 0,
       atr14: snap?.atr14 ?? 0,
+      nav,
     });
     return;
   }
@@ -59,6 +63,7 @@ export function relayPaperScalpTickTelegram(params: {
       performancePct: trade.pnlPercent ?? 0,
       entryPrice: trade.entryPrice,
       pnlUsd: trade.pnl,
+      nav,
     });
     return;
   }
@@ -70,7 +75,7 @@ export function relayPaperScalpTickTelegram(params: {
     const snap = scalpSnapshots.get(sym);
     notifyPaperScalpDecision({
       kind: "hold",
-      reason: "holding-open-position",
+      reason: "holding-position",
       symbol: sym,
       details: {
         entryPrice: open.entryPrice,
@@ -82,6 +87,7 @@ export function relayPaperScalpTickTelegram(params: {
         bearishCross: snap?.bearishCross ?? false,
       },
       throttleKey: `hold:${sym}`,
+      nav,
     });
     return;
   }
@@ -94,11 +100,11 @@ export function relayPaperScalpTickTelegram(params: {
       kind: "skip",
       reason: summary,
       details: {
-        balance: account.currentBalance,
         symbolsScanned: scalpSnapshots.size,
         scan: scanLines.join(" · ") || "no snapshots",
       },
       throttleKey: "no-ema-bullish-cross",
+      nav,
     });
     return;
   }
@@ -107,8 +113,11 @@ export function relayPaperScalpTickTelegram(params: {
     notifyPaperScalpDecision({
       kind: "skip",
       reason: summary,
-      details: { balance: account.currentBalance },
+      details: {
+        requiredNotional: Number((account.currentBalance * 0.2).toFixed(2)),
+      },
       throttleKey: "insufficient-balance",
+      nav,
     });
     return;
   }
@@ -117,11 +126,9 @@ export function relayPaperScalpTickTelegram(params: {
     notifyPaperScalpDecision({
       kind: "skip",
       reason: summary,
-      details: {
-        balance: account.currentBalance,
-        hint: "klines fetch failed or symbols empty",
-      },
+      details: { hint: "klines fetch failed or symbols empty" },
       throttleKey: "no-1m-snapshots",
+      nav,
     });
     return;
   }
@@ -129,7 +136,13 @@ export function relayPaperScalpTickTelegram(params: {
   notifyPaperScalpDecision({
     kind: "skip",
     reason: summary,
-    details: { balance: account.currentBalance },
+    details:
+      summary === "circuit-breaker"
+        ? { dailyPnl: account.dailyPnl ?? 0 }
+        : summary === "max-open-positions"
+          ? { openCount: account.openPositions.length }
+          : undefined,
     throttleKey: summary,
+    nav,
   });
 }
