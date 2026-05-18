@@ -98,7 +98,7 @@ export function relayPaperScalpTickTelegram(params: {
     return;
   }
 
-  if (summary === "no-ema-bullish-cross") {
+  if (summary === "no-signal" || summary === "no-ema-bullish-cross") {
     const scanLines = [...scalpSnapshots.values()].map((s) =>
       formatSnapshotScanLine(normSymbol(s.symbol), s),
     );

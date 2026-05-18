@@ -1,41 +1,34 @@
-import {
-  hydrateAccount,
-  normalizeAccount,
-  serializeAccount,
-} from "@/lib/demo-account";
-import { mockCoins } from "@/lib/mock-data";
+import { serializeAccount } from "@/lib/demo-account";
 import { runPaperTradingAutomationTick } from "@/lib/paper-trading-automation";
 import {
   listDemoWorkspacesFromSupabase,
   saveDemoWorkspaceForOwner,
-  type DemoWorkspaceListResult,
+  type DemoWorkspaceRecord,
 } from "@/lib/supabase-demo";
-import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
-import {
-  buildMockScalpSnapshots,
-  loadPaperScalpSnapshotsResilient,
-  resolvePaperScalpSymbols,
-} from "@/lib/trading/paper-scalp-klines";
-import { buildPaperScalpMarketCoins } from "@/lib/trading/paper-scalp-market";
-import { extractPaperWatchSymbolsFromWorkspaces } from "@/lib/trading/paper-scalp-settings";
+import { logPaperMarketScan, logPaperWorkspaceResult } from "@/lib/trading/paper-scalp-active-log";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import {
-  relayPaperScalpTickTelegram,
-  safePaperScalpRouteTelegram,
-} from "@/lib/trading/paper-scalp-route-telegram";
-import { formatMicroPrice } from "@/lib/trading/micro-price";
+  resolvePaperMomentumSettings,
+} from "@/lib/trading/paper-scalp-momentum";
+import { preparePaperRun } from "@/lib/trading/paper-run-prepared";
+import {
+  isPaperRunBudgetExceeded,
+  PAPER_RUN_BUDGET_MS,
+  remainingPaperRunBudgetMs,
+} from "@/lib/trading/paper-run-budget";
 import {
   alignPaperScalpWallet,
   paperWalletWasAligned,
   resolvePaperScalpWalletUsd,
 } from "@/lib/trading/paper-scalp-wallet";
 import {
+  relayPaperScalpTickTelegram,
+  safePaperScalpRouteTelegram,
+} from "@/lib/trading/paper-scalp-route-telegram";
+import {
   writeServerLogAsync,
   writeServerLogFromError,
 } from "@/lib/server-logs";
-import type { CoinData, DemoAccount } from "@/lib/types";
-
-type TradingAction = "BUY" | "SELL" | "HOLD" | "NO_TRADE";
 
 export type PaperRunOrchestratorResult = {
   ok: true;
@@ -48,83 +41,43 @@ export type PaperRunOrchestratorResult = {
   marketSource: "1h-snapshots" | "mock-fallback" | "mixed";
   ranAt: string;
   durationMs: number;
+  partial?: boolean;
+  partialReason?: string;
+  workspacesSkipped?: number;
 };
 
-function resolveTradingAction(summary: string): TradingAction {
+function resolveTradingAction(summary: string): string {
   if (summary.startsWith("opened:")) return "BUY";
   if (summary.startsWith("closed:")) return "SELL";
   if (summary === "holding-position") return "HOLD";
   return "NO_TRADE";
 }
 
-function normSymbol(symbol: string): string {
-  const s = symbol.toUpperCase().replace(/\//g, "");
-  return s.endsWith("USDT") ? s : `${s}USDT`;
-}
-
-function logWorkspaceIndicators(
-  workspaceKey: string,
-  symbols: string[],
-  snapshots: Map<string, Scalp1mSnapshot>,
-): void {
-  for (const raw of symbols) {
-    const sym = normSymbol(raw);
-    const snap = snapshots.get(sym);
-    if (!snap) {
-      console.log(
-        `[paper-scalp] workspace=${workspaceKey} | ${sym} | indicators=unavailable`,
-      );
-      continue;
-    }
-    const cross = snap.bullishCross
-      ? "bullish"
-      : snap.bearishCross
-        ? "bearish"
-        : "none";
-    console.log(
-      `[paper-scalp] workspace=${workspaceKey} | ${sym} | close=${formatMicroPrice(snap.close)} | EMA9=${formatMicroPrice(snap.ema9)} | EMA21=${formatMicroPrice(snap.ema21)} | RSI14=${snap.rsi14.toFixed(1)} | ATR14=${formatMicroPrice(snap.atr14)} | cross=${cross}`,
-    );
-  }
-}
-
 function dispatchRouteTelegram(
   summary: string,
-  account: DemoAccount,
-  scalpSnapshots: Map<string, Scalp1mSnapshot>,
-  marketCoins: CoinData[],
+  account: Parameters<typeof relayPaperScalpTickTelegram>[0]["account"],
+  scalpSnapshots: Parameters<typeof relayPaperScalpTickTelegram>[0]["scalpSnapshots"],
+  marketCoins: Parameters<typeof relayPaperScalpTickTelegram>[0]["marketCoins"],
 ): void {
   try {
     safePaperScalpRouteTelegram(() => {
-      relayPaperScalpTickTelegram({
-        summary,
-        account,
-        scalpSnapshots,
-        marketCoins,
-      });
+      relayPaperScalpTickTelegram({ summary, account, scalpSnapshots, marketCoins });
     });
   } catch (err) {
-    console.error("[TELEGRAM-ROUTE-ERROR]", err);
     writeServerLogFromError("paper-scalp-telegram", err, { summary });
   }
 }
 
-async function fetchDemoWorkspacesSafe(): Promise<DemoWorkspaceListResult> {
+async function fetchDemoWorkspacesSafe() {
   try {
-    console.log("[paper-scalp] Supabase workspace fetch starting…", {
-      urlConfigured: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
-      serviceRoleConfigured: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
-    });
     return await listDemoWorkspacesFromSupabase();
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
-    console.error("❌ [SUPABASE-WORKSPACE-EXCEPTION]:", err.message);
-    writeServerLogFromError("paper-scalp-route", err, {
-      phase: "supabase_workspaces",
-    });
+    writeServerLogFromError("paper-scalp-route", err, { phase: "supabase_workspaces" });
     return {
-      ok: false,
-      data: [],
-      error: err.message || "Supabase workspace fetch threw",
+      ok: false as const,
+      data: [] as DemoWorkspaceRecord[],
+      error: err.message,
     };
   }
 }
@@ -138,127 +91,106 @@ export async function runPaperScalpOrchestrator(): Promise<
 
   const listResult = await fetchDemoWorkspacesSafe();
   if (!listResult.ok) {
-    console.error("[paper-scalp] workspace list failed:", listResult.error);
-    writeServerLogAsync({
-      level: "error",
-      source: "paper-scalp-route",
-      message: "workspace_list_failed",
-      meta: { detail: listResult.error },
-    });
     return {
       ok: false,
       status: 503,
-      body: {
-        error: listResult.error ?? "Unable to load demo workspaces",
-        phase: "supabase_workspaces",
-      },
+      body: { error: listResult.error ?? "Unable to load demo workspaces" },
     };
   }
 
   console.log(
-    `[paper-scalp] Supabase OK — loaded ${listResult.data.length} workspace(s)`,
+    `[paper-scalp] Supabase OK — loaded ${listResult.data.length} workspace(s) | budget=${PAPER_RUN_BUDGET_MS}ms`,
   );
 
-  const openSymbols = listResult.data.flatMap((ws) => {
-    const snap = ws.snapshot;
-    const active = snap.profiles.find((p) => p.id === snap.activeId);
-    const account = active?.payload ? hydrateAccount(active.payload) : null;
-    return (account?.openPositions ?? []).map((t) => t.symbol);
-  });
-
-  const workspaceSymbols = extractPaperWatchSymbolsFromWorkspaces(listResult.data);
-  console.log(
-    `[paper-scalp] workspace watch symbols (${workspaceSymbols.length}): ${workspaceSymbols.join(", ")}`,
-  );
-  const symbols = resolvePaperScalpSymbols(openSymbols, workspaceSymbols);
-  let snapshotSource: "binance" | "mock" = "mock";
-  let scalpSnapshots: Map<string, Scalp1mSnapshot>;
-
-  try {
-    const loaded = await loadPaperScalpSnapshotsResilient(symbols, mockCoins);
-    scalpSnapshots = loaded.snapshots;
-    snapshotSource = loaded.source;
-  } catch (error) {
-    const err = error instanceof Error ? error : new Error(String(error));
-    console.error("[BINANCE-FETCH-BLOCKED]:", err.message);
-    writeServerLogFromError("paper-scalp-route", err, {
-      phase: "binance_klines",
-      symbols,
+  if (isPaperRunBudgetExceeded(startTime)) {
+    return buildPartialResult(startTime, {
+      scanned: 0,
+      updated: 0,
+      actions: ["budget_exceeded:pre_prepare"],
+      symbols: [],
+      snapshotsLoaded: 0,
+      snapshotSource: "mock",
+      marketSource: "mock-fallback",
+      partialReason: "deadline_before_klines",
+      workspacesSkipped: listResult.data.length,
     });
-    scalpSnapshots = buildMockScalpSnapshots(symbols, mockCoins);
-    snapshotSource = "mock";
   }
 
-  const { coins: marketCoins, marketSource } = buildPaperScalpMarketCoins(
-    scalpSnapshots,
-    { fallback: mockCoins, requiredSymbols: [...symbols, ...openSymbols] },
+  const prepared = await preparePaperRun(listResult.data);
+  const sampleSettings = listResult.data[0]?.snapshot.paperSettings;
+  const momentum = resolvePaperMomentumSettings(
+    sampleSettings ?? {},
+    Number(process.env.PAPER_RSI_MAX_BUY ?? 70),
   );
 
+  logPaperMarketScan(prepared.symbols, prepared.scalpSnapshots, momentum);
+
   console.log(
-    `[${timestamp}] [paper-scalp] interval=1h snapshots=${scalpSnapshots.size} source=${snapshotSource} marks=${marketSource} symbols=[${symbols.join(", ")}]`,
+    `[${timestamp}] [paper-scalp] snapshots=${prepared.scalpSnapshots.size} source=${prepared.snapshotSource} marks=${prepared.marketSource} | remaining=${remainingPaperRunBudgetMs(startTime).toFixed(0)}ms`,
   );
 
   let scanned = 0;
   let updated = 0;
+  let workspacesSkipped = 0;
   const actions: string[] = [];
   const pendingSaves: Promise<void>[] = [];
+  let partial = false;
+  let partialReason: string | undefined;
 
   for (const workspace of listResult.data) {
+    if (isPaperRunBudgetExceeded(startTime)) {
+      partial = true;
+      partialReason = "execution_budget_9s";
+      workspacesSkipped = listResult.data.length - scanned;
+      console.warn(
+        `[paper-scalp] ${PAPER_RUN_BUDGET_MS}ms budget hit — partial return (${workspacesSkipped} workspace(s) skipped)`,
+      );
+      break;
+    }
+
     scanned += 1;
-    const workspaceKey = `${workspace.ownerType}:${workspace.ownerId}`;
+    const key = `${workspace.ownerType}:${workspace.ownerId}`;
     const snapshot = workspace.snapshot;
 
     if (!snapshot.demoAutoPilot || snapshot.walletMode === "real") {
-      console.log(
-        `[paper-scalp] workspace=${workspaceKey} | skipped (autopilot off or real wallet)`,
-      );
       continue;
     }
 
-    const activeProfile = snapshot.profiles.find(
-      (profile) => profile.id === snapshot.activeId,
-    );
-    if (!activeProfile) continue;
+    const cached = prepared.accountByKey.get(key);
+    if (!cached) continue;
 
-    const hydrated = hydrateAccount(activeProfile.payload);
-    if (!hydrated) continue;
+    const alignedWallet = alignPaperScalpWallet(cached.account);
+    const walletReset = paperWalletWasAligned(cached.account, alignedWallet);
 
-    const alignedWallet = alignPaperScalpWallet(hydrated);
-    const walletReset = paperWalletWasAligned(hydrated, alignedWallet);
-    if (walletReset) {
-      console.log(
-        `[paper-scalp] workspace=${workspaceKey} | wallet realigned to $${resolvePaperScalpWalletUsd()}`,
-      );
-    }
-
-    logWorkspaceIndicators(workspaceKey, symbols, scalpSnapshots);
-
-    const account = normalizeAccount(alignedWallet);
     const result = runPaperTradingAutomationTick({
-      account,
-      marketCoins,
-      scalpSnapshots,
-      autoPilotMode: snapshot.autoPilotMode,
-      copyProfile: snapshot.copyProfile,
-      paperSettings: snapshot.paperSettings,
+      account: alignedWallet,
+      marketCoins: prepared.marketCoins,
+      scalpSnapshots: prepared.scalpSnapshots,
+      autoPilotMode: cached.autoPilotMode,
+      copyProfile: cached.copyProfile,
+      paperSettings: cached.paperSettings,
     });
 
-    const nav = computePaperWorkspaceNav(result.account, marketCoins);
+    const nav = computePaperWorkspaceNav(result.account, prepared.marketCoins);
     const action = resolveTradingAction(result.summary);
-    console.log(
-      `[paper-scalp] workspace=${workspaceKey} | action=${action} | summary=${result.summary} | NAV=$${nav.portfolio_nav_usdt.toFixed(2)} | cash=$${nav.available_usdt.toFixed(2)}`,
-    );
+    logPaperWorkspaceResult({
+      workspaceKey: key,
+      action,
+      summary: result.summary,
+      navUsdt: nav.portfolio_nav_usdt,
+      cashUsdt: nav.available_usdt,
+    });
 
     dispatchRouteTelegram(
       result.summary,
       result.account,
-      scalpSnapshots,
-      marketCoins,
+      prepared.scalpSnapshots,
+      prepared.marketCoins,
     );
 
     if (!result.changed && !walletReset) continue;
 
-    const accountToPersist = result.changed ? result.account : account;
+    const accountToPersist = result.changed ? result.account : alignedWallet;
     const nextProfiles = snapshot.profiles.map((profile) =>
       profile.id === snapshot.activeId
         ? { ...profile, payload: serializeAccount(accountToPersist) }
@@ -271,20 +203,14 @@ export async function runPaperScalpOrchestrator(): Promise<
         profiles: nextProfiles,
       }).then((saveResult) => {
         if (!saveResult.ok) {
-          actions.push(`save-failed:${workspaceKey}`);
-          writeServerLogAsync({
-            level: "error",
-            source: "paper-scalp-route",
-            message: "workspace_save_failed",
-            meta: { workspaceKey, detail: saveResult.error },
-          });
+          actions.push(`save-failed:${key}`);
           return;
         }
         updated += 1;
         actions.push(
           walletReset && !result.changed
-            ? `${workspaceKey}:wallet-reset-$${resolvePaperScalpWalletUsd()}`
-            : `${workspaceKey}:${result.summary}`,
+            ? `${key}:wallet-reset-$${resolvePaperScalpWalletUsd()}`
+            : `${key}:${result.summary}`,
         );
       }),
     );
@@ -292,21 +218,32 @@ export async function runPaperScalpOrchestrator(): Promise<
 
   await Promise.all(pendingSaves);
 
-  const durationMs = Number((performance.now() - startTime).toFixed(2));
-  console.log(
-    `[${timestamp}] ✅ 1h tick completed in ${durationMs}ms | scanned=${scanned} updated=${updated}`,
-  );
-
-  return {
-    ok: true,
+  return buildPartialResult(startTime, {
     scanned,
     updated,
     actions,
-    symbols,
-    snapshotsLoaded: scalpSnapshots.size,
-    snapshotSource,
-    marketSource,
+    symbols: prepared.symbols,
+    snapshotsLoaded: prepared.scalpSnapshots.size,
+    snapshotSource: prepared.snapshotSource,
+    marketSource: prepared.marketSource,
+    partial,
+    partialReason,
+    workspacesSkipped: partial ? workspacesSkipped : 0,
+  });
+}
+
+function buildPartialResult(
+  startTime: number,
+  fields: Omit<PaperRunOrchestratorResult, "ok" | "ranAt" | "durationMs">,
+): PaperRunOrchestratorResult {
+  const durationMs = Number((performance.now() - startTime).toFixed(2));
+  console.log(
+    `✅ paper tick ${fields.partial ? "PARTIAL" : "complete"} in ${durationMs}ms | scanned=${fields.scanned} updated=${fields.updated}`,
+  );
+  return {
+    ok: true,
     ranAt: new Date().toISOString(),
     durationMs,
+    ...fields,
   };
 }

@@ -25,6 +25,10 @@ export type PaperScalpWorkspaceSettings = {
   riskPerTradePercent: number;
   symbols: string[];
   maxOpenPositions: number;
+  /** Max RSI for trend-resumption entries (neutral/cool). */
+  rsiBuyThreshold: number;
+  /** Panic RSI — dip buy even if EMA9 below EMA21. */
+  rsiOversoldPanic: number;
 };
 
 function normalizeSymbolList(raw: unknown): string[] {
@@ -53,10 +57,21 @@ export function resolvePaperScalpWorkspaceSettings(
     Math.max(1, Math.floor(readNumber(raw?.maxOpenPositions, DEFAULT_MAX_OPEN_POSITIONS))),
   );
   const symbols = normalizeSymbolList(raw?.symbols);
+  const rawMap = raw as Record<string, unknown> | undefined;
+  const rsiBuyThreshold = readNumber(
+    rawMap?.rsiBuyThreshold ?? rawMap?.rsi_buy_threshold,
+    55,
+  );
+  const rsiOversoldPanic = readNumber(
+    rawMap?.rsiOversoldPanic ?? rawMap?.rsi_oversold_panic,
+    30,
+  );
   return {
     riskPerTradePercent: Math.min(riskPerTradePercent, 50),
     symbols: symbols.length > 0 ? symbols : [...DEFAULT_PAPER_WATCH_SYMBOLS],
     maxOpenPositions,
+    rsiBuyThreshold: Math.min(rsiBuyThreshold, 85),
+    rsiOversoldPanic: Math.min(rsiOversoldPanic, 45),
   };
 }
 

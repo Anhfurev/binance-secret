@@ -2,12 +2,16 @@ import {
   computeAtrStops,
   type Scalp1mSnapshot,
 } from "@/lib/trading/paper-scalp-indicators";
+import { logPaperScalpActiveLine } from "@/lib/trading/paper-scalp-active-log";
 import { maybeResetPaperDailyPnl } from "@/lib/trading/paper-scalp-daily";
 import { formatMicroPrice } from "@/lib/trading/micro-price";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
+import { evaluateOpenPaperPosition } from "@/lib/trading/paper-scalp-positions";
 import {
-  evaluateOpenPaperPosition,
-} from "@/lib/trading/paper-scalp-positions";
+  rankMomentumCandidates,
+  resolvePaperMomentumSettings,
+  type PaperMomentumBuyReason,
+} from "@/lib/trading/paper-scalp-momentum";
 import {
   computePaperPositionSizeUsdt,
   PAPER_MIN_NOTIONAL_USDT,
@@ -20,18 +24,12 @@ export type { PaperAutomationTickResult };
 
 const ATR_STOP_MULT = 1.5;
 const ATR_TP_MULT = 3;
-const DEFAULT_RSI_MAX_BUY = 70;
 
 function resolveRsiMaxBuy(): number {
   const raw = String(process.env.PAPER_RSI_MAX_BUY ?? "").trim();
-  const n = raw ? Number(raw) : DEFAULT_RSI_MAX_BUY;
-  if (!Number.isFinite(n) || n <= 50) return DEFAULT_RSI_MAX_BUY;
+  const n = raw ? Number(raw) : 70;
+  if (!Number.isFinite(n) || n <= 50) return 70;
   return Math.min(n, 90);
-}
-
-function logScalp(message: string, payload?: Record<string, unknown>) {
-  if (payload) console.log(`[paper-scalp] ${message}`, payload);
-  else console.log(`[paper-scalp] ${message}`);
 }
 
 function normalizeSymbol(symbol: string): string {
@@ -77,15 +75,11 @@ export function runPaperScalp1hTick(params: {
 
   if (account.openPositions.length > 0) {
     const sym = normalizeSymbol(account.openPositions[0].symbol);
-    const snap = snapshots.get(sym);
-    const mark = livePrice(
-      sym,
-      marketCoins,
-      snap?.close ?? account.openPositions[0].entryPrice,
-    );
-    logScalp(`HOLD ${account.openPositions.length} open leg(s)`, {
-      symbols: account.openPositions.map((p) => p.symbol),
-      mark,
+    logPaperScalpActiveLine({
+      symbol: sym,
+      action: "HOLD",
+      reason: "managing_open",
+      snap: snapshots.get(sym),
     });
     return {
       account,
@@ -94,15 +88,14 @@ export function runPaperScalp1hTick(params: {
     };
   }
 
-  const maxOpen = paperSettings.maxOpenPositions;
-  if (account.openPositions.length >= maxOpen) {
-    logScalp("SKIP — max open positions", {
-      open: account.openPositions.length,
-      maxOpen,
-    });
+  if (account.openPositions.length >= paperSettings.maxOpenPositions) {
     return { account, changed: false, summary: "max-open-positions-reached" };
   }
 
+  const momentum = resolvePaperMomentumSettings(
+    paperSettings,
+    resolveRsiMaxBuy(),
+  );
   const held = new Set(
     account.openPositions.map((p) => normalizeSymbol(p.symbol)),
   );
@@ -110,30 +103,30 @@ export function runPaperScalp1hTick(params: {
     paperSettings.symbols.map((s) => normalizeSymbol(s)),
   );
 
-  const candidates = [...snapshots.values()]
-    .filter(
-      (s) =>
-        watch.has(normalizeSymbol(s.symbol)) &&
-        !held.has(normalizeSymbol(s.symbol)) &&
-        s.bullishCross,
-    )
-    .sort((a, b) => b.ema9 - b.ema21 - (a.ema9 - a.ema21));
+  const pool = [...snapshots.values()].filter(
+    (s) =>
+      watch.has(normalizeSymbol(s.symbol)) &&
+      !held.has(normalizeSymbol(s.symbol)),
+  );
 
-  const entrySnap = candidates[0];
-  if (!entrySnap) {
-    return { account, changed: false, summary: "no-ema-bullish-cross" };
+  const ranked = rankMomentumCandidates(pool, momentum);
+  const pick = ranked[0];
+
+  if (!pick) {
+    return { account, changed: false, summary: "no-signal" };
   }
 
-  const rsiMax = resolveRsiMaxBuy();
-  if (entrySnap.rsi14 > rsiMax) {
-    logScalp(`SKIP ${entrySnap.symbol} — RSI overbought`, {
-      rsi14: entrySnap.rsi14,
-      rsiMax,
-    });
-    return { account, changed: false, summary: "rsi-overbought" };
-  }
-
+  const entrySnap = pick.snap;
+  const buyReason = pick.evaluation.reason as PaperMomentumBuyReason;
   const sym = normalizeSymbol(entrySnap.symbol);
+
+  logPaperScalpActiveLine({
+    symbol: sym,
+    action: "BUY",
+    reason: buyReason,
+    snap: entrySnap,
+  });
+
   const entryPrice = livePrice(sym, marketCoins, entrySnap.close);
   const nav = computePaperWorkspaceNav(account, marketCoins);
   const freeBalanceUsdt = nav.available_usdt;
@@ -143,16 +136,6 @@ export function runPaperScalp1hTick(params: {
   );
 
   if (freeBalanceUsdt < positionSizeUsdt) {
-    logScalp("SKIP — insufficient free margin for min notional floor", {
-      freeBalanceUsdt,
-      positionSizeUsdt,
-      floor: PAPER_MIN_NOTIONAL_USDT,
-      riskPct: paperSettings.riskPerTradePercent,
-    });
-    return { account, changed: false, summary: "insufficient-free-margin-floor" };
-  }
-
-  if (positionSizeUsdt > freeBalanceUsdt) {
     return { account, changed: false, summary: "insufficient-free-margin-floor" };
   }
 
@@ -163,29 +146,17 @@ export function runPaperScalp1hTick(params: {
   );
   const amount = Number((positionSizeUsdt / entryPrice).toFixed(6));
 
-  logScalp(`BUY SIGNAL ${sym} | 1h EMA9 crossed above EMA21`, {
+  console.log(`[paper-scalp] BUY ${sym} | ${buyReason}`, {
     entryPrice: formatMicroPrice(entryPrice),
-    ema9: formatMicroPrice(entrySnap.ema9),
-    ema21: formatMicroPrice(entrySnap.ema21),
     rsi14: entrySnap.rsi14.toFixed(2),
-    atr14: formatMicroPrice(entrySnap.atr14),
-    nav: nav.portfolio_nav_usdt,
-    freeBalanceUsdt,
     positionSizeUsdt,
-    riskPerTradePercent: paperSettings.riskPerTradePercent,
-    minNotionalFloor: PAPER_MIN_NOTIONAL_USDT,
-    stopLoss,
-    takeProfit,
-    atrStopDistance: Number((entrySnap.atr14 * ATR_STOP_MULT).toFixed(8)),
-    atrTpDistance: Number((entrySnap.atr14 * ATR_TP_MULT).toFixed(8)),
+    nav: nav.portfolio_nav_usdt,
     riskRewardRatio: riskUsd > 0 ? Number((rewardUsd / riskUsd).toFixed(2)) : 2,
-    openSlots: `${account.openPositions.length}/${maxOpen}`,
-    contracts: amount,
   });
 
   const trade: DemoTrade = {
     id: `scalp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    signalId: `ema-cross-${sym}`,
+    signalId: `momentum-${buyReason}-${sym}`,
     coinId: sym.replace(/USDT$/, "").toLowerCase(),
     symbol: sym,
     type: "buy",
@@ -198,12 +169,12 @@ export function runPaperScalp1hTick(params: {
     takeProfit,
     trailingStopPct: undefined,
     followedSignal: false,
-    notes: "1h EMA9/21 + RSI14 momentum",
-    tags: ["paper-scalp", "ema-cross", sym],
+    notes: `1h momentum ${buyReason}`,
+    tags: ["paper-scalp", buyReason, sym],
     executionNotes: [
       `ATR14=${entrySnap.atr14.toFixed(8)}`,
       `SL=1.5×ATR TP=3×ATR`,
-      `size=$${positionSizeUsdt} risk=${paperSettings.riskPerTradePercent}%`,
+      `size=$${positionSizeUsdt}`,
     ],
   };
 
@@ -214,9 +185,8 @@ export function runPaperScalp1hTick(params: {
       openPositions: [...account.openPositions, trade],
     },
     changed: true,
-    summary: `opened:${sym}:ema-cross`,
+    summary: `opened:${sym}:${buyReason}`,
   };
 }
 
-/** @deprecated Alias — use runPaperScalp1hTick */
 export const runPaperScalp1mTick = runPaperScalp1hTick;

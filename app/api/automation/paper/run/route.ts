@@ -63,7 +63,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(outcome.body, { status: outcome.status });
     }
     heartbeatCompleted = true;
-    return NextResponse.json(outcome);
+    return NextResponse.json({
+      ...outcome,
+      partial: outcome.partial ?? false,
+    });
   } catch (error: unknown) {
     logFatalRouteException(error);
     const message = error instanceof Error ? error.message : String(error);

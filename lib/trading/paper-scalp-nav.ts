@@ -73,8 +73,10 @@ export function humanPaperScalpReason(summary: string): string {
   const fixed: Record<string, string> = {
     "circuit-breaker":
       "Daily loss limit hit — circuit breaker blocks new entries",
+    "no-signal":
+      "No momentum entry — neither trend resumption nor oversold bounce",
     "no-ema-bullish-cross":
-      "No 1h EMA9/21 bullish cross on watched symbols",
+      "No momentum entry on watched symbols (legacy)",
     "rsi-overbought":
       "RSI above overbought threshold — skip chasing extended move",
     "holding-position": "Managing open 1h position (ATR stop / TP / EMA exit)",
