@@ -5,7 +5,7 @@ import {
   type DemoWorkspaceRecord,
 } from "@/lib/supabase-demo";
 import {
-  dispatchUnifiedEngineManifest,
+  scheduleUnifiedEngineManifestDispatch,
   type EngineManifestInput,
   type WorkspaceTickRow,
 } from "@/lib/trading/paper-scalp-engine-manifest";
@@ -253,16 +253,12 @@ async function executePaperScalpOrchestrator(): Promise<
   );
 }
 
-async function finalizePaperTickRun(
+/** Sync return — manifest logged now; Telegram flushed on nextTick (non-blocking). */
+function finalizePaperTickRun(
   outcome: PaperRunOrchestratorResult,
   manifest: EngineManifestInput,
-): Promise<PaperRunOrchestratorResult> {
-  try {
-    await dispatchUnifiedEngineManifest(manifest);
-  } catch (error) {
-    const err = error instanceof Error ? error : new Error(String(error));
-    console.error("[paper-scalp-manifest] dispatch failed:", err.message);
-  }
+): PaperRunOrchestratorResult {
+  scheduleUnifiedEngineManifestDispatch(manifest);
   console.log(
     `✅ paper tick ${outcome.partial ? "PARTIAL" : "complete"} in ${outcome.durationMs}ms | scanned=${outcome.scanned} updated=${outcome.updated}`,
   );

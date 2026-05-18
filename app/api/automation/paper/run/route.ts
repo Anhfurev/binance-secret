@@ -1,12 +1,13 @@
 export const dynamic = "force-dynamic";
 
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 import {
   readPaperHeartbeatState,
   releasePaperHeartbeatSuccess,
   releasePaperHeartbeatWithoutComplete,
   tryAcquirePaperHeartbeat,
 } from "@/lib/trading/paper-heartbeat-lock";
+import { flushPendingManifestTelegram } from "@/lib/trading/paper-scalp-engine-manifest";
 import { runPaperScalpOrchestrator } from "@/lib/trading/paper-run-orchestrator";
 import {
   writeServerLogAsync,
@@ -63,12 +64,16 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(outcome.body, { status: outcome.status });
     }
     heartbeatCompleted = true;
-    return NextResponse.json({
+    const body = {
       ...outcome,
       partial: outcome.partial ?? false,
       persistAsync: outcome.persistAsync ?? false,
       persistQueued: outcome.persistQueued ?? 0,
+    };
+    after(() => {
+      void flushPendingManifestTelegram();
     });
+    return NextResponse.json(body);
   } catch (error: unknown) {
     logFatalRouteException(error);
     const message = error instanceof Error ? error.message : String(error);

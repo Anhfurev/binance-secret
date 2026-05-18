@@ -245,13 +245,54 @@ export function buildUnifiedEngineManifest(input: EngineManifestInput): string {
   return lines.join("\n").slice(0, 4090);
 }
 
-/** Always builds + logs + sends dashboard (never skips on HOLD/BLOCKED). */
+/** Sync compile + PM2 log — safe on the HTTP hot path. */
+export function compileUnifiedEngineManifest(input: EngineManifestInput): string {
+  console.log("[paper-scalp-manifest] dispatch start");
+  const text = buildUnifiedEngineManifest(input);
+  console.log("[paper-scalp-manifest] dashboard compiled");
+  console.log(`[paper-scalp-manifest]\n${text}`);
+  return text;
+}
+
+let pendingManifestTelegram: Promise<void> | null = null;
+
+function shipManifestTelegramDetached(text: string): Promise<void> {
+  return sendTelegramNotificationAsync(text)
+    .then(() => {
+      console.log("[paper-scalp-manifest] telegram dispatch settled");
+    })
+    .catch((error: unknown) => {
+      const err = error instanceof Error ? error : new Error(String(error));
+      console.error("[paper-scalp-manifest] telegram failed:", err.message);
+    });
+}
+
+/** Next.js `after()` — drain Telegram without blocking res.json. */
+export function flushPendingManifestTelegram(): Promise<void> {
+  return pendingManifestTelegram ?? Promise.resolve();
+}
+
+/**
+ * Compile on hot path; Telegram ships on nextTick (does not block res.json).
+ * Always runs — never skips on HOLD/BLOCKED.
+ */
+export function scheduleUnifiedEngineManifestDispatch(
+  input: EngineManifestInput,
+): string {
+  const text = compileUnifiedEngineManifest(input);
+  pendingManifestTelegram = new Promise<void>((resolve) => {
+    process.nextTick(() => {
+      void shipManifestTelegramDetached(text).finally(resolve);
+    });
+  });
+  return text;
+}
+
+/** Blocking send — tests / manual tooling only. */
 export async function dispatchUnifiedEngineManifest(
   input: EngineManifestInput,
 ): Promise<void> {
-  console.log("[paper-scalp-manifest] dispatch start");
-  const text = buildUnifiedEngineManifest(input);
-  console.log(`[paper-scalp-manifest]\n${text}`);
+  const text = compileUnifiedEngineManifest(input);
   await sendTelegramNotificationAsync(text);
   console.log("[paper-scalp-manifest] telegram dispatch settled");
 }
