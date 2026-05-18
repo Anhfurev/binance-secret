@@ -1,7 +1,10 @@
 export const BINANCE_KLINES_ENDPOINT =
   "https://api.binance.com/api/v3/klines";
 
-export const KLINE_INTERVAL_1H = "1h";
+export const KLINE_INTERVAL_15M = "15m";
+
+/** @deprecated Paper scalp now uses 15m — alias for legacy imports. */
+export const KLINE_INTERVAL_1H = KLINE_INTERVAL_15M;
 
 export function normalizeKlineSymbol(symbol: string): string {
   const s = String(symbol ?? "")
@@ -43,7 +46,7 @@ export function buildBinanceKlinesRequestUrl(
   binanceSymbol: string,
   limit: number,
   endpoint = BINANCE_KLINES_ENDPOINT,
-  interval = KLINE_INTERVAL_1H,
+  interval = KLINE_INTERVAL_15M,
 ): string | null {
   const base = String(endpoint ?? "").trim();
   if (!base.startsWith("https://")) {

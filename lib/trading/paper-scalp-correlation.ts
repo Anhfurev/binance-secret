@@ -34,6 +34,10 @@ export function passesCorrelationExposureGate(openLegCount: number): boolean {
   return openLegCount < MAX_OPEN_LEGS_PER_WORKSPACE;
 }
 
+/**
+ * ENTRY-ONLY gate — never call from exit/stop/TP paths.
+ * Open legs are managed in evaluateOpenPaperPosition before this runs.
+ */
 export function passesBtcAltcoinGate(
   symbol: string,
   snapshots: Map<string, Scalp1mSnapshot>,

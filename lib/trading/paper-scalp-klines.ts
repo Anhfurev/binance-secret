@@ -11,6 +11,7 @@ import {
 import {
   buildBinanceKlinesRequestUrl,
   isValidKlineTicker,
+  KLINE_INTERVAL_15M,
   normalizeKlineSymbol,
   sanitizePaperScalpSymbolList,
 } from "@/lib/trading/paper-scalp-kline-symbols";
@@ -55,6 +56,7 @@ function parseKlineRows(rows: unknown[], priceScale = 1): ScalpCandle[] {
         low: parseKlineField(k[3]) * priceScale,
         close: parseKlineField(k[4]) * priceScale,
         closeTime: parseKlineField(k[6]),
+        volume: parseKlineField(k[5]),
       };
     })
     .filter((c) =>
@@ -62,7 +64,7 @@ function parseKlineRows(rows: unknown[], priceScale = 1): ScalpCandle[] {
     );
 }
 
-async function fetchHourlyKlinesForSymbol(
+async function fetch15mKlinesForSymbol(
   binanceSymbol: string,
   limit: number,
 ): Promise<ScalpCandle[]> {
@@ -79,7 +81,7 @@ async function fetchHourlyKlinesForSymbol(
       signal: controller.signal,
     });
     if (!res.ok) {
-      console.warn("[paper-1h] binance klines HTTP error", {
+      console.warn("[paper-15m] binance klines HTTP error", {
         symbol: binanceSymbol,
         status: res.status,
         url,
@@ -106,24 +108,24 @@ async function fetchHourlyKlinesForSymbol(
   }
 }
 
-/** Single-symbol 1h kline fetch (PEPE/1000PEPE fallback inside symbol). */
-export async function fetch1hKlines(
+/** Single-symbol 15m kline fetch (PEPE/1000PEPE fallback inside symbol). */
+export async function fetch15mKlines(
   symbol: string,
   limit = DEFAULT_LIMIT,
 ): Promise<ScalpCandle[]> {
   const base = normalizeKlineSymbol(symbol);
   if (!isValidKlineTicker(base)) {
-    console.warn("[paper-1h] fetch1hKlines skipped — invalid ticker", { symbol });
+    console.warn("[paper-15m] fetch15mKlines skipped — invalid ticker", { symbol });
     return [];
   }
   try {
     for (const candidate of klineSymbolCandidates(base)) {
       if (!isValidKlineTicker(candidate)) continue;
-      const candles = await fetchHourlyKlinesForSymbol(candidate, limit);
+      const candles = await fetch15mKlinesForSymbol(candidate, limit);
       if (candles.length >= 30) {
         if (candidate !== base) {
           console.log(
-            `[paper-1h] ${base} via ${candidate} (${candles.length}×1h bars)`,
+            `[paper-15m] ${base} via ${candidate} (${candles.length}×15m bars)`,
           );
         }
         return candles;
@@ -140,71 +142,91 @@ export async function fetch1hKlines(
   }
 }
 
-/** @deprecated Use fetch1hKlines — kept for imports. */
-export const fetch1mKlines = fetch1hKlines;
+/** @deprecated Use fetch15mKlines — legacy alias. */
+export const fetch1hKlines = fetch15mKlines;
+export const fetch1mKlines = fetch15mKlines;
+
+export type PaperMarketHarvest = {
+  snapshots: Map<string, Scalp1mSnapshot>;
+  candlesBySymbol: Map<string, ScalpCandle[]>;
+  source: "binance" | "mock";
+};
 
 async function loadSnapshotForSymbol(
   symbol: string,
-): Promise<{ symbol: string; snap: Scalp1mSnapshot | null }> {
+): Promise<{
+  symbol: string;
+  snap: Scalp1mSnapshot | null;
+  candles: ScalpCandle[];
+}> {
   try {
-    const candles = await fetch1hKlines(symbol);
+    const candles = await fetch15mKlines(symbol);
     const snap = buildScalp1mSnapshot(symbol, candles);
     if (!snap) {
-      console.warn("[paper-1h] no 1h snapshot built", {
+      console.warn("[paper-15m] no snapshot built", {
         symbol,
         candles: candles.length,
       });
     }
-    return { symbol, snap };
+    return { symbol, snap, candles };
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
     console.warn("[BINANCE-FETCH-SKIP] parallel symbol error — continuing", {
       symbol,
       message: err.message,
     });
-    return { symbol, snap: null };
+    return { symbol, snap: null, candles: [] };
   }
 }
 
-/** Parallel 1h kline harvest — one REST round-trip per symbol via Promise.all. */
-export async function loadPaperScalpSnapshots(
+/** Parallel 15m harvest — snapshots + raw candles for VWAP/RVOL. */
+export async function loadPaperScalpMarketHarvest(
   symbols: unknown[] | string[],
-): Promise<Map<string, Scalp1mSnapshot>> {
+): Promise<PaperMarketHarvest> {
   const cleaned = symbols.filter(
     (s): s is string => s != null && String(s).trim() !== "",
   );
   const unique = sanitizePaperScalpSymbolList(
     cleaned.map((s) => String(s)),
   );
-  const map = new Map<string, Scalp1mSnapshot>();
+  const snapshots = new Map<string, Scalp1mSnapshot>();
+  const candlesBySymbol = new Map<string, ScalpCandle[]>();
   const startedAt = performance.now();
 
   console.log(
-    `[paper-1h] parallel kline scan: ${unique.length} symbol(s) [${unique.join(", ")}]`,
+    `[paper-15m] parallel kline scan: ${unique.length} symbol(s) [${unique.join(", ")}]`,
   );
 
   const rows = await Promise.all(unique.map((symbol) => loadSnapshotForSymbol(symbol)));
-  for (const { symbol, snap } of rows) {
-    if (snap) map.set(symbol, snap);
+  for (const { symbol, snap, candles } of rows) {
+    if (candles.length > 0) candlesBySymbol.set(symbol, candles);
+    if (snap) snapshots.set(symbol, snap);
   }
 
   const durationMs = Number((performance.now() - startedAt).toFixed(1));
   console.log(
-    `[paper-1h] kline scan done: ${map.size}/${unique.length} snapshots in ${durationMs}ms`,
+    `[paper-15m] kline scan done: ${snapshots.size}/${unique.length} snapshots in ${durationMs}ms`,
   );
-  return map;
+  return { snapshots, candlesBySymbol, source: "binance" };
+}
+
+export async function loadPaperScalpSnapshots(
+  symbols: unknown[] | string[],
+): Promise<Map<string, Scalp1mSnapshot>> {
+  const harvest = await loadPaperScalpMarketHarvest(symbols);
+  return harvest.snapshots;
 }
 
 export async function loadPaperScalpSnapshotsResilient(
   symbols: string[],
   marketCoins: CoinData[],
-): Promise<{ snapshots: Map<string, Scalp1mSnapshot>; source: "binance" | "mock" }> {
+): Promise<PaperMarketHarvest> {
   try {
-    const snapshots = await loadPaperScalpSnapshots(symbols);
-    if (snapshots.size > 0) {
-      return { snapshots, source: "binance" };
+    const harvest = await loadPaperScalpMarketHarvest(symbols);
+    if (harvest.snapshots.size > 0) {
+      return harvest;
     }
-    console.warn("[paper-1h] empty snapshots — using mock hourly bars");
+    console.warn("[paper-15m] empty snapshots — using mock 15m bars");
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
     console.error("[BINANCE-FETCH-BLOCKED] resilient loader", {
@@ -212,10 +234,9 @@ export async function loadPaperScalpSnapshotsResilient(
     });
   }
 
-  return {
-    snapshots: buildMockScalpSnapshots(symbols, marketCoins),
-    source: "mock",
-  };
+  const snapshots = buildMockScalpSnapshots(symbols, marketCoins);
+  const candlesBySymbol = new Map<string, ScalpCandle[]>();
+  return { snapshots, candlesBySymbol, source: "mock" };
 }
 
 export function buildMockScalpSnapshots(
@@ -224,7 +245,7 @@ export function buildMockScalpSnapshots(
 ): Map<string, Scalp1mSnapshot> {
   const map = new Map<string, Scalp1mSnapshot>();
   const now = Date.now();
-  const hourMs = 3_600_000;
+  const barMs = 15 * 60_000;
 
   for (const raw of symbols) {
     const sym = normalizeKlineSymbol(raw);
@@ -232,7 +253,7 @@ export function buildMockScalpSnapshots(
     const coin = coins.find((c) => c.symbol.toLowerCase() === base);
     const anchor = coin?.current_price ?? mockCloseForSymbol(sym);
 
-    const candles: ScalpCandle[] = Array.from({ length: 60 }, (_, i) => {
+    const candles: ScalpCandle[] = Array.from({ length: 96 }, (_, i) => {
       const wiggle = 1 + Math.sin(i / 3) * 0.008;
       const close = anchor * wiggle;
       return {
@@ -240,7 +261,8 @@ export function buildMockScalpSnapshots(
         high: close * 1.012,
         low: close * 0.988,
         close,
-        closeTime: now - (60 - i) * hourMs,
+        closeTime: now - (96 - i) * barMs,
+        volume: 1_000_000 + i * 10_000,
       };
     });
 

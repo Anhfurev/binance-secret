@@ -9,7 +9,12 @@ import {
   type EngineManifestInput,
   type WorkspaceTickRow,
 } from "@/lib/trading/paper-scalp-engine-manifest";
-import { isBtcBearish1h } from "@/lib/trading/paper-scalp-correlation";
+import { evaluateManifestTelegramDispatch } from "@/lib/trading/paper-scalp-manifest-notify";
+import {
+  calculateDynamicRegime,
+  resolveBtcCandles,
+  resolveBtcSnapshot,
+} from "@/lib/trading/paper-scalp-regime";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import { resolvePaperMomentumSettings } from "@/lib/trading/paper-scalp-momentum";
 import { preparePaperRun } from "@/lib/trading/paper-run-prepared";
@@ -37,7 +42,7 @@ export type PaperRunOrchestratorResult = {
   symbols: string[];
   snapshotsLoaded: number;
   snapshotSource: "binance" | "mock";
-  marketSource: "1h-snapshots" | "mock-fallback" | "mixed";
+  marketSource: "15m-snapshots" | "mock-fallback" | "mixed";
   ranAt: string;
   durationMs: number;
   partial?: boolean;
@@ -50,6 +55,8 @@ export type PaperRunOrchestratorResult = {
 function resolveTradingAction(summary: string): string {
   if (summary.startsWith("opened:")) return "BUY";
   if (summary.startsWith("closed:")) return "SELL";
+  if (summary.startsWith("velocity-tp-70:")) return "VELOCITY_TP";
+  if (summary === "pyramid-layer-added") return "PYRAMID";
   if (summary === "holding-position") return "HOLD";
   return "NO_TRADE";
 }
@@ -104,19 +111,25 @@ async function executePaperScalpOrchestrator(): Promise<
       partialReason: "deadline_before_klines",
       workspacesSkipped: listResult.data.length,
     });
-    return finalizePaperTickRun(
-      early,
-      buildManifestPayload(early, {
-        masterWorkspaceKey,
-        masterAccount: null,
-        masterSummary: "budget_exceeded",
-        workspaceRows: [],
-        momentum: resolvePaperMomentumSettings({}, 70),
-        scalpSnapshots: new Map(),
-        symbols: [],
-        btcRegimeActive: false,
-      }),
-    );
+    const earlyManifest = buildManifestPayload(early, {
+      masterWorkspaceKey,
+      masterAccount: null,
+      masterSummary: "budget_exceeded",
+      workspaceRows: [],
+      momentum: resolvePaperMomentumSettings({}, 70),
+      scalpSnapshots: new Map(),
+      candlesBySymbol: new Map(),
+      marketCoins: [],
+      symbols: [],
+      btcRegimeActive: true,
+      apiDegraded: true,
+    });
+    const earlyNotify = evaluateManifestTelegramDispatch({
+      ranAt: early.ranAt,
+      actions: early.actions,
+      workspaceSummaries: [],
+    });
+    return finalizePaperTickRun(early, earlyManifest, earlyNotify);
   }
 
   const prepared = await preparePaperRun(listResult.data);
@@ -140,6 +153,11 @@ async function executePaperScalpOrchestrator(): Promise<
   let partialReason: string | undefined;
   let masterAccount: DemoAccount | null = null;
   let masterSummary = "no-tick";
+  let pyramidedAny = false;
+  let positionClosedAny = false;
+  let velocityPartialAny = false;
+  let entryAny = false;
+  const workspaceSummaries: string[] = [];
 
   for (const workspace of listResult.data) {
     if (isPaperRunBudgetExceeded(startTime)) {
@@ -170,6 +188,8 @@ async function executePaperScalpOrchestrator(): Promise<
       account: alignedWallet,
       marketCoins: prepared.marketCoins,
       scalpSnapshots: prepared.scalpSnapshots,
+      candlesBySymbol: prepared.candlesBySymbol,
+      apiDegraded: prepared.apiDegraded,
       autoPilotMode: cached.autoPilotMode,
       copyProfile: cached.copyProfile,
       paperSettings: cached.paperSettings,
@@ -177,6 +197,18 @@ async function executePaperScalpOrchestrator(): Promise<
 
     const nav = computePaperWorkspaceNav(result.account, prepared.marketCoins);
     const action = resolveTradingAction(result.summary);
+    workspaceSummaries.push(result.summary);
+
+    if (result.pyramided) pyramidedAny = true;
+    if (result.positionClosed || result.summary.startsWith("closed:")) {
+      positionClosedAny = true;
+    }
+    if (result.velocityPartial || result.summary.startsWith("velocity-tp-70:")) {
+      velocityPartialAny = true;
+    }
+    if (result.entryExecuted || result.summary.startsWith("opened:")) {
+      entryAny = true;
+    }
 
     workspaceRows.push({
       workspaceKey: key,
@@ -221,7 +253,14 @@ async function executePaperScalpOrchestrator(): Promise<
     });
   }
 
-  const btcRegimeActive = isBtcBearish1h(prepared.scalpSnapshots);
+  const btcRegimeActive =
+    prepared.apiDegraded ||
+    !resolveBtcSnapshot(prepared.scalpSnapshots) ||
+    calculateDynamicRegime({
+      btcSnapshot: resolveBtcSnapshot(prepared.scalpSnapshots),
+      btcCandles: resolveBtcCandles(prepared.candlesBySymbol),
+      apiDegraded: prepared.apiDegraded,
+    }).state === "risk_off";
 
   const outcome = buildPartialResult(startTime, {
     scanned,
@@ -238,30 +277,49 @@ async function executePaperScalpOrchestrator(): Promise<
     persistQueued,
   });
 
-  return finalizePaperTickRun(
-    outcome,
-    buildManifestPayload(outcome, {
-      masterWorkspaceKey,
-      masterAccount,
-      masterSummary,
-      workspaceRows,
-      momentum,
-      scalpSnapshots: prepared.scalpSnapshots,
-      symbols: prepared.symbols,
-      btcRegimeActive,
-    }),
-  );
+  const manifest = buildManifestPayload(outcome, {
+    masterWorkspaceKey,
+    masterAccount,
+    masterSummary,
+    workspaceRows,
+    momentum,
+    scalpSnapshots: prepared.scalpSnapshots,
+    candlesBySymbol: prepared.candlesBySymbol,
+    marketCoins: prepared.marketCoins,
+    symbols: prepared.symbols,
+    btcRegimeActive,
+    apiDegraded: prepared.apiDegraded,
+  });
+
+  const notify = evaluateManifestTelegramDispatch({
+    ranAt: outcome.ranAt,
+    actions,
+    workspaceSummaries,
+    pyramidedAny,
+    positionClosedAny,
+    velocityPartialAny,
+    entryAny,
+  });
+
+  return finalizePaperTickRun(outcome, manifest, notify);
 }
 
-/** Sync return — manifest logged now; Telegram flushed on nextTick (non-blocking). */
+/** Sync return — Telegram only on high-signal / hourly sync. */
 function finalizePaperTickRun(
   outcome: PaperRunOrchestratorResult,
   manifest: EngineManifestInput,
+  notify: ReturnType<typeof evaluateManifestTelegramDispatch>,
 ): PaperRunOrchestratorResult {
-  scheduleUnifiedEngineManifestDispatch(manifest);
-  console.log(
-    `✅ paper tick ${outcome.partial ? "PARTIAL" : "complete"} in ${outcome.durationMs}ms | scanned=${outcome.scanned} updated=${outcome.updated}`,
-  );
+  if (notify.dispatch) {
+    scheduleUnifiedEngineManifestDispatch(manifest, { verboseLog: true });
+    console.log(
+      `[paper-scalp-manifest] dispatched (${notify.reason}) | ${outcome.durationMs.toFixed(0)}ms`,
+    );
+  } else {
+    console.log(
+      `[paper-scalp-manifest] silent scan completed | ${outcome.durationMs.toFixed(0)}ms | scanned=${outcome.scanned}`,
+    );
+  }
   return outcome;
 }
 
@@ -274,8 +332,11 @@ function buildManifestPayload(
     workspaceRows: WorkspaceTickRow[];
     momentum: EngineManifestInput["momentum"];
     scalpSnapshots: EngineManifestInput["scalpSnapshots"];
+    candlesBySymbol: EngineManifestInput["candlesBySymbol"];
+    marketCoins: EngineManifestInput["marketCoins"];
     symbols: string[];
     btcRegimeActive: boolean;
+    apiDegraded: boolean;
   },
 ): EngineManifestInput {
   return {
@@ -288,6 +349,8 @@ function buildManifestPayload(
     snapshotsLoaded: outcome.snapshotsLoaded,
     symbols: ctx.symbols,
     scalpSnapshots: ctx.scalpSnapshots,
+    candlesBySymbol: ctx.candlesBySymbol,
+    marketCoins: ctx.marketCoins,
     momentum: ctx.momentum,
     masterWorkspaceKey: ctx.masterWorkspaceKey,
     masterAccount: ctx.masterAccount,
@@ -298,6 +361,7 @@ function buildManifestPayload(
     updated: outcome.updated,
     persistQueued: outcome.persistQueued ?? 0,
     btcRegimeActive: ctx.btcRegimeActive,
+    apiDegraded: ctx.apiDegraded,
   };
 }
 

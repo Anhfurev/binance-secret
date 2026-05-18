@@ -111,7 +111,7 @@ export function humanPaperScalpReason(summary: string): string {
       "No momentum entry on watched symbols (legacy)",
     "rsi-overbought":
       "RSI above overbought threshold — skip chasing extended move",
-    "holding-position": "Managing open 1h position (ATR stop / TP / EMA exit)",
+    "holding-position": "Managing open 15m position (ATR stop / TP / EMA exit)",
     "insufficient-balance":
       "Free USDT too low for configured risk slot",
     "insufficient-free-margin-floor":
@@ -123,13 +123,25 @@ export function humanPaperScalpReason(summary: string): string {
     "correlation-max-exposure":
       "Correlation filter — max 2 open legs per workspace",
     "btc-bearish-pause":
-      "BTC 1h bearish (EMA9 < EMA21) — altcoin entries paused",
+      "BTC bearish — altcoin entries paused (legacy)",
+    "alpha-risk-off":
+      "Alpha Shield risk-off — BTC below VWAP or weak trend; entries blocked",
+    "atr-trailing-stop":
+      "ATR trailing floor hit — locked intraday gains at ratcheted stop",
+    "pyramid-layer-added":
+      "Pyramid scale-in — added 50% layer on risk-free winner",
+    "velocity-tp-70":
+      "Velocity 70% take-profit banked — runner at breakeven trails",
     "no-1m-snapshots":
-      "1h indicator snapshots missing (klines blocked or empty)",
+      "15m indicator snapshots missing (klines blocked or empty)",
     "no-hourly-snapshots":
-      "1h indicator snapshots missing (klines blocked or empty)",
+      "15m indicator snapshots missing (klines blocked or empty)",
   };
   if (fixed[summary]) return fixed[summary];
+  if (summary.startsWith("velocity-tp-70:")) {
+    const sym = summary.replace("velocity-tp-70:", "");
+    return `Velocity 70% take-profit banked on ${sym} — runner trails at breakeven`;
+  }
   if (summary.startsWith("opened:")) {
     return `BUY filled — ${summary.replace("opened:", "").replace(/:/g, " ")}`;
   }

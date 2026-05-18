@@ -1,4 +1,4 @@
-/** 1h OHLCV math — EMA(9/21), RSI(14), ATR(14), crossover detection. */
+/** 15m OHLCV math — EMA(9/21), RSI(14), ATR(14), crossover detection. */
 
 import {
   priceIndicatorScale,
@@ -11,6 +11,7 @@ export type ScalpCandle = {
   low: number;
   close: number;
   closeTime: number;
+  volume?: number;
 };
 
 export type Scalp1mSnapshot = {

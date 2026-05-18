@@ -1,17 +1,25 @@
 import type { AITradeSignal, CoinData, DemoAccount } from "@/lib/types";
-import { runPaperScalp1hTick } from "@/lib/trading/paper-scalp-engine";
-import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
+import { runPaperScalp15mTick } from "@/lib/trading/paper-scalp-engine";
+import type {
+  Scalp1mSnapshot,
+  ScalpCandle,
+} from "@/lib/trading/paper-scalp-indicators";
 import type { PaperScalpWorkspaceSettings } from "@/lib/trading/paper-scalp-settings";
 import type { PaperAutomationTickResult } from "@/lib/trading/paper-scalp-types";
+
 type AutoPilotMode = "signals" | "dca";
+type CopyProfile = "conservative" | "balanced" | "aggressive";
+
 export type { PaperAutomationTickResult };
 
-/** Institutional 1h EMA/RSI/ATR paper tick. */
+/** 15m alpha paper tick — VWAP regime + momentum rotation. */
 export function runPaperTradingAutomationTick(params: {
   account: DemoAccount;
   signals?: AITradeSignal[];
   marketCoins?: CoinData[];
   scalpSnapshots?: Map<string, Scalp1mSnapshot>;
+  candlesBySymbol?: Map<string, ScalpCandle[]>;
+  apiDegraded?: boolean;
   autoPilotMode: AutoPilotMode;
   copyProfile: CopyProfile;
   paperSettings: PaperScalpWorkspaceSettings;
@@ -27,10 +35,12 @@ export function runPaperTradingAutomationTick(params: {
     };
   }
 
-  return runPaperScalp1hTick({
+  return runPaperScalp15mTick({
     account: params.account,
     snapshots,
+    candlesBySymbol: params.candlesBySymbol ?? new Map(),
     marketCoins,
     paperSettings: params.paperSettings,
+    apiDegraded: params.apiDegraded,
   });
 }

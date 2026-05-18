@@ -36,7 +36,7 @@ function findFallbackCoin(
   return fallback.find((c) => c.symbol.toLowerCase() === base);
 }
 
-export type PaperScalpMarketSource = "1h-snapshots" | "mock-fallback" | "mixed";
+export type PaperScalpMarketSource = "15m-snapshots" | "mock-fallback" | "mixed";
 
 /**
  * Live mark prices from 1h kline closes; mockCoins only when a symbol has no snapshot.
@@ -95,7 +95,7 @@ export function buildPaperScalpMarketCoins(
     fromSnapshot === 0
       ? "mock-fallback"
       : fromFallback === 0
-        ? "1h-snapshots"
+        ? "15m-snapshots"
         : "mixed";
 
   return { coins, marketSource };

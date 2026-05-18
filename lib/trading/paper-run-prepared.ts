@@ -1,7 +1,7 @@
 import { hydrateAccount, normalizeAccount } from "@/lib/demo-account";
 import { mockCoins } from "@/lib/mock-data";
 import type { DemoWorkspaceRecord } from "@/lib/supabase-demo";
-import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
+import type { Scalp1mSnapshot, ScalpCandle } from "@/lib/trading/paper-scalp-indicators";
 import {
   buildMockScalpSnapshots,
   loadPaperScalpSnapshotsResilient,
@@ -25,9 +25,11 @@ export type PreparedPaperRun = {
   workspaces: DemoWorkspaceRecord[];
   symbols: string[];
   scalpSnapshots: Map<string, Scalp1mSnapshot>;
+  candlesBySymbol: Map<string, ScalpCandle[]>;
   marketCoins: CoinData[];
   snapshotSource: "binance" | "mock";
-  marketSource: "1h-snapshots" | "mock-fallback" | "mixed";
+  marketSource: "15m-snapshots" | "mock-fallback" | "mixed";
+  apiDegraded: boolean;
   accountByKey: Map<string, CachedWorkspaceAccount>;
 };
 
@@ -35,7 +37,7 @@ function workspaceKey(ws: DemoWorkspaceRecord): string {
   return `${ws.ownerType}:${ws.ownerId}`;
 }
 
-/** Single Supabase list + one kline harvest — reused across workspace ticks. */
+/** Single Supabase list + one 15m kline harvest — reused across workspace ticks. */
 export async function preparePaperRun(
   workspaces: DemoWorkspaceRecord[],
 ): Promise<PreparedPaperRun> {
@@ -50,14 +52,20 @@ export async function preparePaperRun(
   const symbols = resolvePaperScalpSymbols(openSymbols, workspaceSymbols);
 
   let snapshotSource: "binance" | "mock" = "mock";
+  let apiDegraded = true;
   let scalpSnapshots: Map<string, Scalp1mSnapshot>;
+  let candlesBySymbol = new Map<string, ScalpCandle[]>();
+
   try {
     const loaded = await loadPaperScalpSnapshotsResilient(symbols, mockCoins);
     scalpSnapshots = loaded.snapshots;
+    candlesBySymbol = loaded.candlesBySymbol;
     snapshotSource = loaded.source;
+    apiDegraded = loaded.source === "mock" || loaded.snapshots.size === 0;
   } catch {
     scalpSnapshots = buildMockScalpSnapshots(symbols, mockCoins);
     snapshotSource = "mock";
+    apiDegraded = true;
   }
 
   const { coins: marketCoins, marketSource } = buildPaperScalpMarketCoins(
@@ -87,9 +95,11 @@ export async function preparePaperRun(
     workspaces,
     symbols,
     scalpSnapshots,
+    candlesBySymbol,
     marketCoins,
     snapshotSource,
     marketSource,
+    apiDegraded,
     accountByKey,
   };
 }

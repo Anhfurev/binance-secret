@@ -289,6 +289,18 @@ export interface DemoTrade {
   closedAt?: Date;
   stopLoss: number;
   takeProfit: number;
+  /** Intraday peak for ATR trailing profit (15m alpha legs). */
+  highestPriceReached?: number;
+  /** First-fill entry — used for pyramid extension / breakeven gates. */
+  originalEntryPrice?: number;
+  /** Base layer notional (USDT) — pyramid adds 50% of this. */
+  initialPositionValueUsdt?: number;
+  /** Count of pyramid scale-ins (0 = base only). */
+  pyramidLayers?: number;
+  /** Cumulative USDT added via pyramid layers. */
+  pyramidAddedUsdt?: number;
+  /** 70% velocity scalp banked; runner trails on remainder. */
+  velocityTakeProfitSecured?: boolean;
   trailingStopPct?: number;
   decisionScore?: number;
   estimatedSlippagePct?: number;

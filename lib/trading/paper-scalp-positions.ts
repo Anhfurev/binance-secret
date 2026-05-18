@@ -3,26 +3,35 @@ import { formatAssetPrice } from "@/lib/trading/paper-scalp-metrics-format";
 import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
 import { defaultScalpingSettings } from "@/lib/trading/settings";
 import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
+import {
+  applyTrailingProfitState,
+  resolveLegAtr14,
+} from "@/lib/trading/paper-scalp-trailing-exit";
+import {
+  VELOCITY_PARTIAL_SELL_RATIO,
+  VELOCITY_TP_GAIN_PCT,
+} from "@/lib/trading/paper-scalp-velocity";
 import type { PaperAutomationTickResult } from "@/lib/trading/paper-scalp-types";
 import type { CoinData, DemoAccount, DemoTrade } from "@/lib/types";
 
 const ASSET_PROTECTION_DROP_PCT = 0.015;
-const ATR_STOP_MULT = 1.5;
-
-function logScalp(message: string, payload?: Record<string, unknown>) {
-  if (payload) console.log(`[paper-scalp] ${message}`, payload);
-  else console.log(`[paper-scalp] ${message}`);
-}
 
 function normalizeSymbol(symbol: string): string {
   const s = symbol.toUpperCase().replace(/\//g, "");
   return s.endsWith("USDT") ? s : `${s}USDT`;
 }
 
-function trailingAtrStop(trade: DemoTrade, mark: number, atr14: number): number {
-  const dist = atr14 * ATR_STOP_MULT;
-  const raw = mark - dist;
-  return Math.max(trade.stopLoss, Number(raw.toFixed(8)));
+function patchOpenLeg(
+  account: DemoAccount,
+  tradeId: string,
+  trade: DemoTrade,
+): DemoAccount {
+  return {
+    ...account,
+    openPositions: account.openPositions.map((p) =>
+      p.id === tradeId ? trade : p,
+    ),
+  };
 }
 
 export function closePaperScalpTrade(
@@ -43,13 +52,6 @@ export function closePaperScalpTrade(
     newDailyPnl < 0 &&
     percentOf(Math.abs(newDailyPnl), account.startingBalance) >=
       defaultScalpingSettings.maxDailyLossPct;
-
-  logScalp(`EXIT ${trade.symbol} | reason=${reason}`, {
-    entryPrice: formatAssetPrice(trade.entryPrice),
-    closePrice: formatAssetPrice(closePrice),
-    pnl,
-    pnlPercent,
-  });
 
   const closedTrade: DemoTrade = {
     ...trade,
@@ -86,9 +88,69 @@ export type OpenPositionEvalResult = {
   account: DemoAccount;
   exit: PaperAutomationTickResult | null;
   stopAdjusted: boolean;
+  velocityPartial?: boolean;
 };
 
-/** Evaluate one open leg; may exit, trail stop, or hold. */
+function tryVelocityPartialTakeProfit(
+  account: DemoAccount,
+  trade: DemoTrade,
+  mark: number,
+): { account: DemoAccount; executed: boolean; symbol: string } {
+  const symbol = normalizeSymbol(trade.symbol);
+  if (trade.velocityTakeProfitSecured || trade.type !== "buy") {
+    return { account, executed: false, symbol };
+  }
+
+  const entry = trade.entryPrice;
+  if (entry <= 0 || mark < entry * (1 + VELOCITY_TP_GAIN_PCT)) {
+    return { account, executed: false, symbol };
+  }
+
+  const sellQty = Number((trade.amount * VELOCITY_PARTIAL_SELL_RATIO).toFixed(6));
+  const remainQty = Number((trade.amount - sellQty).toFixed(6));
+  if (sellQty <= 0 || remainQty <= 0) {
+    return { account, executed: false, symbol };
+  }
+
+  const proceeds = Number((sellQty * mark).toFixed(4));
+  const costSold = Number((trade.value * VELOCITY_PARTIAL_SELL_RATIO).toFixed(4));
+  const partialPnl = Number((proceeds - costSold).toFixed(4));
+  const remainValue = Number((trade.value - costSold).toFixed(4));
+  const breakevenStop = Number(entry.toFixed(8));
+
+  const runner: DemoTrade = {
+    ...trade,
+    amount: remainQty,
+    value: remainValue,
+    velocityTakeProfitSecured: true,
+    stopLoss: Math.max(trade.stopLoss, breakevenStop),
+    highestPriceReached: Number(
+      Math.max(trade.highestPriceReached ?? mark, mark).toFixed(8),
+    ),
+    notes: `${trade.notes ?? ""} | velocity-70-banked`.trim(),
+    tags: [...(trade.tags ?? []), "velocity-tp-70"],
+    executionNotes: [
+      ...(trade.executionNotes ?? []),
+      `velocity70@${formatAssetPrice(mark)} proceeds=$${proceeds}`,
+    ],
+  };
+
+  const nextAccount = patchOpenLeg(
+    {
+      ...account,
+      currentBalance: Number((account.currentBalance + proceeds).toFixed(4)),
+      dailyPnl: Number(((account.dailyPnl ?? 0) + partialPnl).toFixed(4)),
+    },
+    trade.id,
+    runner,
+  );
+
+  return { account: nextAccount, executed: true, symbol };
+}
+
+/**
+ * ATR trailing profit engine — peak track, ratchet SL, no capped TP exit.
+ */
 export function evaluateOpenPaperPosition(params: {
   account: DemoAccount;
   trade: DemoTrade;
@@ -103,8 +165,7 @@ export function evaluateOpenPaperPosition(params: {
     marketCoins,
     snap?.close ?? trade.entryPrice,
   );
-  const atr14 =
-    snap?.atr14 ?? Math.abs(trade.entryPrice - trade.stopLoss) / ATR_STOP_MULT;
+  const atr14 = resolveLegAtr14(snap, trade);
 
   if (trade.type === "buy") {
     const dropPct = (trade.entryPrice - mark) / trade.entryPrice;
@@ -117,36 +178,37 @@ export function evaluateOpenPaperPosition(params: {
     }
   }
 
-  const dynamicStop = trailingAtrStop(trade, mark, atr14);
-  const tradeWithStop = { ...trade, stopLoss: dynamicStop };
-  const stopAdjusted = dynamicStop > trade.stopLoss;
-  const nextAccount: DemoAccount = stopAdjusted
-    ? {
-        ...account,
-        openPositions: account.openPositions.map((p) =>
-          p.id === trade.id ? tradeWithStop : p,
-        ),
-      }
-    : account;
+  const velocityHit = tryVelocityPartialTakeProfit(account, trade, mark);
+  if (velocityHit.executed) {
+    const runner =
+      velocityHit.account.openPositions.find((p) => p.id === trade.id) ?? trade;
+    const trailedTrade = applyTrailingProfitState(runner, mark, atr14).trade;
+    const nextAccount = patchOpenLeg(velocityHit.account, trade.id, trailedTrade);
+    return {
+      account: nextAccount,
+      exit: null,
+      stopAdjusted: true,
+      velocityPartial: true,
+    };
+  }
 
-  if (mark <= dynamicStop) {
+  const trail = applyTrailingProfitState(trade, mark, atr14);
+  const trailed = trail.trade;
+  const stopAdjusted = trail.stopRatcheted || trail.peakUpdated;
+  let nextAccount = stopAdjusted ? patchOpenLeg(account, trade.id, trailed) : account;
+
+  if (mark <= trailed.stopLoss) {
     return {
       account: nextAccount,
-      exit: closePaperScalpTrade(nextAccount, tradeWithStop, mark, "atr-trailing-stop"),
+      exit: closePaperScalpTrade(nextAccount, trailed, mark, "atr-trailing-stop"),
       stopAdjusted,
     };
   }
-  if (mark >= trade.takeProfit) {
-    return {
-      account: nextAccount,
-      exit: closePaperScalpTrade(nextAccount, tradeWithStop, mark, "atr-take-profit-3x"),
-      stopAdjusted,
-    };
-  }
+
   if (snap?.bearishCross) {
     return {
       account: nextAccount,
-      exit: closePaperScalpTrade(nextAccount, tradeWithStop, mark, "ema9-below-ema21"),
+      exit: closePaperScalpTrade(nextAccount, trailed, mark, "ema9-below-ema21"),
       stopAdjusted,
     };
   }

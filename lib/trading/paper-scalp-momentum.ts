@@ -2,7 +2,8 @@ import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
 
 export type PaperMomentumBuyReason =
   | "trend_resumption"
-  | "oversold_bounce";
+  | "oversold_bounce"
+  | "velocity_breakout";
 
 export type PaperMomentumSettings = {
   rsiBuyThreshold: number;
