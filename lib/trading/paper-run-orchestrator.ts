@@ -4,35 +4,29 @@ import {
   listDemoWorkspacesFromSupabase,
   type DemoWorkspaceRecord,
 } from "@/lib/supabase-demo";
-import { queuePaperWorkspacePersist } from "@/lib/trading/paper-run-persist";
-import { logPaperMarketScan, logPaperWorkspaceResult } from "@/lib/trading/paper-scalp-active-log";
-import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import {
-  resolvePaperMomentumSettings,
-} from "@/lib/trading/paper-scalp-momentum";
+  dispatchUnifiedEngineManifest,
+  type EngineManifestInput,
+  type WorkspaceTickRow,
+} from "@/lib/trading/paper-scalp-engine-manifest";
+import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
+import { resolvePaperMomentumSettings } from "@/lib/trading/paper-scalp-momentum";
 import { preparePaperRun } from "@/lib/trading/paper-run-prepared";
+import { queuePaperWorkspacePersist } from "@/lib/trading/paper-run-persist";
 import {
   isPaperRunBudgetExceeded,
   PAPER_RUN_BUDGET_MS,
   remainingPaperRunBudgetMs,
 } from "@/lib/trading/paper-run-budget";
+import { resolvePaperTelegramMasterWorkspaceKey } from "@/lib/trading/paper-scalp-notify-gate";
+import { sendPaperEngineCrashAlert } from "@/lib/trading/paper-scalp-telegram-crash";
 import {
   alignPaperScalpWallet,
   paperWalletWasAligned,
   resolvePaperScalpWalletUsd,
 } from "@/lib/trading/paper-scalp-wallet";
-import {
-  resolvePaperTelegramMasterWorkspaceKey,
-  shouldDispatchPaperScalpTelegram,
-} from "@/lib/trading/paper-scalp-notify-gate";
-import {
-  relayPaperScalpTickTelegram,
-  safePaperScalpRouteTelegram,
-} from "@/lib/trading/paper-scalp-route-telegram";
-import {
-  writeServerLogAsync,
-  writeServerLogFromError,
-} from "@/lib/server-logs";
+import { writeServerLogFromError } from "@/lib/server-logs";
+import type { DemoAccount } from "@/lib/types";
 
 export type PaperRunOrchestratorResult = {
   ok: true;
@@ -59,21 +53,6 @@ function resolveTradingAction(summary: string): string {
   return "NO_TRADE";
 }
 
-function dispatchRouteTelegram(
-  summary: string,
-  account: Parameters<typeof relayPaperScalpTickTelegram>[0]["account"],
-  scalpSnapshots: Parameters<typeof relayPaperScalpTickTelegram>[0]["scalpSnapshots"],
-  marketCoins: Parameters<typeof relayPaperScalpTickTelegram>[0]["marketCoins"],
-): void {
-  try {
-    safePaperScalpRouteTelegram(() => {
-      relayPaperScalpTickTelegram({ summary, account, scalpSnapshots, marketCoins });
-    });
-  } catch (err) {
-    writeServerLogFromError("paper-scalp-telegram", err, { summary });
-  }
-}
-
 async function fetchDemoWorkspacesSafe() {
   try {
     return await listDemoWorkspacesFromSupabase();
@@ -88,7 +67,7 @@ async function fetchDemoWorkspacesSafe() {
   }
 }
 
-export async function runPaperScalpOrchestrator(): Promise<
+async function executePaperScalpOrchestrator(): Promise<
   | { ok: false; status: number; body: Record<string, unknown> }
   | PaperRunOrchestratorResult
 > {
@@ -108,8 +87,12 @@ export async function runPaperScalpOrchestrator(): Promise<
     `[paper-scalp] Supabase OK — loaded ${listResult.data.length} workspace(s) | budget=${PAPER_RUN_BUDGET_MS}ms`,
   );
 
+  const masterWorkspaceKey = resolvePaperTelegramMasterWorkspaceKey(
+    listResult.data,
+  );
+
   if (isPaperRunBudgetExceeded(startTime)) {
-    return buildPartialResult(startTime, {
+    const early = buildPartialResult(startTime, {
       scanned: 0,
       updated: 0,
       actions: ["budget_exceeded:pre_prepare"],
@@ -120,19 +103,26 @@ export async function runPaperScalpOrchestrator(): Promise<
       partialReason: "deadline_before_klines",
       workspacesSkipped: listResult.data.length,
     });
+    dispatchUnifiedEngineManifest(
+      buildManifestPayload(early, {
+        masterWorkspaceKey,
+        masterAccount: null,
+        masterSummary: "budget_exceeded",
+        workspaceRows: [],
+        momentum: resolvePaperMomentumSettings({}, 70),
+        scalpSnapshots: new Map(),
+        symbols: [],
+      }),
+    );
+    return early;
   }
 
-  const masterWorkspaceKey = resolvePaperTelegramMasterWorkspaceKey(
-    listResult.data,
-  );
   const prepared = await preparePaperRun(listResult.data);
   const sampleSettings = listResult.data[0]?.snapshot.paperSettings;
   const momentum = resolvePaperMomentumSettings(
     sampleSettings ?? {},
     Number(process.env.PAPER_RSI_MAX_BUY ?? 70),
   );
-
-  logPaperMarketScan(prepared.symbols, prepared.scalpSnapshots, momentum);
 
   console.log(
     `[${timestamp}] [paper-scalp] snapshots=${prepared.scalpSnapshots.size} source=${prepared.snapshotSource} marks=${prepared.marketSource} | remaining=${remainingPaperRunBudgetMs(startTime).toFixed(0)}ms`,
@@ -143,8 +133,11 @@ export async function runPaperScalpOrchestrator(): Promise<
   let persistQueued = 0;
   let workspacesSkipped = 0;
   const actions: string[] = [];
+  const workspaceRows: WorkspaceTickRow[] = [];
   let partial = false;
   let partialReason: string | undefined;
+  let masterAccount: DemoAccount | null = null;
+  let masterSummary = "no-tick";
 
   for (const workspace of listResult.data) {
     if (isPaperRunBudgetExceeded(startTime)) {
@@ -152,7 +145,7 @@ export async function runPaperScalpOrchestrator(): Promise<
       partialReason = "execution_budget_hot_path";
       workspacesSkipped = listResult.data.length - scanned;
       console.warn(
-        `[paper-scalp] ${PAPER_RUN_BUDGET_MS}ms hot-path budget hit — partial return (${workspacesSkipped} workspace(s) skipped)`,
+        `[paper-scalp] ${PAPER_RUN_BUDGET_MS}ms hot-path budget hit — partial (${workspacesSkipped} skipped)`,
       );
       break;
     }
@@ -182,28 +175,18 @@ export async function runPaperScalpOrchestrator(): Promise<
 
     const nav = computePaperWorkspaceNav(result.account, prepared.marketCoins);
     const action = resolveTradingAction(result.summary);
-    logPaperWorkspaceResult({
+
+    workspaceRows.push({
       workspaceKey: key,
       action,
       summary: result.summary,
-      navUsdt: nav.portfolio_nav_usdt,
-      cashUsdt: nav.available_usdt,
+      nav,
+      openLegCount: result.account.openPositions.length,
     });
 
-    if (
-      shouldDispatchPaperScalpTelegram({
-        workspaceKey: key,
-        masterWorkspaceKey,
-        action,
-        summary: result.summary,
-      })
-    ) {
-      dispatchRouteTelegram(
-        result.summary,
-        result.account,
-        prepared.scalpSnapshots,
-        prepared.marketCoins,
-      );
+    if (key === masterWorkspaceKey || (!masterAccount && workspaceRows.length === 1)) {
+      masterAccount = result.account;
+      masterSummary = result.summary;
     }
 
     if (!result.changed && !walletReset) continue;
@@ -216,7 +199,6 @@ export async function runPaperScalpOrchestrator(): Promise<
     );
 
     persistQueued += 1;
-    const persistSnapshot = { ...snapshot, profiles: nextProfiles };
     const actionLabel =
       walletReset && !result.changed
         ? `${key}:wallet-reset-$${resolvePaperScalpWalletUsd()}`
@@ -228,7 +210,7 @@ export async function runPaperScalpOrchestrator(): Promise<
       ownerType: workspace.ownerType,
       ownerId: workspace.ownerId,
       workspaceKey: key,
-      snapshot: persistSnapshot,
+      snapshot: { ...snapshot, profiles: nextProfiles },
       onSettled: (outcome) => {
         if (!outcome.ok) {
           console.warn("[paper-scalp] background persist failed", outcome);
@@ -237,7 +219,7 @@ export async function runPaperScalpOrchestrator(): Promise<
     });
   }
 
-  return buildPartialResult(startTime, {
+  const outcome = buildPartialResult(startTime, {
     scanned,
     updated,
     actions,
@@ -251,6 +233,54 @@ export async function runPaperScalpOrchestrator(): Promise<
     persistAsync: persistQueued > 0,
     persistQueued,
   });
+
+  dispatchUnifiedEngineManifest(
+    buildManifestPayload(outcome, {
+      masterWorkspaceKey,
+      masterAccount,
+      masterSummary,
+      workspaceRows,
+      momentum,
+      scalpSnapshots: prepared.scalpSnapshots,
+      symbols: prepared.symbols,
+    }),
+  );
+
+  return outcome;
+}
+
+function buildManifestPayload(
+  outcome: PaperRunOrchestratorResult,
+  ctx: {
+    masterWorkspaceKey: string | null;
+    masterAccount: DemoAccount | null;
+    masterSummary: string;
+    workspaceRows: WorkspaceTickRow[];
+    momentum: EngineManifestInput["momentum"];
+    scalpSnapshots: EngineManifestInput["scalpSnapshots"];
+    symbols: string[];
+  },
+): EngineManifestInput {
+  return {
+    ranAt: outcome.ranAt,
+    durationMs: outcome.durationMs,
+    partial: outcome.partial ?? false,
+    partialReason: outcome.partialReason,
+    snapshotSource: outcome.snapshotSource,
+    marketSource: outcome.marketSource,
+    snapshotsLoaded: outcome.snapshotsLoaded,
+    symbols: ctx.symbols,
+    scalpSnapshots: ctx.scalpSnapshots,
+    momentum: ctx.momentum,
+    masterWorkspaceKey: ctx.masterWorkspaceKey,
+    masterAccount: ctx.masterAccount,
+    masterSummary: ctx.masterSummary,
+    workspaceRows: ctx.workspaceRows,
+    actions: outcome.actions,
+    scanned: outcome.scanned,
+    updated: outcome.updated,
+    persistQueued: outcome.persistQueued ?? 0,
+  };
 }
 
 function buildPartialResult(
@@ -258,13 +288,25 @@ function buildPartialResult(
   fields: Omit<PaperRunOrchestratorResult, "ok" | "ranAt" | "durationMs">,
 ): PaperRunOrchestratorResult {
   const durationMs = Number((performance.now() - startTime).toFixed(2));
-  console.log(
-    `✅ paper tick ${fields.partial ? "PARTIAL" : "complete"} in ${durationMs}ms | scanned=${fields.scanned} updated=${fields.updated}`,
-  );
   return {
     ok: true,
     ranAt: new Date().toISOString(),
     durationMs,
     ...fields,
   };
+}
+
+export async function runPaperScalpOrchestrator(): Promise<
+  | { ok: false; status: number; body: Record<string, unknown> }
+  | PaperRunOrchestratorResult
+> {
+  try {
+    return await executePaperScalpOrchestrator();
+  } catch (error: unknown) {
+    sendPaperEngineCrashAlert(error);
+    writeServerLogFromError("paper-scalp-orchestrator", error, {
+      phase: "engine_crash",
+    });
+    throw error;
+  }
 }
