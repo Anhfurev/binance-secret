@@ -22,16 +22,40 @@ export type PooledFetchInit = RequestInit & {
   dispatcher?: Dispatcher;
 };
 
+/** Safe Headers merge — never throws on null/invalid cron background init. */
+function withKeepAliveHeaders(headers?: HeadersInit): Headers {
+  if (headers == null) {
+    return new Headers();
+  }
+  try {
+    return new Headers(headers);
+  } catch {
+    if (typeof headers === "object" && !Array.isArray(headers)) {
+      try {
+        return new Headers(headers as Record<string, string>);
+      } catch {
+        return new Headers();
+      }
+    }
+    return new Headers();
+  }
+}
+
 /** Shared keep-alive `fetch` for outbound REST (Binance, LLM, etc.). */
 export function pooledFetch(
   input: string | URL,
-  init: PooledFetchInit = {},
+  init?: PooledFetchInit,
 ): Promise<Response> {
-  const { dispatcher, ...rest } = init;
-  // Do not set Connection / Keep-Alive headers — undici manages pooling via
-  // `dispatcher` and rejects malformed Keep-Alive values (UND_ERR_INVALID_ARG).
+  // Bulletproof fallback for automated cron / background threads
+  const incomingHeaders = init?.headers ? init.headers : {};
+  const headers = withKeepAliveHeaders(incomingHeaders);
+
+  const { dispatcher, ...rest } = init ?? {};
+  // Do not set Connection / Keep-Alive — undici manages pooling via `dispatcher`
+  // and rejects malformed Keep-Alive values (UND_ERR_INVALID_ARG).
   return fetch(input, {
     ...rest,
+    headers,
     dispatcher: dispatcher ?? pooledHttpDispatcher,
   } as RequestInit);
 }
