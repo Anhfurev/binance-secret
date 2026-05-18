@@ -1,4 +1,3 @@
-import { pooledFetch } from "@/lib/pooled-fetch";
 import type { CoinData } from "@/lib/types";
 import {
   buildScalp1mSnapshot,
@@ -47,7 +46,10 @@ export async function fetch1mKlines(
   url.searchParams.set("limit", String(Math.min(1000, Math.max(30, limit))));
 
   try {
-    const res = await pooledFetch(url.toString(), { cache: "no-store" });
+    const res = await fetch(url.toString(), {
+      cache: "no-store",
+      signal: AbortSignal.timeout(15_000),
+    });
     if (!res.ok) return [];
     const rows = (await res.json()) as unknown[];
     return parseKlineRows(rows);

@@ -22,25 +22,16 @@ export type PooledFetchInit = RequestInit & {
   dispatcher?: Dispatcher;
 };
 
-function withKeepAliveHeaders(headers?: HeadersInit): Headers {
-  const merged = new Headers(headers ?? undefined);
-  if (!merged.has("Connection")) merged.set("Connection", "keep-alive");
-  if (!merged.has("Keep-Alive")) {
-    merged.set("Keep-Alive", `timeout=${Math.floor(HTTP_POOL_TIMEOUT_MS / 1000)}`);
-  }
-  return merged;
-}
-
 /** Shared keep-alive `fetch` for outbound REST (Binance, LLM, etc.). */
 export function pooledFetch(
   input: string | URL,
   init: PooledFetchInit = {},
 ): Promise<Response> {
-  const headers = withKeepAliveHeaders(init.headers);
   const { dispatcher, ...rest } = init;
+  // Do not set Connection / Keep-Alive headers — undici manages pooling via
+  // `dispatcher` and rejects malformed Keep-Alive values (UND_ERR_INVALID_ARG).
   return fetch(input, {
     ...rest,
-    headers,
     dispatcher: dispatcher ?? pooledHttpDispatcher,
   } as RequestInit);
 }
