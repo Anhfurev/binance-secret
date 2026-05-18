@@ -28,6 +28,18 @@ export function evaluateVelocityBreakout(
 }
 
 /** Best watchlist symbol matching explosive RVOL + RSI velocity gate. */
+export function formatVelocityTp70Summary(symbols: string[]): string {
+  const uniq = [
+    ...new Set(
+      symbols
+        .map((s) => s.toUpperCase().replace(/\//g, ""))
+        .filter((s) => s.length > 0),
+    ),
+  ];
+  if (uniq.length === 0) return "velocity-tp-70:unknown";
+  return `velocity-tp-70:${uniq.join(",")}`;
+}
+
 export function pickVelocityBreakoutCandidate(params: {
   symbols: string[];
   snapshots: Map<string, Scalp1mSnapshot>;

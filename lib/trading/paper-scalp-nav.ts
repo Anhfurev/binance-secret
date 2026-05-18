@@ -139,8 +139,8 @@ export function humanPaperScalpReason(summary: string): string {
   };
   if (fixed[summary]) return fixed[summary];
   if (summary.startsWith("velocity-tp-70:")) {
-    const sym = summary.replace("velocity-tp-70:", "");
-    return `Velocity 70% take-profit banked on ${sym} — runner trails at breakeven`;
+    const syms = summary.replace("velocity-tp-70:", "").replace(/,/g, ", ");
+    return `Velocity 70% take-profit banked on ${syms} — runners trail at breakeven`;
   }
   if (summary.startsWith("opened:")) {
     return `BUY filled — ${summary.replace("opened:", "").replace(/:/g, " ")}`;

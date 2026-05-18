@@ -191,11 +191,6 @@ export async function loadPaperScalpMarketHarvest(
   );
   const snapshots = new Map<string, Scalp1mSnapshot>();
   const candlesBySymbol = new Map<string, ScalpCandle[]>();
-  const startedAt = performance.now();
-
-  console.log(
-    `[paper-15m] parallel kline scan: ${unique.length} symbol(s) [${unique.join(", ")}]`,
-  );
 
   const rows = await Promise.all(unique.map((symbol) => loadSnapshotForSymbol(symbol)));
   for (const { symbol, snap, candles } of rows) {
@@ -203,10 +198,6 @@ export async function loadPaperScalpMarketHarvest(
     if (snap) snapshots.set(symbol, snap);
   }
 
-  const durationMs = Number((performance.now() - startedAt).toFixed(1));
-  console.log(
-    `[paper-15m] kline scan done: ${snapshots.size}/${unique.length} snapshots in ${durationMs}ms`,
-  );
   return { snapshots, candlesBySymbol, source: "binance" };
 }
 

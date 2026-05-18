@@ -1,9 +1,10 @@
 /**
  * Single-flight gate for /api/automation/paper/run (one PM2 / Node process).
- * Prevents same-millisecond cron pile-ups and enforces 1-hour minimum interval.
+ * Prevents cron pile-ups; enforces minimum interval between successful ticks.
  */
 
-const HOUR_MS = 3_600_000;
+/** Default 2m — matches aggressive cron + `PAPER_HEARTBEAT_INTERVAL_MS=120000`. */
+const DEFAULT_INTERVAL_MS = 120_000;
 
 let isProcessing = false;
 let lastCompletedAtMs = 0;
@@ -11,9 +12,9 @@ let lastStartedAtMs = 0;
 
 function resolveIntervalMs(): number {
   const raw = String(process.env.PAPER_HEARTBEAT_INTERVAL_MS ?? "").trim();
-  const n = raw ? Number(raw) : HOUR_MS;
-  if (!Number.isFinite(n) || n < 60_000) return HOUR_MS;
-  return Math.min(n, 24 * HOUR_MS);
+  const n = raw ? Number(raw) : DEFAULT_INTERVAL_MS;
+  if (!Number.isFinite(n) || n < 60_000) return DEFAULT_INTERVAL_MS;
+  return Math.min(n, 24 * 3_600_000);
 }
 
 export type PaperHeartbeatGateResult =
@@ -25,7 +26,10 @@ export type PaperHeartbeatGateResult =
       lastCompletedAtMs: number;
     };
 
-export function tryAcquirePaperHeartbeat(): PaperHeartbeatGateResult {
+export function tryAcquirePaperHeartbeat(options?: {
+  /** WebSocket velocity wake — skip interval gate, keep single-flight. */
+  skipIntervalGate?: boolean;
+}): PaperHeartbeatGateResult {
   const now = Date.now();
   const intervalMs = resolveIntervalMs();
 
@@ -38,9 +42,11 @@ export function tryAcquirePaperHeartbeat(): PaperHeartbeatGateResult {
     };
   }
 
-  // TEST: temporarily bypass hourly interval safety gate (re-enable after live-fire test)
-  /*
-  if (lastCompletedAtMs > 0 && now - lastCompletedAtMs < intervalMs) {
+  if (
+    !options?.skipIntervalGate &&
+    lastCompletedAtMs > 0 &&
+    now - lastCompletedAtMs < intervalMs
+  ) {
     return {
       ok: false,
       reason: "interval_not_elapsed",
@@ -48,19 +54,16 @@ export function tryAcquirePaperHeartbeat(): PaperHeartbeatGateResult {
       lastCompletedAtMs,
     };
   }
-  */
 
   isProcessing = true;
   lastStartedAtMs = now;
   return { ok: true };
 }
 
-/** Failed tick: release concurrency only — hourly window unchanged (immediate retry allowed). */
 export function releasePaperHeartbeatWithoutComplete(): void {
   isProcessing = false;
 }
 
-/** Successful tick: release concurrency and start the next hourly interval. */
 export function releasePaperHeartbeatSuccess(): void {
   isProcessing = false;
   lastCompletedAtMs = Date.now();

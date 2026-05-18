@@ -22,7 +22,6 @@ import { queuePaperWorkspacePersist } from "@/lib/trading/paper-run-persist";
 import {
   isPaperRunBudgetExceeded,
   PAPER_RUN_BUDGET_MS,
-  remainingPaperRunBudgetMs,
 } from "@/lib/trading/paper-run-budget";
 import { resolvePaperTelegramMasterWorkspaceKey } from "@/lib/trading/paper-scalp-notify-gate";
 import { sendPaperEngineCrashAlert } from "@/lib/trading/paper-scalp-telegram-crash";
@@ -80,7 +79,6 @@ async function executePaperScalpOrchestrator(): Promise<
   | PaperRunOrchestratorResult
 > {
   const startTime = performance.now();
-  const timestamp = new Date().toISOString();
 
   const listResult = await fetchDemoWorkspacesSafe();
   if (!listResult.ok) {
@@ -90,10 +88,6 @@ async function executePaperScalpOrchestrator(): Promise<
       body: { error: listResult.error ?? "Unable to load demo workspaces" },
     };
   }
-
-  console.log(
-    `[paper-scalp] Supabase OK — loaded ${listResult.data.length} workspace(s) | budget=${PAPER_RUN_BUDGET_MS}ms`,
-  );
 
   const masterWorkspaceKey = resolvePaperTelegramMasterWorkspaceKey(
     listResult.data,
@@ -137,10 +131,6 @@ async function executePaperScalpOrchestrator(): Promise<
   const momentum = resolvePaperMomentumSettings(
     sampleSettings ?? {},
     Number(process.env.PAPER_RSI_MAX_BUY ?? 70),
-  );
-
-  console.log(
-    `[${timestamp}] [paper-scalp] snapshots=${prepared.scalpSnapshots.size} source=${prepared.snapshotSource} marks=${prepared.marketSource} | remaining=${remainingPaperRunBudgetMs(startTime).toFixed(0)}ms`,
   );
 
   let scanned = 0;
@@ -277,6 +267,16 @@ async function executePaperScalpOrchestrator(): Promise<
     persistQueued,
   });
 
+  const notify = evaluateManifestTelegramDispatch({
+    ranAt: outcome.ranAt,
+    actions,
+    workspaceSummaries,
+    pyramidedAny,
+    positionClosedAny,
+    velocityPartialAny,
+    entryAny,
+  });
+
   const manifest = buildManifestPayload(outcome, {
     masterWorkspaceKey,
     masterAccount,
@@ -289,22 +289,13 @@ async function executePaperScalpOrchestrator(): Promise<
     symbols: prepared.symbols,
     btcRegimeActive,
     apiDegraded: prepared.apiDegraded,
-  });
-
-  const notify = evaluateManifestTelegramDispatch({
-    ranAt: outcome.ranAt,
-    actions,
-    workspaceSummaries,
-    pyramidedAny,
-    positionClosedAny,
-    velocityPartialAny,
-    entryAny,
+    tacticalPulseSummary: notify.reason === "tactical_pulse",
   });
 
   return finalizePaperTickRun(outcome, manifest, notify);
 }
 
-/** Sync return — Telegram only on high-signal / hourly sync. */
+/** Sync return — Telegram on high-signal or ULAT 10m tactical pulse. */
 function finalizePaperTickRun(
   outcome: PaperRunOrchestratorResult,
   manifest: EngineManifestInput,
@@ -337,6 +328,7 @@ function buildManifestPayload(
     symbols: string[];
     btcRegimeActive: boolean;
     apiDegraded: boolean;
+    tacticalPulseSummary?: boolean;
   },
 ): EngineManifestInput {
   return {
@@ -362,6 +354,7 @@ function buildManifestPayload(
     persistQueued: outcome.persistQueued ?? 0,
     btcRegimeActive: ctx.btcRegimeActive,
     apiDegraded: ctx.apiDegraded,
+    tacticalPulseSummary: ctx.tacticalPulseSummary,
   };
 }
 

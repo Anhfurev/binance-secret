@@ -73,6 +73,8 @@ export type EngineManifestInput = {
   updated: number;
   persistQueued: number;
   btcRegimeActive?: boolean;
+  /** 10-minute ULAT tactical pulse (flat-market status digest). */
+  tacticalPulseSummary?: boolean;
 };
 
 function norm(sym: string): string {
@@ -238,8 +240,12 @@ export function buildUnifiedEngineManifest(input: EngineManifestInput): string {
   );
   const atMaxLegs = !passesCorrelationExposureGate(openLegCount);
 
+  const title = input.tacticalPulseSummary
+    ? "📋 TACTICAL PULSE SUMMARY · 10m ULAT"
+    : "📋 UNIFIED ENGINE MANIFEST";
+
   const lines: string[] = [
-    tgManifestTitle("📋 UNIFIED ENGINE MANIFEST"),
+    tgManifestTitle(title),
     tgBullet(
       `${escapeTelegramHtml(input.ranAt)} · ${escapeTelegramHtml(String(input.durationMs.toFixed(0)))}ms · ${input.partial ? "PARTIAL" : "OK"}`,
     ),

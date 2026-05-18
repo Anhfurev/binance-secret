@@ -13,7 +13,8 @@
     "tune:atr": "node scripts/walk-forward-atr-tune.mjs",
     "audit:daily": "node scripts/daily-salary-audit/run.mjs",
     "check:bot": "node scripts/decision-health-check.mjs",
-    "audit:vetoes": "npx tsx scripts/audit-historical-vetoes.ts"
+    "audit:vetoes": "npx tsx scripts/audit-historical-vetoes.ts",
+    "ws:daemon": "npx tsx scripts/binance-websocket-daemon.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
@@ -69,6 +70,7 @@
     "tailwind-merge": "^3.3.1",
     "undici": "^6.25.0",
     "vaul": "^1.1.2",
+    "ws": "^8.18.0",
     "zod": "^3.24.1",
     "zustand": "^5.0.12"
   },
@@ -78,6 +80,7 @@
     "@types/node": "^22",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "@types/ws": "^8.5.13",
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.2.2",
     "jest": "^30.3.0",

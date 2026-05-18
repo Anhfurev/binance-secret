@@ -135,17 +135,37 @@ function tryVelocityPartialTakeProfit(
     ],
   };
 
-  const nextAccount = patchOpenLeg(
+  const partialRecord: DemoTrade = {
+    ...trade,
+    id: `${trade.id}-v70-${Date.now()}`,
+    amount: sellQty,
+    value: costSold,
+    status: "closed",
+    exitPrice: mark,
+    pnl: partialPnl,
+    pnlPercent:
+      costSold > 0 ? Number(((partialPnl / costSold) * 100).toFixed(2)) : 0,
+    closedAt: new Date(),
+    notes: `${trade.notes ?? ""} | velocity-partial-70`.trim(),
+    tags: [...(trade.tags ?? []), "velocity-partial-70", "paper-scalp"],
+  };
+
+  const patched = patchOpenLeg(
     {
       ...account,
       currentBalance: Number((account.currentBalance + proceeds).toFixed(4)),
       dailyPnl: Number(((account.dailyPnl ?? 0) + partialPnl).toFixed(4)),
+      tradeHistory: [partialRecord, ...account.tradeHistory],
     },
     trade.id,
     runner,
   );
 
-  return { account: nextAccount, executed: true, symbol };
+  return {
+    account: recalculateAccountMetrics(patched),
+    executed: true,
+    symbol,
+  };
 }
 
 /**

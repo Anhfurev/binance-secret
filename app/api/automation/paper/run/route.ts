@@ -38,12 +38,16 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const gate = tryAcquirePaperHeartbeat();
+  const velocityWake =
+    request.headers.get("x-paper-velocity-wake") === "1";
+  const gate = tryAcquirePaperHeartbeat({ skipIntervalGate: velocityWake });
   if (!gate.ok) {
     const state = readPaperHeartbeatState();
-    console.log(
-      `[paper-scalp] heartbeat rejected: ${gate.reason} retryAfterMs=${gate.retryAfterMs}`,
-    );
+    if (!velocityWake) {
+      console.log(
+        `[paper-scalp] heartbeat rejected: ${gate.reason} retryAfterMs=${gate.retryAfterMs}`,
+      );
+    }
     return NextResponse.json(
       {
         ok: false,

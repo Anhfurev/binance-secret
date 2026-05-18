@@ -1,5 +1,5 @@
-/** Temporarily lifted for Next.js dev server overhead while testing all workspaces. */
-const BUDGET_MS = 4_000;
+/** Hot-path budget — keep under cron interval (2m) with headroom for klines. */
+const BUDGET_MS = 950;
 
 function resolvePaperRunBudgetMs(): number {
   const raw = String(process.env.PAPER_RUN_BUDGET_MS ?? "").trim();

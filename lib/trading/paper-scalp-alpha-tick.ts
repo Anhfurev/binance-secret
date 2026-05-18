@@ -18,7 +18,10 @@ import {
 import { evaluateOpenPaperPosition } from "@/lib/trading/paper-scalp-positions";
 import { tryPyramidLayerOnOpenLeg } from "@/lib/trading/paper-scalp-pyramid";
 import { computeOpenEndedTakeProfit } from "@/lib/trading/paper-scalp-trailing-exit";
-import { pickVelocityBreakoutCandidate } from "@/lib/trading/paper-scalp-velocity";
+import {
+  formatVelocityTp70Summary,
+  pickVelocityBreakoutCandidate,
+} from "@/lib/trading/paper-scalp-velocity";
 import {
   calculateDynamicRegime,
   resolveBtcCandles,
@@ -68,6 +71,7 @@ export function runPaperScalpAlphaTick(params: {
   let stopsAdjusted = false;
   let pyramided = false;
   let velocityPartial = false;
+  const velocityPartialSymbols: string[] = [];
   let positionClosed = false;
   let lastCloseSummary: string | null = null;
 
@@ -84,7 +88,10 @@ export function runPaperScalpAlphaTick(params: {
     });
     account = evalResult.account;
     if (evalResult.stopAdjusted) stopsAdjusted = true;
-    if (evalResult.velocityPartial) velocityPartial = true;
+    if (evalResult.velocityPartial) {
+      velocityPartial = true;
+      velocityPartialSymbols.push(normalizeSymbol(open.symbol));
+    }
     if (evalResult.exit?.changed) {
       positionClosed = true;
       lastCloseSummary = evalResult.exit.summary;
@@ -113,17 +120,15 @@ export function runPaperScalpAlphaTick(params: {
   const openLegCount = account.openPositions.length;
 
   if (velocityPartial) {
-    const sym =
-      account.openPositions.find((p) => p.velocityTakeProfitSecured)?.symbol ??
-      "unknown";
     return withTickMeta(
       {
         account,
         changed: true,
-        summary: `velocity-tp-70:${normalizeSymbol(sym)}`,
+        summary: formatVelocityTp70Summary(velocityPartialSymbols),
       },
       {
         velocityPartial: true,
+        velocityPartialSymbols,
         positionClosed: positionClosed || undefined,
         pyramided: pyramided || undefined,
       },
@@ -251,15 +256,15 @@ export function runPaperScalpAlphaTick(params: {
           summary: pyramided
             ? "pyramid-layer-added"
             : velocityPartial
-              ? `velocity-tp-70:${normalizeSymbol(
-                  account.openPositions.find((p) => p.velocityTakeProfitSecured)
-                    ?.symbol ?? "unknown",
-                )}`
+              ? formatVelocityTp70Summary(velocityPartialSymbols)
               : "holding-position",
         },
         {
           pyramided: pyramided || undefined,
           velocityPartial: velocityPartial || undefined,
+          velocityPartialSymbols: velocityPartialSymbols.length
+            ? velocityPartialSymbols
+            : undefined,
         },
       );
     }

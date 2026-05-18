@@ -190,9 +190,5 @@ export function resolvePaperScalpSymbols(
 
   const resolved = sanitizePaperScalpSymbolList(union);
 
-  console.log(
-    `[paper-scalp] resolvePaperScalpSymbols: workspace=${workspaceClean.length} env=${fromEnv.length} default=${DEFAULT_PAPER_WATCH_SYMBOLS.length} → ${resolved.length} tickers`,
-  );
-
   return resolved;
 }

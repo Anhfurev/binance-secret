@@ -10,6 +10,8 @@ export interface PaperAutomationTickResult {
   positionClosed?: boolean;
   /** 70% velocity take-profit partial sell. */
   velocityPartial?: boolean;
+  /** Symbols that banked 70% this tick (manifest / notify). */
+  velocityPartialSymbols?: string[];
   /** New position opened. */
   entryExecuted?: boolean;
 }
