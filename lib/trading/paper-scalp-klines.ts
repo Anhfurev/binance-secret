@@ -1,4 +1,5 @@
 import { pooledFetch } from "@/lib/pooled-fetch";
+import type { CoinData } from "@/lib/types";
 import {
   buildScalp1mSnapshot,
   type Scalp1mSnapshot,
@@ -67,5 +68,35 @@ export async function loadPaperScalpSnapshots(
   for (const { symbol, snap } of results) {
     if (snap) map.set(symbol, snap);
   }
+  return map;
+}
+
+/** Network-free fallback when Binance klines are unavailable on the server. */
+export function buildMockScalpSnapshots(
+  symbols: string[],
+  coins: CoinData[],
+): Map<string, Scalp1mSnapshot> {
+  const map = new Map<string, Scalp1mSnapshot>();
+  const now = Date.now();
+
+  for (const raw of symbols) {
+    const symbol = raw.toUpperCase().replace(/\//g, "");
+    const sym = symbol.endsWith("USDT") ? symbol : `${symbol}USDT`;
+    const base = sym.replace(/USDT$/, "").toLowerCase();
+    const coin = coins.find((c) => c.symbol.toLowerCase() === base);
+    const close = coin?.current_price ?? 100;
+
+    const candles: ScalpCandle[] = Array.from({ length: 48 }, (_, i) => ({
+      open: close,
+      high: close * 1.0008,
+      low: close * 0.9992,
+      close,
+      closeTime: now - (48 - i) * 60_000,
+    }));
+
+    const snap = buildScalp1mSnapshot(sym, candles);
+    if (snap) map.set(sym, snap);
+  }
+
   return map;
 }

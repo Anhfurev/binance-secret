@@ -5,12 +5,6 @@ import {
   type Scalp1mSnapshot,
 } from "@/lib/trading/paper-scalp-indicators";
 import type { CoinData, DemoAccount, DemoTrade } from "@/lib/types";
-import {
-  formatSnapshotScanLine,
-  notifyPaperScalpBuy,
-  notifyPaperScalpDecision,
-  notifyPaperScalpExit,
-} from "@/lib/trading/paper-scalp-telegram";
 
 export interface PaperAutomationTickResult {
   account: DemoAccount;
@@ -84,15 +78,6 @@ function closeTrade(
     pnlPercent,
   });
 
-  notifyPaperScalpExit({
-    symbol: trade.symbol,
-    reason,
-    exitPrice: closePrice,
-    performancePct: pnlPercent,
-    entryPrice: trade.entryPrice,
-    pnlUsd: pnl,
-  });
-
   const closedTrade: DemoTrade = {
     ...trade,
     status: pnl >= 0 ? "closed" : "stopped",
@@ -148,15 +133,6 @@ export function runPaperScalp1mTick(params: {
   const { account, snapshots, marketCoins, copyProfile } = params;
 
   if (account.circuitBreakerTripped) {
-    notifyPaperScalpDecision({
-      kind: "skip",
-      reason: "circuit-breaker",
-      details: {
-        dailyPnl: account.dailyPnl ?? 0,
-        balance: account.currentBalance,
-      },
-      throttleKey: "circuit-breaker",
-    });
     return { account, changed: false, summary: "circuit-breaker" };
   }
 
@@ -198,37 +174,10 @@ export function runPaperScalp1mTick(params: {
       unrealizedPct,
     });
 
-    notifyPaperScalpDecision({
-      kind: "hold",
-      reason: "holding-open-position",
-      symbol: sym,
-      details: {
-        mark,
-        unrealizedPct,
-        stopLoss: dynamicStop,
-        takeProfit: open.takeProfit,
-        ema9: snap?.ema9,
-        ema21: snap?.ema21,
-        atr14,
-        bearishCross: snap?.bearishCross ?? false,
-      },
-      throttleKey: `hold:${sym}`,
-    });
-
     return { account, changed: false, summary: "holding-position" };
   }
 
   if (account.openPositions.length >= maxOpenForProfile(copyProfile)) {
-    notifyPaperScalpDecision({
-      kind: "skip",
-      reason: "max-open-positions",
-      details: {
-        openCount: account.openPositions.length,
-        maxAllowed: maxOpenForProfile(copyProfile),
-        profile: copyProfile,
-      },
-      throttleKey: "max-open-positions",
-    });
     return { account, changed: false, summary: "max-open-positions" };
   }
 
@@ -238,19 +187,6 @@ export function runPaperScalp1mTick(params: {
 
   const entrySnap = candidates[0];
   if (!entrySnap) {
-    const scanLines = [...snapshots.values()].map((s) =>
-      formatSnapshotScanLine(normalizeSymbol(s.symbol), s),
-    );
-    notifyPaperScalpDecision({
-      kind: "skip",
-      reason: "no-ema-bullish-cross",
-      details: {
-        balance: account.currentBalance,
-        symbolsScanned: snapshots.size,
-        scan: scanLines.join(" · ") || "no snapshots",
-      },
-      throttleKey: "no-ema-bullish-cross",
-    });
     return { account, changed: false, summary: "no-ema-bullish-cross" };
   }
 
@@ -262,17 +198,6 @@ export function runPaperScalp1mTick(params: {
     logScalp("SKIP entry — insufficient balance", {
       balance: account.currentBalance,
       notional,
-    });
-    notifyPaperScalpDecision({
-      kind: "skip",
-      reason: "insufficient-balance",
-      symbol: sym,
-      details: {
-        balance: account.currentBalance,
-        requiredNotional: notional,
-        positionFraction: POSITION_FRACTION,
-      },
-      throttleKey: `insufficient-balance:${sym}`,
     });
     return { account, changed: false, summary: "insufficient-balance" };
   }
@@ -297,17 +222,6 @@ export function runPaperScalp1mTick(params: {
     positionSizeUsd: notional,
     positionFraction: POSITION_FRACTION,
     contracts: amount,
-  });
-
-  notifyPaperScalpBuy({
-    symbol: sym,
-    entryPrice,
-    positionSizeUsd: notional,
-    stopLoss,
-    takeProfit,
-    ema9: entrySnap.ema9,
-    ema21: entrySnap.ema21,
-    atr14: entrySnap.atr14,
   });
 
   const trade: DemoTrade = {

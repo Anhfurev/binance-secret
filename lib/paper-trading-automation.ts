@@ -4,8 +4,6 @@ import {
   type PaperAutomationTickResult,
 } from "@/lib/trading/paper-scalp-engine";
 import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
-import { notifyPaperScalpDecision } from "@/lib/trading/paper-scalp-telegram";
-
 type AutoPilotMode = "signals" | "dca";
 type CopyProfile = "conservative" | "balanced" | "aggressive";
 
@@ -24,15 +22,6 @@ export function runPaperTradingAutomationTick(params: {
   const snapshots = params.scalpSnapshots ?? new Map<string, Scalp1mSnapshot>();
 
   if (snapshots.size === 0) {
-    notifyPaperScalpDecision({
-      kind: "skip",
-      reason: "no-1m-snapshots",
-      details: {
-        balance: params.account.currentBalance,
-        hint: "klines fetch failed or symbols empty",
-      },
-      throttleKey: "no-1m-snapshots",
-    });
     return {
       account: params.account,
       changed: false,
