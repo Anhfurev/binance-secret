@@ -46,29 +46,78 @@ export async function fetch1mKlines(
   url.searchParams.set("interval", "1m");
   url.searchParams.set("limit", String(Math.min(1000, Math.max(30, limit))));
 
-  const res = await pooledFetch(url.toString(), { cache: "no-store" });
-  if (!res.ok) return [];
-  const rows = (await res.json()) as unknown[];
-  return parseKlineRows(rows);
+  try {
+    const res = await pooledFetch(url.toString(), { cache: "no-store" });
+    if (!res.ok) return [];
+    const rows = (await res.json()) as unknown[];
+    return parseKlineRows(rows);
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("[BINANCE-FETCH-BLOCKED] fetch1mKlines failed", {
+      symbol: sym,
+      message: err.message,
+      stack: err.stack,
+      cause: err.cause,
+    });
+    return [];
+  }
 }
 
 export async function loadPaperScalpSnapshots(
   symbols: string[],
 ): Promise<Map<string, Scalp1mSnapshot>> {
   const unique = [...new Set(symbols.map((s) => s.toUpperCase()))];
-  const results = await Promise.all(
-    unique.map(async (symbol) => {
-      const candles = await fetch1mKlines(symbol);
-      const snap = buildScalp1mSnapshot(symbol, candles);
-      return { symbol, snap };
-    }),
-  );
+  try {
+    const results = await Promise.all(
+      unique.map(async (symbol) => {
+        const candles = await fetch1mKlines(symbol);
+        const snap = buildScalp1mSnapshot(symbol, candles);
+        return { symbol, snap };
+      }),
+    );
 
-  const map = new Map<string, Scalp1mSnapshot>();
-  for (const { symbol, snap } of results) {
-    if (snap) map.set(symbol, snap);
+    const map = new Map<string, Scalp1mSnapshot>();
+    for (const { symbol, snap } of results) {
+      if (snap) map.set(symbol, snap);
+    }
+    return map;
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("[BINANCE-FETCH-BLOCKED] loadPaperScalpSnapshots failed", {
+      message: err.message,
+      stack: err.stack,
+      cause: err.cause,
+    });
+    return new Map();
   }
-  return map;
+}
+
+/** Binance HTTPS with mock fallback — never throws to the route handler. */
+export async function loadPaperScalpSnapshotsResilient(
+  symbols: string[],
+  marketCoins: CoinData[],
+): Promise<{ snapshots: Map<string, Scalp1mSnapshot>; source: "binance" | "mock" }> {
+  try {
+    const snapshots = await loadPaperScalpSnapshots(symbols);
+    if (snapshots.size > 0) {
+      return { snapshots, source: "binance" };
+    }
+    console.warn(
+      "[BINANCE-FETCH-BLOCKED] empty kline snapshots — using buildMockScalpSnapshots()",
+    );
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("[BINANCE-FETCH-BLOCKED] resilient loader caught", {
+      message: err.message,
+      stack: err.stack,
+      cause: err.cause,
+    });
+  }
+
+  return {
+    snapshots: buildMockScalpSnapshots(symbols, marketCoins),
+    source: "mock",
+  };
 }
 
 /** Network-free fallback when Binance klines are unavailable on the server. */

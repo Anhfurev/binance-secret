@@ -11,11 +11,12 @@ import { runPaperTradingAutomationTick } from "@/lib/paper-trading-automation";
 import {
   listDemoWorkspacesFromSupabase,
   saveDemoWorkspaceForOwner,
+  type DemoWorkspaceListResult,
 } from "@/lib/supabase-demo";
 import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
 import {
   buildMockScalpSnapshots,
-  loadPaperScalpSnapshots,
+  loadPaperScalpSnapshotsResilient,
   resolvePaperScalpSymbols,
 } from "@/lib/trading/paper-scalp-klines";
 import {
@@ -26,13 +27,21 @@ import type { CoinData } from "@/lib/types";
 
 type TradingAction = "BUY" | "SELL" | "HOLD" | "NO_TRADE";
 
+function logFatalRouteException(error: unknown): void {
+  const err = error instanceof Error ? error : new Error(String(error));
+  console.error("❌ [FATAL ROUTE EXCEPTION] LOG DETAILS:", {
+    message: err?.message,
+    stack: err?.stack,
+    cause: err?.cause,
+  });
+}
+
 function isAuthorized(request: NextRequest): boolean {
   const secret = process.env.CRON_SECRET;
   if (!secret) return true;
   return request.headers.get("authorization") === `Bearer ${secret}`;
 }
 
-/** Instant market prices — no localhost loopback fetch. */
 function resolveMarketCoins(): CoinData[] {
   return mockCoins;
 }
@@ -92,6 +101,30 @@ function dispatchRouteTelegram(
   }
 }
 
+async function fetchDemoWorkspacesSafe(): Promise<DemoWorkspaceListResult> {
+  try {
+    console.log("[paper-scalp] Supabase workspace fetch starting…", {
+      urlConfigured: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
+      anonConfigured: Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+      serviceRoleConfigured: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+      tables: ["demo_workspaces", "user_demo_workspaces"],
+    });
+    return await listDemoWorkspacesFromSupabase();
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("❌ [SUPABASE-WORKSPACE-EXCEPTION] isolated catch:", {
+      message: err.message,
+      stack: err.stack,
+      cause: err.cause,
+    });
+    return {
+      ok: false,
+      data: [],
+      error: err.message || "Supabase workspace fetch threw",
+    };
+  }
+}
+
 export async function GET(request: NextRequest) {
   console.log(
     "🚨 [CRITICAL DEBUG] -> API ROUTE HIT! The request successfully reached the route handler.",
@@ -106,17 +139,21 @@ export async function GET(request: NextRequest) {
   const timestamp = new Date().toISOString();
 
   try {
-    const listResult = await listDemoWorkspacesFromSupabase();
+    const listResult = await fetchDemoWorkspacesSafe();
     if (!listResult.ok) {
-      console.error(
-        `[paper-scalp] workspace list failed:`,
-        listResult.error ?? "unknown",
-      );
+      console.error("[paper-scalp] workspace list failed:", listResult.error);
       return NextResponse.json(
-        { error: listResult.error ?? "Unable to load demo workspaces" },
+        {
+          error: listResult.error ?? "Unable to load demo workspaces",
+          phase: "supabase_workspaces",
+        },
         { status: 503 },
       );
     }
+
+    console.log(
+      `[paper-scalp] Supabase OK — loaded ${listResult.data.length} workspace(s)`,
+    );
 
     const openSymbols = listResult.data.flatMap((ws) => {
       const snap = ws.snapshot;
@@ -128,16 +165,26 @@ export async function GET(request: NextRequest) {
     const symbols = resolvePaperScalpSymbols(openSymbols);
     const marketCoins = resolveMarketCoins();
 
-    let scalpSnapshots = await loadPaperScalpSnapshots(symbols);
-    if (scalpSnapshots.size === 0) {
-      console.warn(
-        `[paper-scalp] Binance klines empty — building mock 1m snapshots from mockCoins`,
-      );
+    let snapshotSource: "binance" | "mock" = "mock";
+    let scalpSnapshots: Map<string, Scalp1mSnapshot>;
+
+    try {
+      const loaded = await loadPaperScalpSnapshotsResilient(symbols, marketCoins);
+      scalpSnapshots = loaded.snapshots;
+      snapshotSource = loaded.source;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      console.error("[BINANCE-FETCH-BLOCKED] route-level kline catch:", {
+        message: err.message,
+        stack: err.stack,
+        cause: err.cause,
+      });
       scalpSnapshots = buildMockScalpSnapshots(symbols, marketCoins);
+      snapshotSource = "mock";
     }
 
     console.log(
-      `[${timestamp}] [paper-scalp] market=mockCoins snapshots=${scalpSnapshots.size} symbols=[${symbols.join(", ")}]`,
+      `[${timestamp}] [paper-scalp] market=mockCoins snapshots=${scalpSnapshots.size} source=${snapshotSource} symbols=[${symbols.join(", ")}]`,
     );
 
     let scanned = 0;
@@ -231,19 +278,22 @@ export async function GET(request: NextRequest) {
       actions,
       symbols,
       snapshotsLoaded: scalpSnapshots.size,
+      snapshotSource,
       marketSource: "mockCoins",
       ranAt: new Date().toISOString(),
       durationMs: Number(duration),
     });
   } catch (error: unknown) {
+    logFatalRouteException(error);
     const duration = (performance.now() - startTime).toFixed(2);
     const message = error instanceof Error ? error.message : String(error);
-    console.error(
-      `[${timestamp}] ❌ CRITICAL LOOP ERROR after ${duration}ms:`,
-      message,
-    );
     return NextResponse.json(
-      { error: "Internal execution failure", details: message },
+      {
+        error: "Internal execution failure",
+        details: message,
+        phase: "fatal_route_exception",
+        durationMs: Number(duration),
+      },
       { status: 500 },
     );
   }

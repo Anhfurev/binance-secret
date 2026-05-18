@@ -220,9 +220,25 @@ async function listDeviceDemoWorkspaces() {
   const client = supabaseAdmin ?? supabase;
   if (!client) return [];
 
-  const { data, error } = await client
-    .from(DEMO_WORKSPACES_TABLE)
-    .select("device_id, payload, updated_at");
+  let data: { device_id: string; payload: unknown; updated_at: string | null }[] | null;
+  let error: { message: string } | null;
+
+  try {
+    const result = await client
+      .from(DEMO_WORKSPACES_TABLE)
+      .select("device_id, payload, updated_at");
+    data = result.data;
+    error = result.error;
+  } catch (fetchError) {
+    const err =
+      fetchError instanceof Error ? fetchError : new Error(String(fetchError));
+    console.error("[SUPABASE-WORKSPACE-FETCH] demo_workspaces network error", {
+      message: err.message,
+      stack: err.stack,
+      cause: err.cause,
+    });
+    throw err;
+  }
 
   if (error) {
     throw new Error(formatWorkspaceError(error.message));
@@ -250,9 +266,28 @@ async function listUserDemoWorkspaces() {
     return [];
   }
 
-  const { data, error } = await supabaseAdmin
-    .from(USER_DEMO_WORKSPACES_TABLE)
-    .select("user_id, payload, updated_at");
+  let data: { user_id: string; payload: unknown; updated_at: string | null }[] | null;
+  let error: { message: string } | null;
+
+  try {
+    const result = await supabaseAdmin
+      .from(USER_DEMO_WORKSPACES_TABLE)
+      .select("user_id, payload, updated_at");
+    data = result.data;
+    error = result.error;
+  } catch (fetchError) {
+    const err =
+      fetchError instanceof Error ? fetchError : new Error(String(fetchError));
+    console.error(
+      "[SUPABASE-WORKSPACE-FETCH] user_demo_workspaces network error",
+      {
+        message: err.message,
+        stack: err.stack,
+        cause: err.cause,
+      },
+    );
+    throw err;
+  }
 
   if (error) {
     throw new Error(formatWorkspaceError(error.message));
@@ -338,13 +373,16 @@ export async function listDemoWorkspacesFromSupabase(): Promise<DemoWorkspaceLis
       data: [...deviceRecords, ...userRecords],
     };
   } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("[SUPABASE-WORKSPACE-FETCH] listDemoWorkspacesFromSupabase failed", {
+      message: err.message,
+      stack: err.stack,
+      cause: err.cause,
+    });
     return {
       ok: false,
       data: [],
-      error:
-        error instanceof Error
-          ? error.message
-          : "Unable to load demo workspaces",
+      error: err.message || "Unable to load demo workspaces",
     };
   }
 }
