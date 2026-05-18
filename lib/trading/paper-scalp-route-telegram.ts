@@ -45,6 +45,7 @@ export function relayPaperScalpTickTelegram(params: {
       ema9: snap?.ema9 ?? 0,
       ema21: snap?.ema21 ?? 0,
       atr14: snap?.atr14 ?? 0,
+      rsi14: snap?.rsi14 ?? 50,
       nav,
     });
     return;
@@ -83,6 +84,7 @@ export function relayPaperScalpTickTelegram(params: {
         takeProfit: open.takeProfit,
         ema9: snap?.ema9,
         ema21: snap?.ema21,
+        rsi14: snap?.rsi14,
         atr14: snap?.atr14,
         bearishCross: snap?.bearishCross ?? false,
       },
@@ -109,12 +111,26 @@ export function relayPaperScalpTickTelegram(params: {
     return;
   }
 
+  if (summary === "rsi-overbought") {
+    notifyPaperScalpDecision({
+      kind: "skip",
+      reason: summary,
+      details: {
+        rsiMax: Number(process.env.PAPER_RSI_MAX_BUY ?? 70),
+      },
+      throttleKey: "rsi-overbought",
+      nav,
+    });
+    return;
+  }
+
   if (summary === "insufficient-balance") {
     notifyPaperScalpDecision({
       kind: "skip",
       reason: summary,
       details: {
-        requiredNotional: Number((account.currentBalance * 0.2).toFixed(2)),
+        requiredNotional: Number((nav.portfolio_nav_usdt * 0.2).toFixed(2)),
+        available: nav.available_usdt,
       },
       throttleKey: "insufficient-balance",
       nav,
@@ -122,12 +138,12 @@ export function relayPaperScalpTickTelegram(params: {
     return;
   }
 
-  if (summary === "no-1m-snapshots") {
+  if (summary === "no-hourly-snapshots" || summary === "no-1m-snapshots") {
     notifyPaperScalpDecision({
       kind: "skip",
-      reason: summary,
-      details: { hint: "klines fetch failed or symbols empty" },
-      throttleKey: "no-1m-snapshots",
+      reason: "no-hourly-snapshots",
+      details: { hint: "1h klines fetch failed or symbols empty" },
+      throttleKey: "no-hourly-snapshots",
       nav,
     });
     return;

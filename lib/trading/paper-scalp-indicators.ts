@@ -1,4 +1,4 @@
-/** 1m OHLCV math — EMA(9/21), ATR(14), crossover detection. */
+/** 1h OHLCV math — EMA(9/21), RSI(14), ATR(14), crossover detection. */
 
 import {
   priceIndicatorScale,
@@ -21,9 +21,46 @@ export type Scalp1mSnapshot = {
   prevEma9: number;
   prevEma21: number;
   atr14: number;
+  rsi14: number;
   bullishCross: boolean;
   bearishCross: boolean;
 };
+
+export function computeRsiSeries(closes: number[], period = 14): number[] {
+  if (closes.length < period + 1) return [];
+
+  const out: number[] = new Array(closes.length).fill(50);
+  let avgGain = 0;
+  let avgLoss = 0;
+
+  for (let i = 1; i < closes.length; i++) {
+    const change = closes[i] - closes[i - 1];
+    const gain = change > 0 ? change : 0;
+    const loss = change < 0 ? -change : 0;
+
+    if (i < period) continue;
+
+    if (i === period) {
+      let sumGain = 0;
+      let sumLoss = 0;
+      for (let j = i - period + 1; j <= i; j++) {
+        const c = closes[j] - closes[j - 1];
+        sumGain += c > 0 ? c : 0;
+        sumLoss += c < 0 ? -c : 0;
+      }
+      avgGain = sumGain / period;
+      avgLoss = sumLoss / period;
+    } else {
+      avgGain = (avgGain * (period - 1) + gain) / period;
+      avgLoss = (avgLoss * (period - 1) + loss) / period;
+    }
+
+    const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + rs);
+  }
+
+  return out;
+}
 
 export function computeEmaSeries(closes: number[], period: number): number[] {
   if (closes.length === 0) return [];
@@ -73,7 +110,7 @@ export function buildScalp1mSnapshot(
   symbol: string,
   candles: ScalpCandle[],
 ): Scalp1mSnapshot | null {
-  if (candles.length < 25) return null;
+  if (candles.length < 30) return null;
 
   const closes = candles.map((c) => c.close);
   const refClose = closes[closes.length - 1] ?? closes[0] ?? 0;
@@ -84,6 +121,7 @@ export function buildScalp1mSnapshot(
   const ema9 = computeEmaSeries(scaledCloses, 9);
   const ema21 = computeEmaSeries(scaledCloses, 21);
   const atrSeries = computeAtrSeries(scaledCandles, 14);
+  const rsiSeries = computeRsiSeries(scaledCloses, 14);
   const i = closes.length - 1;
   const prev = i - 1;
   if (prev < 0) return null;
@@ -93,6 +131,7 @@ export function buildScalp1mSnapshot(
   const prevEma9 = ema9[prev] / scale;
   const prevEma21 = ema21[prev] / scale;
   const atr14 = atrSeries[i] / scale;
+  const rsi14 = rsiSeries[i] ?? 50;
 
   return {
     symbol,
@@ -102,6 +141,7 @@ export function buildScalp1mSnapshot(
     prevEma9,
     prevEma21,
     atr14,
+    rsi14,
     bullishCross: prevEma9 <= prevEma21 && latestEma9 > latestEma21,
     bearishCross: prevEma9 >= prevEma21 && latestEma9 < latestEma21,
   };

@@ -97,9 +97,10 @@ export function notifyPaperScalpBuy(params: {
   ema9: number;
   ema21: number;
   atr14: number;
+  rsi14: number;
   nav?: PaperWorkspaceNav;
 }): void {
-  const { symbol, entryPrice, positionSizeUsd, stopLoss, takeProfit, ema9, ema21, atr14, nav } =
+  const { symbol, entryPrice, positionSizeUsd, stopLoss, takeProfit, ema9, ema21, atr14, rsi14, nav } =
     params;
   const lines = [
     `🚀 *[paper-scalp] BUY SIGNAL | ${symbol}*`,
@@ -107,7 +108,7 @@ export function notifyPaperScalpBuy(params: {
     `• Size Allocated: ${fmtUsd(positionSizeUsd)}`,
     `• ATR Stop Loss: ${fmtUsd(stopLoss, stopLoss >= 1 ? 4 : 6)}`,
     `• Target TP: ${fmtUsd(takeProfit, takeProfit >= 1 ? 4 : 6)}`,
-    `• Indicators: EMA9: ${fmtNum(ema9)} | EMA21: ${fmtNum(ema21)} | ATR: ${fmtNum(atr14, 8)}`,
+    `• Indicators (1h): EMA9: ${fmtNum(ema9)} | EMA21: ${fmtNum(ema21)} | RSI14: ${rsi14.toFixed(1)} | ATR: ${fmtNum(atr14)}`,
   ];
   if (nav) lines.push(formatNavTelegramBlock(nav));
   sendTelegramNotification(lines.join("\n"));
@@ -192,7 +193,14 @@ export function notifyPaperScalpDecision(params: {
 
 export function formatSnapshotScanLine(
   symbol: string,
-  snap: { ema9: number; ema21: number; atr14: number; bullishCross: boolean; bearishCross: boolean },
+  snap: {
+    ema9: number;
+    ema21: number;
+    atr14: number;
+    rsi14: number;
+    bullishCross: boolean;
+    bearishCross: boolean;
+  },
 ): string {
   const cross = snap.bullishCross
     ? "bullish ✓"
@@ -200,7 +208,7 @@ export function formatSnapshotScanLine(
       ? "bearish"
       : "none";
   return (
-    `${symbol}: EMA9 ${fmtNum(snap.ema9, 4)} | EMA21 ${fmtNum(snap.ema21, 4)} | ` +
-    `ATR ${fmtNum(snap.atr14, 6)} | cross ${cross}`
+    `${symbol}: EMA9 ${fmtNum(snap.ema9)} | EMA21 ${fmtNum(snap.ema21)} | ` +
+    `RSI ${snap.rsi14.toFixed(1)} | ATR ${fmtNum(snap.atr14)} | cross ${cross}`
   );
 }

@@ -9,7 +9,7 @@ type CopyProfile = "conservative" | "balanced" | "aggressive";
 
 export type { PaperAutomationTickResult };
 
-/** Institutional 1m EMA/ATR scalp tick (replaces legacy signal-only path). */
+/** Institutional 1h EMA/RSI/ATR paper tick. */
 export function runPaperTradingAutomationTick(params: {
   account: DemoAccount;
   signals?: AITradeSignal[];
@@ -25,7 +25,7 @@ export function runPaperTradingAutomationTick(params: {
     return {
       account: params.account,
       changed: false,
-      summary: "no-1m-snapshots",
+      summary: "no-hourly-snapshots",
     };
   }
 

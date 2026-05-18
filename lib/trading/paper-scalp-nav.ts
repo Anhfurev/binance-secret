@@ -2,7 +2,11 @@ import type { CoinData, DemoAccount } from "@/lib/types";
 
 export type PaperWorkspaceNav = {
   available_usdt: number;
+  open_positions_usdt: number;
   portfolio_nav_usdt: number;
+  starting_usdt: number;
+  session_pnl_usdt: number;
+  session_pnl_pct: number;
 };
 
 export function computePaperWorkspaceNav(
@@ -12,28 +16,52 @@ export function computePaperWorkspaceNav(
   const available_usdt = Number(
     Math.max(0, account.currentBalance).toFixed(2),
   );
+  const starting_usdt = Number(
+    Math.max(0, account.startingBalance || available_usdt).toFixed(2),
+  );
 
-  let openMarkValue = 0;
+  let open_positions_usdt = 0;
   for (const pos of account.openPositions) {
     const sym = pos.symbol.toUpperCase().replace(/\//g, "");
     const base = sym.replace(/USDT$/, "").toLowerCase();
     const coin = marketCoins.find((c) => c.symbol.toLowerCase() === base);
     const mark = coin?.current_price ?? pos.entryPrice;
-    openMarkValue += pos.amount * mark;
+    open_positions_usdt += pos.amount * mark;
   }
+  open_positions_usdt = Number(open_positions_usdt.toFixed(2));
 
   const portfolio_nav_usdt = Number(
-    (available_usdt + openMarkValue).toFixed(2),
+    (available_usdt + open_positions_usdt).toFixed(2),
   );
+  const session_pnl_usdt = Number((portfolio_nav_usdt - starting_usdt).toFixed(2));
+  const session_pnl_pct =
+    starting_usdt > 0
+      ? Number(((session_pnl_usdt / starting_usdt) * 100).toFixed(2))
+      : 0;
 
-  return { available_usdt, portfolio_nav_usdt };
+  return {
+    available_usdt,
+    open_positions_usdt,
+    portfolio_nav_usdt,
+    starting_usdt,
+    session_pnl_usdt,
+    session_pnl_pct,
+  };
 }
 
 export function formatNavTelegramBlock(nav: PaperWorkspaceNav): string {
+  const pnlSign = nav.session_pnl_usdt >= 0 ? "+" : "";
+  const pctSign = nav.session_pnl_pct >= 0 ? "+" : "";
   return [
-    `• Balance: $${nav.available_usdt.toFixed(2)} USDT`,
+    `• Balance (free USDT): $${nav.available_usdt.toFixed(2)}`,
+    nav.open_positions_usdt > 0
+      ? `• Open positions (mark): $${nav.open_positions_usdt.toFixed(2)}`
+      : null,
     `• Live Portfolio Value (NAV): $${nav.portfolio_nav_usdt.toFixed(2)} USDT`,
-  ].join("\n");
+    `• Session P&L: ${pnlSign}$${nav.session_pnl_usdt.toFixed(2)} (${pctSign}${nav.session_pnl_pct}%) vs $${nav.starting_usdt.toFixed(2)} start`,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function humanPaperScalpReason(summary: string): string {
@@ -41,14 +69,17 @@ export function humanPaperScalpReason(summary: string): string {
     "circuit-breaker":
       "Daily loss limit hit — circuit breaker blocks new entries",
     "no-ema-bullish-cross":
-      "No 1m EMA9/21 bullish cross on watched symbols",
-    "holding-position": "Managing open position (trailing stop / TP / EMA exit)",
+      "No 1h EMA9/21 bullish cross on watched symbols",
+    "rsi-overbought":
+      "RSI above overbought threshold — skip chasing extended move",
+    "holding-position": "Managing open 1h position (ATR stop / TP / EMA exit)",
     "insufficient-balance":
-      "Free USDT too low for the 20% position size slot",
-    "max-open-positions":
-      "Copy-profile max open positions reached",
+      "NAV too low for the 20% position size slot",
+    "max-open-positions": "Copy-profile max open positions reached",
     "no-1m-snapshots":
-      "1m indicator snapshots missing (klines blocked or empty)",
+      "1h indicator snapshots missing (klines blocked or empty)",
+    "no-hourly-snapshots":
+      "1h indicator snapshots missing (klines blocked or empty)",
   };
   if (fixed[summary]) return fixed[summary];
   if (summary.startsWith("opened:")) {

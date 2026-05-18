@@ -5,6 +5,7 @@ import {
   type Scalp1mSnapshot,
 } from "@/lib/trading/paper-scalp-indicators";
 import { formatMicroPrice } from "@/lib/trading/micro-price";
+import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import type { CoinData, DemoAccount, DemoTrade } from "@/lib/types";
 
 export interface PaperAutomationTickResult {
@@ -17,6 +18,14 @@ const POSITION_FRACTION = 0.2;
 const ASSET_PROTECTION_DROP_PCT = 0.015;
 const ATR_STOP_MULT = 1.5;
 const ATR_TP_MULT = 3;
+const DEFAULT_RSI_MAX_BUY = 70;
+
+function resolveRsiMaxBuy(): number {
+  const raw = String(process.env.PAPER_RSI_MAX_BUY ?? "").trim();
+  const n = raw ? Number(raw) : DEFAULT_RSI_MAX_BUY;
+  if (!Number.isFinite(n) || n <= 50) return DEFAULT_RSI_MAX_BUY;
+  return Math.min(n, 90);
+}
 
 type CopyProfile = "conservative" | "balanced" | "aggressive";
 
@@ -191,13 +200,24 @@ export function runPaperScalp1mTick(params: {
     return { account, changed: false, summary: "no-ema-bullish-cross" };
   }
 
+  const rsiMax = resolveRsiMaxBuy();
+  if (entrySnap.rsi14 > rsiMax) {
+    logScalp(`SKIP ${entrySnap.symbol} — RSI overbought`, {
+      rsi14: entrySnap.rsi14,
+      rsiMax,
+    });
+    return { account, changed: false, summary: "rsi-overbought" };
+  }
+
   const sym = normalizeSymbol(entrySnap.symbol);
   const entryPrice = livePrice(sym, marketCoins, entrySnap.close);
-  const notional = fractionalNotional(account.currentBalance);
+  const nav = computePaperWorkspaceNav(account, marketCoins);
+  const notional = fractionalNotional(nav.portfolio_nav_usdt);
 
-  if (notional < 1 || account.currentBalance < notional) {
+  if (notional < 1 || nav.available_usdt < notional) {
     logScalp("SKIP entry — insufficient balance", {
-      balance: account.currentBalance,
+      nav: nav.portfolio_nav_usdt,
+      available: nav.available_usdt,
       notional,
     });
     return { account, changed: false, summary: "insufficient-balance" };
@@ -210,11 +230,13 @@ export function runPaperScalp1mTick(params: {
   );
   const amount = Number((notional / entryPrice).toFixed(6));
 
-  logScalp(`BUY SIGNAL ${sym} | 9 EMA crossed above 21 EMA`, {
+  logScalp(`BUY SIGNAL ${sym} | 1h EMA9 crossed above EMA21`, {
     entryPrice: formatMicroPrice(entryPrice),
     ema9: formatMicroPrice(entrySnap.ema9),
     ema21: formatMicroPrice(entrySnap.ema21),
+    rsi14: entrySnap.rsi14.toFixed(2),
     atr14: formatMicroPrice(entrySnap.atr14),
+    nav: nav.portfolio_nav_usdt,
     stopLoss,
     takeProfit,
     atrStopDistance: Number((entrySnap.atr14 * ATR_STOP_MULT).toFixed(8)),
@@ -240,7 +262,7 @@ export function runPaperScalp1mTick(params: {
     takeProfit,
     trailingStopPct: undefined,
     followedSignal: false,
-    notes: "1m EMA9/21 momentum scalp",
+    notes: "1h EMA9/21 + RSI14 momentum",
     tags: ["paper-scalp", "ema-cross", sym],
     executionNotes: [
       `ATR14=${entrySnap.atr14.toFixed(8)}`,
