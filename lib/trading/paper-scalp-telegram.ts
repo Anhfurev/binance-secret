@@ -3,6 +3,8 @@
  * Fire-and-forget: never await in the hot tick path.
  */
 
+import { formatMicroPrice } from "@/lib/trading/micro-price";
+
 const SKIP_THROTTLE_MS = 90_000;
 const lastSkipSentAt = new Map<string, number>();
 
@@ -14,12 +16,15 @@ function resolveChatId(): string {
   return (process.env.TELEGRAM_CHAT_ID ?? "").trim();
 }
 
-function fmtUsd(n: number, digits = 2): string {
-  return `$${Number(n).toFixed(digits)}`;
+function fmtUsd(n: number, digits?: number): string {
+  if (digits != null && Math.abs(n) >= 0.01) {
+    return `$${Number(n).toFixed(digits)}`;
+  }
+  return `$${formatMicroPrice(n)}`;
 }
 
-function fmtNum(n: number, digits = 6): string {
-  return Number(n).toFixed(digits);
+function fmtNum(n: number, _digits = 6): string {
+  return formatMicroPrice(n);
 }
 
 /** POST to Telegram without blocking callers. Missing env → silent no-op. */

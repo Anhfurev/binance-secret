@@ -4,6 +4,7 @@ import {
   computeAtrStops,
   type Scalp1mSnapshot,
 } from "@/lib/trading/paper-scalp-indicators";
+import { formatMicroPrice } from "@/lib/trading/micro-price";
 import type { CoinData, DemoAccount, DemoTrade } from "@/lib/types";
 
 export interface PaperAutomationTickResult {
@@ -210,10 +211,10 @@ export function runPaperScalp1mTick(params: {
   const amount = Number((notional / entryPrice).toFixed(6));
 
   logScalp(`BUY SIGNAL ${sym} | 9 EMA crossed above 21 EMA`, {
-    entryPrice,
-    ema9: Number(entrySnap.ema9.toFixed(6)),
-    ema21: Number(entrySnap.ema21.toFixed(6)),
-    atr14: Number(entrySnap.atr14.toFixed(8)),
+    entryPrice: formatMicroPrice(entryPrice),
+    ema9: formatMicroPrice(entrySnap.ema9),
+    ema21: formatMicroPrice(entrySnap.ema21),
+    atr14: formatMicroPrice(entrySnap.atr14),
     stopLoss,
     takeProfit,
     atrStopDistance: Number((entrySnap.atr14 * ATR_STOP_MULT).toFixed(8)),

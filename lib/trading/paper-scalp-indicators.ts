@@ -1,5 +1,10 @@
 /** 1m OHLCV math — EMA(9/21), ATR(14), crossover detection. */
 
+import {
+  priceIndicatorScale,
+  scaleOhlc,
+} from "@/lib/trading/micro-price";
+
 export type ScalpCandle = {
   open: number;
   high: number;
@@ -71,18 +76,23 @@ export function buildScalp1mSnapshot(
   if (candles.length < 25) return null;
 
   const closes = candles.map((c) => c.close);
-  const ema9 = computeEmaSeries(closes, 9);
-  const ema21 = computeEmaSeries(closes, 21);
-  const atrSeries = computeAtrSeries(candles, 14);
+  const refClose = closes[closes.length - 1] ?? closes[0] ?? 0;
+  const scale = priceIndicatorScale(refClose);
+  const scaledCandles = scaleOhlc(candles, scale);
+  const scaledCloses = scaledCandles.map((c) => c.close);
+
+  const ema9 = computeEmaSeries(scaledCloses, 9);
+  const ema21 = computeEmaSeries(scaledCloses, 21);
+  const atrSeries = computeAtrSeries(scaledCandles, 14);
   const i = closes.length - 1;
   const prev = i - 1;
   if (prev < 0) return null;
 
-  const latestEma9 = ema9[i];
-  const latestEma21 = ema21[i];
-  const prevEma9 = ema9[prev];
-  const prevEma21 = ema21[prev];
-  const atr14 = atrSeries[i];
+  const latestEma9 = ema9[i] / scale;
+  const latestEma21 = ema21[i] / scale;
+  const prevEma9 = ema9[prev] / scale;
+  const prevEma21 = ema21[prev] / scale;
+  const atr14 = atrSeries[i] / scale;
 
   return {
     symbol,

@@ -79,6 +79,20 @@ export const mockCoins: CoinData[] = [
     circulating_supply: 149000000
   },
   {
+    id: 'pepe',
+    symbol: 'pepe',
+    name: 'Pepe',
+    image: 'https://assets.coingecko.com/coins/images/29850/small/pepe-token.jpeg',
+    current_price: 0.0000145,
+    market_cap: 6100000000,
+    market_cap_rank: 25,
+    price_change_percentage_24h: 4.2,
+    total_volume: 890000000,
+    high_24h: 0.0000152,
+    low_24h: 0.0000138,
+    circulating_supply: 420690000000000,
+  },
+  {
     id: 'dogecoin',
     symbol: 'doge',
     name: 'Dogecoin',

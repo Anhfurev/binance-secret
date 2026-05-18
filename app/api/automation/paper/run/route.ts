@@ -23,6 +23,7 @@ import {
   relayPaperScalpTickTelegram,
   safePaperScalpRouteTelegram,
 } from "@/lib/trading/paper-scalp-route-telegram";
+import { formatMicroPrice } from "@/lib/trading/micro-price";
 import type { CoinData } from "@/lib/types";
 
 type TradingAction = "BUY" | "SELL" | "HOLD" | "NO_TRADE";
@@ -78,7 +79,7 @@ function logWorkspaceIndicators(
         ? "bearish"
         : "none";
     console.log(
-      `[paper-scalp] workspace=${workspaceKey} | ${sym} | EMA9=${snap.ema9.toFixed(4)} | EMA21=${snap.ema21.toFixed(4)} | ATR14=${snap.atr14.toFixed(6)} | cross=${cross}`,
+      `[paper-scalp] workspace=${workspaceKey} | ${sym} | close=${formatMicroPrice(snap.close)} | EMA9=${formatMicroPrice(snap.ema9)} | EMA21=${formatMicroPrice(snap.ema21)} | ATR14=${formatMicroPrice(snap.atr14)} | cross=${cross}`,
     );
   }
 }

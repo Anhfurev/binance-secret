@@ -1,5 +1,9 @@
 import type { CoinData } from "@/lib/types";
 import {
+  mockCloseForSymbol,
+  parseKlineField,
+} from "@/lib/trading/micro-price";
+import {
   buildScalp1mSnapshot,
   type Scalp1mSnapshot,
   type ScalpCandle,
@@ -7,6 +11,33 @@ import {
 
 const BINANCE_KLINES = "https://api.binance.com/api/v3/klines";
 const DEFAULT_SYMBOLS = ["BTCUSDT", "SOLUSDT", "PEPEUSDT"] as const;
+
+/** Binance spot aliases (e.g. 1000PEPEUSDT quotes per 1000 tokens). */
+const KLINE_SYMBOL_CANDIDATES: Record<string, string[]> = {
+  PEPEUSDT: ["PEPEUSDT", "1000PEPEUSDT"],
+  SHIBUSDT: ["SHIBUSDT", "1000SHIBUSDT"],
+  FLOKIUSDT: ["FLOKIUSDT", "1000FLOKIUSDT"],
+  BONKUSDT: ["BONKUSDT", "1000BONKUSDT"],
+};
+
+const KLINE_TO_BASE_SCALE: Record<string, number> = {
+  "1000PEPEUSDT": 1 / 1000,
+  "1000SHIBUSDT": 1 / 1000,
+  "1000FLOKIUSDT": 1 / 1000,
+  "1000BONKUSDT": 1 / 1000,
+};
+
+function normalizeKlineSymbol(symbol: string): string {
+  const s = symbol.toUpperCase().replace(/\//g, "");
+  return s.endsWith("USDT") ? s : `${s}USDT`;
+}
+
+function klineSymbolCandidates(symbol: string): string[] {
+  const base = normalizeKlineSymbol(symbol);
+  const listed = KLINE_SYMBOL_CANDIDATES[base];
+  if (listed) return listed;
+  return [base];
+}
 
 export function resolvePaperScalpSymbols(extra: string[] = []): string[] {
   const raw = (process.env.PAPER_SCALP_SYMBOLS ?? "").trim();
@@ -17,17 +48,17 @@ export function resolvePaperScalpSymbols(extra: string[] = []): string[] {
   return [...merged];
 }
 
-function parseKlineRows(rows: unknown[]): ScalpCandle[] {
+function parseKlineRows(rows: unknown[], priceScale = 1): ScalpCandle[] {
   if (!Array.isArray(rows)) return [];
   return rows
     .map((row) => {
-      const k = row as number[];
+      const k = row as unknown[];
       return {
-        open: Number(k[1]),
-        high: Number(k[2]),
-        low: Number(k[3]),
-        close: Number(k[4]),
-        closeTime: Number(k[6]),
+        open: parseKlineField(k[1]) * priceScale,
+        high: parseKlineField(k[2]) * priceScale,
+        low: parseKlineField(k[3]) * priceScale,
+        close: parseKlineField(k[4]) * priceScale,
+        closeTime: parseKlineField(k[6]),
       };
     })
     .filter((c) =>
@@ -35,28 +66,48 @@ function parseKlineRows(rows: unknown[]): ScalpCandle[] {
     );
 }
 
+async function fetch1mKlinesForSymbol(
+  binanceSymbol: string,
+  limit: number,
+): Promise<ScalpCandle[]> {
+  const url = new URL(BINANCE_KLINES);
+  url.searchParams.set("symbol", binanceSymbol);
+  url.searchParams.set("interval", "1m");
+  url.searchParams.set("limit", String(Math.min(1000, Math.max(30, limit))));
+
+  const res = await fetch(url.toString(), {
+    cache: "no-store",
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) return [];
+  const rows = (await res.json()) as unknown[];
+  const priceScale = KLINE_TO_BASE_SCALE[binanceSymbol] ?? 1;
+  return parseKlineRows(rows, priceScale);
+}
+
 export async function fetch1mKlines(
   symbol: string,
   limit = 60,
 ): Promise<ScalpCandle[]> {
-  const sym = symbol.toUpperCase().replace(/\//g, "");
-  const url = new URL(BINANCE_KLINES);
-  url.searchParams.set("symbol", sym.endsWith("USDT") ? sym : `${sym}USDT`);
-  url.searchParams.set("interval", "1m");
-  url.searchParams.set("limit", String(Math.min(1000, Math.max(30, limit))));
+  const base = normalizeKlineSymbol(symbol);
 
   try {
-    const res = await fetch(url.toString(), {
-      cache: "no-store",
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) return [];
-    const rows = (await res.json()) as unknown[];
-    return parseKlineRows(rows);
+    for (const candidate of klineSymbolCandidates(base)) {
+      const candles = await fetch1mKlinesForSymbol(candidate, limit);
+      if (candles.length >= 25) {
+        if (candidate !== base) {
+          console.log(
+            `[paper-scalp] klines ${base} via Binance symbol ${candidate} (${candles.length} bars)`,
+          );
+        }
+        return candles;
+      }
+    }
+    return [];
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
     console.error("[BINANCE-FETCH-BLOCKED] fetch1mKlines failed", {
-      symbol: sym,
+      symbol: base,
       message: err.message,
       stack: err.stack,
       cause: err.cause,
@@ -135,15 +186,19 @@ export function buildMockScalpSnapshots(
     const sym = symbol.endsWith("USDT") ? symbol : `${symbol}USDT`;
     const base = sym.replace(/USDT$/, "").toLowerCase();
     const coin = coins.find((c) => c.symbol.toLowerCase() === base);
-    const close = coin?.current_price ?? 100;
+    const anchor = coin?.current_price ?? mockCloseForSymbol(sym);
 
-    const candles: ScalpCandle[] = Array.from({ length: 48 }, (_, i) => ({
-      open: close,
-      high: close * 1.0008,
-      low: close * 0.9992,
-      close,
-      closeTime: now - (48 - i) * 60_000,
-    }));
+    const candles: ScalpCandle[] = Array.from({ length: 48 }, (_, i) => {
+      const wiggle = 1 + Math.sin(i / 4) * 0.0015;
+      const close = anchor * wiggle;
+      return {
+        open: close * 0.9999,
+        high: close * 1.001,
+        low: close * 0.999,
+        close,
+        closeTime: now - (48 - i) * 60_000,
+      };
+    });
 
     const snap = buildScalp1mSnapshot(sym, candles);
     if (snap) map.set(sym, snap);
