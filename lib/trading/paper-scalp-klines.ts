@@ -8,11 +8,15 @@ import {
   type Scalp1mSnapshot,
   type ScalpCandle,
 } from "@/lib/trading/paper-scalp-indicators";
+import {
+  buildBinanceKlinesRequestUrl,
+  isValidKlineTicker,
+  normalizeKlineSymbol,
+  sanitizePaperScalpSymbolList,
+} from "@/lib/trading/paper-scalp-kline-symbols";
 import { DEFAULT_PAPER_WATCH_SYMBOLS } from "@/lib/trading/paper-scalp-settings";
 
-const BINANCE_KLINES = "https://api.binance.com/api/v3/klines";
 const DEFAULT_SYMBOLS = DEFAULT_PAPER_WATCH_SYMBOLS;
-const KLINE_INTERVAL = "1h";
 const DEFAULT_LIMIT = 100;
 const FETCH_DELAY_MS = 350;
 
@@ -34,11 +38,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function normalizeKlineSymbol(symbol: string): string {
-  const s = symbol.toUpperCase().replace(/\//g, "");
-  return s.endsWith("USDT") ? s : `${s}USDT`;
-}
-
 function klineSymbolCandidates(symbol: string): string[] {
   const base = normalizeKlineSymbol(symbol);
   return KLINE_SYMBOL_CANDIDATES[base] ?? [base];
@@ -58,11 +57,10 @@ export function resolvePaperScalpSymbols(
       : fromEnv.length > 0
         ? fromEnv
         : [...DEFAULT_SYMBOLS];
-  const merged = new Set([
+  return sanitizePaperScalpSymbolList([
     ...base.map((s) => normalizeKlineSymbol(s)),
     ...extra.map((s) => normalizeKlineSymbol(s)),
   ]);
-  return [...merged];
 }
 
 function parseKlineRows(rows: unknown[], priceScale = 1): ScalpCandle[] {
@@ -87,19 +85,41 @@ async function fetchHourlyKlinesForSymbol(
   binanceSymbol: string,
   limit: number,
 ): Promise<ScalpCandle[]> {
-  const url = new URL(BINANCE_KLINES);
-  url.searchParams.set("symbol", binanceSymbol);
-  url.searchParams.set("interval", KLINE_INTERVAL);
-  url.searchParams.set("limit", String(Math.min(1000, Math.max(30, limit))));
+  const url = buildBinanceKlinesRequestUrl(binanceSymbol, limit);
+  if (!url) return [];
 
-  const res = await fetch(url.toString(), {
-    cache: "no-store",
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (!res.ok) return [];
-  const rows = (await res.json()) as unknown[];
-  const priceScale = KLINE_TO_BASE_SCALE[binanceSymbol] ?? 1;
-  return parseKlineRows(rows, priceScale);
+  const controller = new AbortController();
+  const timeoutMs = 20_000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      console.warn("[paper-1h] binance klines HTTP error", {
+        symbol: binanceSymbol,
+        status: res.status,
+        url,
+      });
+      return [];
+    }
+    const rows = (await res.json()) as unknown[];
+    const priceScale = KLINE_TO_BASE_SCALE[binanceSymbol] ?? 1;
+    return parseKlineRows(rows, priceScale);
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.warn("[paper-1h] binance klines fetch failed — skipping symbol", {
+      symbol: binanceSymbol,
+      url,
+      message: err.message,
+      cause: err.cause,
+    });
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Sequential 1h kline fetch — avoids Binance IP burst rate limits. */
@@ -108,8 +128,13 @@ export async function fetch1hKlines(
   limit = DEFAULT_LIMIT,
 ): Promise<ScalpCandle[]> {
   const base = normalizeKlineSymbol(symbol);
+  if (!isValidKlineTicker(base)) {
+    console.warn("[paper-1h] fetch1hKlines skipped — invalid ticker", { symbol });
+    return [];
+  }
   try {
     for (const candidate of klineSymbolCandidates(base)) {
+      if (!isValidKlineTicker(candidate)) continue;
       const candles = await fetchHourlyKlinesForSymbol(candidate, limit);
       if (candles.length >= 30) {
         if (candidate !== base) {
@@ -137,28 +162,43 @@ export const fetch1mKlines = fetch1hKlines;
 export async function loadPaperScalpSnapshots(
   symbols: string[],
 ): Promise<Map<string, Scalp1mSnapshot>> {
-  const unique = [...new Set(symbols.map((s) => s.toUpperCase()))];
+  const unique = sanitizePaperScalpSymbolList(symbols);
   const delayMs = Number(process.env.PAPER_BINANCE_FETCH_DELAY_MS ?? FETCH_DELAY_MS);
   const map = new Map<string, Scalp1mSnapshot>();
 
-  try {
-    for (let i = 0; i < unique.length; i++) {
-      const symbol = unique[i];
+  console.log(
+    `[paper-1h] sequential kline scan: ${unique.length} symbol(s) [${unique.join(", ")}]`,
+  );
+
+  for (let i = 0; i < unique.length; i++) {
+    const symbol = unique[i];
+    try {
       const candles = await fetch1hKlines(symbol);
       const snap = buildScalp1mSnapshot(symbol, candles);
-      if (snap) map.set(symbol, snap);
-      if (i < unique.length - 1 && delayMs > 0) {
-        await sleep(delayMs);
+      if (snap) {
+        map.set(symbol, snap);
+      } else {
+        console.warn("[paper-1h] no 1h snapshot built", {
+          symbol,
+          candles: candles.length,
+        });
       }
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      console.warn("[paper-1h] symbol loop error — continuing", {
+        symbol,
+        message: err.message,
+      });
     }
-    return map;
-  } catch (error) {
-    const err = error instanceof Error ? error : new Error(String(error));
-    console.error("[BINANCE-FETCH-BLOCKED] loadPaperScalpSnapshots failed", {
-      message: err.message,
-    });
-    return map;
+    if (i < unique.length - 1 && delayMs > 0) {
+      await sleep(delayMs);
+    }
   }
+
+  console.log(
+    `[paper-1h] kline scan done: ${map.size}/${unique.length} snapshots loaded`,
+  );
+  return map;
 }
 
 export async function loadPaperScalpSnapshotsResilient(
