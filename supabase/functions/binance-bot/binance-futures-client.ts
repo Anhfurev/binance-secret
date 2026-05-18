@@ -4,8 +4,18 @@
 import { getCachedTimeOffset } from "./binance-time-cache.ts";
 import { pooledFetch } from "./pooled-http-client.ts";
 import type { BotGlobalSettingsRow } from "./bot-global-settings.ts";
-import { readFastBounceAccountUsd } from "./bot-global-settings.ts";
 import { isPaperTradingEnvForced } from "./paper-trade-interceptor.ts";
+import {
+  computeFastLaneFuturesQty,
+  computeFastLaneNotionalUsd,
+  toFuturesUsdtSymbol,
+} from "./futures-lane-sizing.ts";
+
+export {
+  computeFastLaneNotionalUsd,
+  BTC_FUTURES_MIN_NOTIONAL_USD,
+  ALT_FUTURES_MIN_NOTIONAL_USD,
+} from "./futures-lane-sizing.ts";
 
 const FAPI_BASE = "https://fapi.binance.com";
 
@@ -72,16 +82,7 @@ async function fapiSignedRequest(
 }
 
 function toFapiSymbol(symbol: string): string {
-  const s = String(symbol ?? "").toUpperCase().replace(/\//g, "");
-  return s.endsWith("USDT") ? s : `${s}USDT`;
-}
-
-export function computeFastLaneNotionalUsd(
-  global: BotGlobalSettingsRow,
-  accountUsd = readFastBounceAccountUsd(),
-): number {
-  const base = accountUsd * 0.15 * Number(global.global_trade_multiplier ?? 1);
-  return Math.max(5.5, Number(base.toFixed(4)));
+  return toFuturesUsdtSymbol(symbol);
 }
 
 export async function setFuturesLeverage(symbol: string, leverage: number): Promise<void> {
@@ -103,8 +104,8 @@ export async function executeFuturesBounceBrackets(params: {
   if (!Number.isFinite(px) || px <= 0) throw new Error("futures_bounce: invalid referencePrice");
 
   const leverage = Math.min(50, Math.max(1, Math.floor(params.global.allowed_leverage ?? 10)));
-  const notionalUsd = computeFastLaneNotionalUsd(params.global);
-  const qty = Number((notionalUsd / px).toFixed(6));
+  const notionalUsd = computeFastLaneNotionalUsd(sym, params.global);
+  const qty = computeFastLaneFuturesQty(sym, notionalUsd, px);
   if (qty <= 0) throw new Error("futures_bounce: quantity zero");
 
   if (isPaperTradingEnvForced()) {

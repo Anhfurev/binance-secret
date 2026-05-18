@@ -1,16 +1,6 @@
 // @ts-nocheck
 import { assertEquals } from "jsr:@std/assert";
-import { computeFastLaneNotionalUsd } from "../binance-futures-client.ts";
 import { evaluateFastMathBounceEntry } from "../fast-math-entry.ts";
-
-Deno.test("computeFastLaneNotionalUsd clears 5 USDT min", () => {
-  const n = computeFastLaneNotionalUsd({
-    market_regime: "NEUTRAL",
-    allowed_leverage: 10,
-    global_trade_multiplier: 1,
-  }, 27);
-  assertEquals(n, 5.5);
-});
 
 Deno.test("evaluateFastMathBounceEntry matches oversold bounce snapshot", () => {
   const snap = {
