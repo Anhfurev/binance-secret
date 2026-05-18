@@ -52,7 +52,13 @@ export function tryAcquirePaperHeartbeat(): PaperHeartbeatGateResult {
   return { ok: true };
 }
 
-export function releasePaperHeartbeat(): void {
+/** Failed tick: release concurrency only — hourly window unchanged (immediate retry allowed). */
+export function releasePaperHeartbeatWithoutComplete(): void {
+  isProcessing = false;
+}
+
+/** Successful tick: release concurrency and start the next hourly interval. */
+export function releasePaperHeartbeatSuccess(): void {
   isProcessing = false;
   lastCompletedAtMs = Date.now();
 }

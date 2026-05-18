@@ -3,7 +3,8 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import {
   readPaperHeartbeatState,
-  releasePaperHeartbeat,
+  releasePaperHeartbeatSuccess,
+  releasePaperHeartbeatWithoutComplete,
   tryAcquirePaperHeartbeat,
 } from "@/lib/trading/paper-heartbeat-lock";
 import { runPaperScalpOrchestrator } from "@/lib/trading/paper-run-orchestrator";
@@ -55,11 +56,13 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  let heartbeatCompleted = false;
   try {
     const outcome = await runPaperScalpOrchestrator();
     if (!outcome.ok) {
       return NextResponse.json(outcome.body, { status: outcome.status });
     }
+    heartbeatCompleted = true;
     return NextResponse.json(outcome);
   } catch (error: unknown) {
     logFatalRouteException(error);
@@ -73,6 +76,10 @@ export async function GET(request: NextRequest) {
       { status: 500 },
     );
   } finally {
-    releasePaperHeartbeat();
+    if (heartbeatCompleted) {
+      releasePaperHeartbeatSuccess();
+    } else {
+      releasePaperHeartbeatWithoutComplete();
+    }
   }
 }

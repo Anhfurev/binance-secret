@@ -16,6 +16,7 @@ import {
   loadPaperScalpSnapshotsResilient,
   resolvePaperScalpSymbols,
 } from "@/lib/trading/paper-scalp-klines";
+import { buildPaperScalpMarketCoins } from "@/lib/trading/paper-scalp-market";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import {
   relayPaperScalpTickTelegram,
@@ -43,7 +44,7 @@ export type PaperRunOrchestratorResult = {
   symbols: string[];
   snapshotsLoaded: number;
   snapshotSource: "binance" | "mock";
-  marketSource: string;
+  marketSource: "1h-snapshots" | "mock-fallback" | "mixed";
   ranAt: string;
   durationMs: number;
 };
@@ -157,7 +158,6 @@ export async function runPaperScalpOrchestrator(): Promise<
     `[paper-scalp] Supabase OK — loaded ${listResult.data.length} workspace(s)`,
   );
 
-  const marketCoins = mockCoins;
   const openSymbols = listResult.data.flatMap((ws) => {
     const snap = ws.snapshot;
     const active = snap.profiles.find((p) => p.id === snap.activeId);
@@ -170,7 +170,7 @@ export async function runPaperScalpOrchestrator(): Promise<
   let scalpSnapshots: Map<string, Scalp1mSnapshot>;
 
   try {
-    const loaded = await loadPaperScalpSnapshotsResilient(symbols, marketCoins);
+    const loaded = await loadPaperScalpSnapshotsResilient(symbols, mockCoins);
     scalpSnapshots = loaded.snapshots;
     snapshotSource = loaded.source;
   } catch (error) {
@@ -180,12 +180,17 @@ export async function runPaperScalpOrchestrator(): Promise<
       phase: "binance_klines",
       symbols,
     });
-    scalpSnapshots = buildMockScalpSnapshots(symbols, marketCoins);
+    scalpSnapshots = buildMockScalpSnapshots(symbols, mockCoins);
     snapshotSource = "mock";
   }
 
+  const { coins: marketCoins, marketSource } = buildPaperScalpMarketCoins(
+    scalpSnapshots,
+    { fallback: mockCoins, requiredSymbols: [...symbols, ...openSymbols] },
+  );
+
   console.log(
-    `[${timestamp}] [paper-scalp] interval=1h snapshots=${scalpSnapshots.size} source=${snapshotSource} symbols=[${symbols.join(", ")}]`,
+    `[${timestamp}] [paper-scalp] interval=1h snapshots=${scalpSnapshots.size} source=${snapshotSource} marks=${marketSource} symbols=[${symbols.join(", ")}]`,
   );
 
   let scanned = 0;
@@ -294,7 +299,7 @@ export async function runPaperScalpOrchestrator(): Promise<
     symbols,
     snapshotsLoaded: scalpSnapshots.size,
     snapshotSource,
-    marketSource: "mockCoins",
+    marketSource,
     ranAt: new Date().toISOString(),
     durationMs,
   };
