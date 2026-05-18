@@ -17,6 +17,7 @@ import {
   resolvePaperScalpSymbols,
 } from "@/lib/trading/paper-scalp-klines";
 import { buildPaperScalpMarketCoins } from "@/lib/trading/paper-scalp-market";
+import { mergeWorkspacePaperSymbolLists } from "@/lib/trading/paper-scalp-settings";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import {
   relayPaperScalpTickTelegram,
@@ -165,7 +166,13 @@ export async function runPaperScalpOrchestrator(): Promise<
     return (account?.openPositions ?? []).map((t) => t.symbol);
   });
 
-  const symbols = resolvePaperScalpSymbols(openSymbols);
+  const workspaceWatchlists = listResult.data
+    .filter((ws) => ws.snapshot.demoAutoPilot && ws.snapshot.walletMode !== "real")
+    .map((ws) => ws.snapshot.paperSettings.symbols);
+  const symbols = resolvePaperScalpSymbols(
+    openSymbols,
+    mergeWorkspacePaperSymbolLists(workspaceWatchlists),
+  );
   let snapshotSource: "binance" | "mock" = "mock";
   let scalpSnapshots: Map<string, Scalp1mSnapshot>;
 
@@ -235,6 +242,7 @@ export async function runPaperScalpOrchestrator(): Promise<
       scalpSnapshots,
       autoPilotMode: snapshot.autoPilotMode,
       copyProfile: snapshot.copyProfile,
+      paperSettings: snapshot.paperSettings,
     });
 
     const nav = computePaperWorkspaceNav(result.account, marketCoins);

@@ -1,12 +1,9 @@
 import type { AITradeSignal, CoinData, DemoAccount } from "@/lib/types";
-import {
-  runPaperScalp1mTick,
-  type PaperAutomationTickResult,
-} from "@/lib/trading/paper-scalp-engine";
+import { runPaperScalp1hTick } from "@/lib/trading/paper-scalp-engine";
 import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
+import type { PaperScalpWorkspaceSettings } from "@/lib/trading/paper-scalp-settings";
+import type { PaperAutomationTickResult } from "@/lib/trading/paper-scalp-types";
 type AutoPilotMode = "signals" | "dca";
-type CopyProfile = "conservative" | "balanced" | "aggressive";
-
 export type { PaperAutomationTickResult };
 
 /** Institutional 1h EMA/RSI/ATR paper tick. */
@@ -17,6 +14,7 @@ export function runPaperTradingAutomationTick(params: {
   scalpSnapshots?: Map<string, Scalp1mSnapshot>;
   autoPilotMode: AutoPilotMode;
   copyProfile: CopyProfile;
+  paperSettings: PaperScalpWorkspaceSettings;
 }): PaperAutomationTickResult {
   const marketCoins = params.marketCoins ?? [];
   const snapshots = params.scalpSnapshots ?? new Map<string, Scalp1mSnapshot>();
@@ -29,10 +27,10 @@ export function runPaperTradingAutomationTick(params: {
     };
   }
 
-  return runPaperScalp1mTick({
+  return runPaperScalp1hTick({
     account: params.account,
     snapshots,
     marketCoins,
-    copyProfile: params.copyProfile,
+    paperSettings: params.paperSettings,
   });
 }

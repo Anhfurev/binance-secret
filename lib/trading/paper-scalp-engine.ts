@@ -1,21 +1,23 @@
-import { percentOf, recalculateAccountMetrics } from "@/lib/demo-account";
-import { defaultScalpingSettings } from "@/lib/trading/settings";
 import {
   computeAtrStops,
   type Scalp1mSnapshot,
 } from "@/lib/trading/paper-scalp-indicators";
+import { maybeResetPaperDailyPnl } from "@/lib/trading/paper-scalp-daily";
 import { formatMicroPrice } from "@/lib/trading/micro-price";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
+import {
+  evaluateOpenPaperPosition,
+} from "@/lib/trading/paper-scalp-positions";
+import {
+  computePaperPositionSizeUsdt,
+  PAPER_MIN_NOTIONAL_USDT,
+  type PaperScalpWorkspaceSettings,
+} from "@/lib/trading/paper-scalp-settings";
+import type { PaperAutomationTickResult } from "@/lib/trading/paper-scalp-types";
 import type { CoinData, DemoAccount, DemoTrade } from "@/lib/types";
 
-export interface PaperAutomationTickResult {
-  account: DemoAccount;
-  changed: boolean;
-  summary: string;
-}
+export type { PaperAutomationTickResult };
 
-const POSITION_FRACTION = 0.2;
-const ASSET_PROTECTION_DROP_PCT = 0.015;
 const ATR_STOP_MULT = 1.5;
 const ATR_TP_MULT = 3;
 const DEFAULT_RSI_MAX_BUY = 70;
@@ -27,20 +29,9 @@ function resolveRsiMaxBuy(): number {
   return Math.min(n, 90);
 }
 
-type CopyProfile = "conservative" | "balanced" | "aggressive";
-
-function maxOpenForProfile(profile: CopyProfile): number {
-  if (profile === "conservative") return 3;
-  if (profile === "aggressive") return 5;
-  return 4;
-}
-
 function logScalp(message: string, payload?: Record<string, unknown>) {
-  if (payload) {
-    console.log(`[paper-scalp] ${message}`, payload);
-  } else {
-    console.log(`[paper-scalp] ${message}`);
-  }
+  if (payload) console.log(`[paper-scalp] ${message}`, payload);
+  else console.log(`[paper-scalp] ${message}`);
 }
 
 function normalizeSymbol(symbol: string): string {
@@ -58,141 +49,74 @@ function livePrice(
   return coin?.current_price ?? fallback;
 }
 
-function fractionalNotional(balance: number): number {
-  return Number((balance * POSITION_FRACTION).toFixed(2));
-}
-
-function closeTrade(
-  account: DemoAccount,
-  trade: DemoTrade,
-  closePrice: number,
-  reason: string,
-): PaperAutomationTickResult {
-  const isLong = trade.type === "buy";
-  const rawPnl = isLong
-    ? (closePrice - trade.entryPrice) * trade.amount
-    : (trade.entryPrice - closePrice) * trade.amount;
-  const pnl = Number(rawPnl.toFixed(2));
-  const effectiveValue = trade.value;
-  const pnlPercent = Number(((pnl / effectiveValue) * 100).toFixed(2));
-  const newDailyPnl = (account.dailyPnl ?? 0) + pnl;
-  const hitCb =
-    newDailyPnl < 0 &&
-    percentOf(Math.abs(newDailyPnl), account.startingBalance) >=
-      defaultScalpingSettings.maxDailyLossPct;
-
-  logScalp(`EXIT ${trade.symbol} | reason=${reason}`, {
-    entryPrice: trade.entryPrice,
-    closePrice: Number(closePrice.toFixed(8)),
-    pnl,
-    pnlPercent,
-  });
-
-  const closedTrade: DemoTrade = {
-    ...trade,
-    status: pnl >= 0 ? "closed" : "stopped",
-    exitPrice: Number(closePrice.toFixed(closePrice >= 1 ? 4 : 8)),
-    pnl,
-    pnlPercent,
-    closedAt: new Date(),
-    notes: `${trade.notes ?? ""} | exit:${reason}`.trim(),
-    tags: [...(trade.tags ?? []), "paper-scalp", reason],
-  };
-
-  const newEquity = account.currentBalance + effectiveValue + pnl;
-
-  return {
-    account: recalculateAccountMetrics({
-      ...account,
-      currentBalance: newEquity,
-      dailyPnl: newDailyPnl,
-      circuitBreakerTripped: hitCb,
-      equityCurve: [
-        ...(account.equityCurve ?? []),
-        { time: new Date().toISOString(), equity: newEquity },
-      ],
-      openPositions: account.openPositions.filter((p) => p.id !== trade.id),
-      tradeHistory: [closedTrade, ...account.tradeHistory],
-    }),
-    changed: true,
-    summary: `closed:${trade.symbol}:${reason}`,
-  };
-}
-
-function shouldForceAssetProtection(
-  trade: DemoTrade,
-  mark: number,
-): boolean {
-  if (trade.type !== "buy") return false;
-  const dropPct = (trade.entryPrice - mark) / trade.entryPrice;
-  return dropPct >= ASSET_PROTECTION_DROP_PCT;
-}
-
-function trailingAtrStop(trade: DemoTrade, mark: number, atr14: number): number {
-  const dist = atr14 * ATR_STOP_MULT;
-  const raw = mark - dist;
-  return Math.max(trade.stopLoss, Number(raw.toFixed(8)));
-}
-
-export function runPaperScalp1mTick(params: {
+export function runPaperScalp1hTick(params: {
   account: DemoAccount;
   snapshots: Map<string, Scalp1mSnapshot>;
   marketCoins: CoinData[];
-  copyProfile: CopyProfile;
+  paperSettings: PaperScalpWorkspaceSettings;
 }): PaperAutomationTickResult {
-  const { account, snapshots, marketCoins, copyProfile } = params;
+  const { snapshots, marketCoins, paperSettings } = params;
+  let account = maybeResetPaperDailyPnl(params.account);
 
   if (account.circuitBreakerTripped) {
     return { account, changed: false, summary: "circuit-breaker" };
   }
 
-  const open = account.openPositions[0];
-  if (open) {
-    const sym = normalizeSymbol(open.symbol);
-    const snap = snapshots.get(sym);
-    const mark = livePrice(sym, marketCoins, snap?.close ?? open.entryPrice);
-    const atr14 = snap?.atr14 ?? Math.abs(open.entryPrice - open.stopLoss) / ATR_STOP_MULT;
-
-    if (shouldForceAssetProtection(open, mark)) {
-      return closeTrade(account, open, mark, "asset-protection-1.5pct");
-    }
-
-    const dynamicStop = trailingAtrStop(open, mark, atr14);
-    open.stopLoss = dynamicStop;
-
-    if (mark <= dynamicStop) {
-      return closeTrade(account, open, mark, "atr-trailing-stop");
-    }
-    if (mark >= open.takeProfit) {
-      return closeTrade(account, open, mark, "atr-take-profit-3x");
-    }
-    if (snap?.bearishCross) {
-      return closeTrade(account, open, mark, "ema9-below-ema21");
-    }
-
-    const unrealizedPct = Number(
-      (((mark - open.entryPrice) / open.entryPrice) * 100).toFixed(3),
-    );
-
-    logScalp(`HOLD ${sym}`, {
-      mark,
-      ema9: snap?.ema9,
-      ema21: snap?.ema21,
-      atr14,
-      stopLoss: dynamicStop,
-      takeProfit: open.takeProfit,
-      unrealizedPct,
+  let stopsAdjusted = false;
+  for (const open of [...account.openPositions]) {
+    const evalResult = evaluateOpenPaperPosition({
+      account,
+      trade: open,
+      snapshots,
+      marketCoins,
     });
-
-    return { account, changed: false, summary: "holding-position" };
+    account = evalResult.account;
+    if (evalResult.stopAdjusted) stopsAdjusted = true;
+    if (evalResult.exit?.changed) return evalResult.exit;
   }
 
-  if (account.openPositions.length >= maxOpenForProfile(copyProfile)) {
-    return { account, changed: false, summary: "max-open-positions" };
+  if (account.openPositions.length > 0) {
+    const sym = normalizeSymbol(account.openPositions[0].symbol);
+    const snap = snapshots.get(sym);
+    const mark = livePrice(
+      sym,
+      marketCoins,
+      snap?.close ?? account.openPositions[0].entryPrice,
+    );
+    logScalp(`HOLD ${account.openPositions.length} open leg(s)`, {
+      symbols: account.openPositions.map((p) => p.symbol),
+      mark,
+    });
+    return {
+      account,
+      changed: stopsAdjusted,
+      summary: "holding-position",
+    };
   }
+
+  const maxOpen = paperSettings.maxOpenPositions;
+  if (account.openPositions.length >= maxOpen) {
+    logScalp("SKIP — max open positions", {
+      open: account.openPositions.length,
+      maxOpen,
+    });
+    return { account, changed: false, summary: "max-open-positions-reached" };
+  }
+
+  const held = new Set(
+    account.openPositions.map((p) => normalizeSymbol(p.symbol)),
+  );
+  const watch = new Set(
+    paperSettings.symbols.map((s) => normalizeSymbol(s)),
+  );
 
   const candidates = [...snapshots.values()]
-    .filter((s) => s.bullishCross)
+    .filter(
+      (s) =>
+        watch.has(normalizeSymbol(s.symbol)) &&
+        !held.has(normalizeSymbol(s.symbol)) &&
+        s.bullishCross,
+    )
     .sort((a, b) => b.ema9 - b.ema21 - (a.ema9 - a.ema21));
 
   const entrySnap = candidates[0];
@@ -212,15 +136,24 @@ export function runPaperScalp1mTick(params: {
   const sym = normalizeSymbol(entrySnap.symbol);
   const entryPrice = livePrice(sym, marketCoins, entrySnap.close);
   const nav = computePaperWorkspaceNav(account, marketCoins);
-  const notional = fractionalNotional(nav.portfolio_nav_usdt);
+  const freeBalanceUsdt = nav.available_usdt;
+  const positionSizeUsdt = computePaperPositionSizeUsdt(
+    freeBalanceUsdt,
+    paperSettings.riskPerTradePercent,
+  );
 
-  if (notional < 1 || nav.available_usdt < notional) {
-    logScalp("SKIP entry — insufficient balance", {
-      nav: nav.portfolio_nav_usdt,
-      available: nav.available_usdt,
-      notional,
+  if (freeBalanceUsdt < positionSizeUsdt) {
+    logScalp("SKIP — insufficient free margin for min notional floor", {
+      freeBalanceUsdt,
+      positionSizeUsdt,
+      floor: PAPER_MIN_NOTIONAL_USDT,
+      riskPct: paperSettings.riskPerTradePercent,
     });
-    return { account, changed: false, summary: "insufficient-balance" };
+    return { account, changed: false, summary: "insufficient-free-margin-floor" };
+  }
+
+  if (positionSizeUsdt > freeBalanceUsdt) {
+    return { account, changed: false, summary: "insufficient-free-margin-floor" };
   }
 
   const { stopLoss, takeProfit, riskUsd, rewardUsd } = computeAtrStops(
@@ -228,7 +161,7 @@ export function runPaperScalp1mTick(params: {
     entrySnap.atr14,
     "long",
   );
-  const amount = Number((notional / entryPrice).toFixed(6));
+  const amount = Number((positionSizeUsdt / entryPrice).toFixed(6));
 
   logScalp(`BUY SIGNAL ${sym} | 1h EMA9 crossed above EMA21`, {
     entryPrice: formatMicroPrice(entryPrice),
@@ -237,13 +170,16 @@ export function runPaperScalp1mTick(params: {
     rsi14: entrySnap.rsi14.toFixed(2),
     atr14: formatMicroPrice(entrySnap.atr14),
     nav: nav.portfolio_nav_usdt,
+    freeBalanceUsdt,
+    positionSizeUsdt,
+    riskPerTradePercent: paperSettings.riskPerTradePercent,
+    minNotionalFloor: PAPER_MIN_NOTIONAL_USDT,
     stopLoss,
     takeProfit,
     atrStopDistance: Number((entrySnap.atr14 * ATR_STOP_MULT).toFixed(8)),
     atrTpDistance: Number((entrySnap.atr14 * ATR_TP_MULT).toFixed(8)),
     riskRewardRatio: riskUsd > 0 ? Number((rewardUsd / riskUsd).toFixed(2)) : 2,
-    positionSizeUsd: notional,
-    positionFraction: POSITION_FRACTION,
+    openSlots: `${account.openPositions.length}/${maxOpen}`,
     contracts: amount,
   });
 
@@ -255,7 +191,7 @@ export function runPaperScalp1mTick(params: {
     type: "buy",
     entryPrice,
     amount,
-    value: notional,
+    value: positionSizeUsdt,
     status: "open",
     openedAt: new Date(),
     stopLoss,
@@ -266,17 +202,21 @@ export function runPaperScalp1mTick(params: {
     tags: ["paper-scalp", "ema-cross", sym],
     executionNotes: [
       `ATR14=${entrySnap.atr14.toFixed(8)}`,
-      `SL=1.5×ATR TP=3×ATR (1:2 RR)`,
+      `SL=1.5×ATR TP=3×ATR`,
+      `size=$${positionSizeUsdt} risk=${paperSettings.riskPerTradePercent}%`,
     ],
   };
 
   return {
     account: {
       ...account,
-      currentBalance: Math.max(0, account.currentBalance - notional),
-      openPositions: [trade],
+      currentBalance: Math.max(0, account.currentBalance - positionSizeUsdt),
+      openPositions: [...account.openPositions, trade],
     },
     changed: true,
     summary: `opened:${sym}:ema-cross`,
   };
 }
+
+/** @deprecated Alias — use runPaperScalp1hTick */
+export const runPaperScalp1mTick = runPaperScalp1hTick;

@@ -8,9 +8,10 @@ import {
   type Scalp1mSnapshot,
   type ScalpCandle,
 } from "@/lib/trading/paper-scalp-indicators";
+import { DEFAULT_PAPER_WATCH_SYMBOLS } from "@/lib/trading/paper-scalp-settings";
 
 const BINANCE_KLINES = "https://api.binance.com/api/v3/klines";
-const DEFAULT_SYMBOLS = ["BTCUSDT", "SOLUSDT", "PEPEUSDT"] as const;
+const DEFAULT_SYMBOLS = DEFAULT_PAPER_WATCH_SYMBOLS;
 const KLINE_INTERVAL = "1h";
 const DEFAULT_LIMIT = 100;
 const FETCH_DELAY_MS = 350;
@@ -43,12 +44,24 @@ function klineSymbolCandidates(symbol: string): string[] {
   return KLINE_SYMBOL_CANDIDATES[base] ?? [base];
 }
 
-export function resolvePaperScalpSymbols(extra: string[] = []): string[] {
+export function resolvePaperScalpSymbols(
+  extra: string[] = [],
+  workspaceSymbols: string[] = [],
+): string[] {
   const raw = (process.env.PAPER_SCALP_SYMBOLS ?? "").trim();
   const fromEnv = raw
     ? raw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
-    : [...DEFAULT_SYMBOLS];
-  const merged = new Set([...fromEnv, ...extra.map((s) => s.toUpperCase())]);
+    : [];
+  const base =
+    workspaceSymbols.length > 0
+      ? workspaceSymbols
+      : fromEnv.length > 0
+        ? fromEnv
+        : [...DEFAULT_SYMBOLS];
+  const merged = new Set([
+    ...base.map((s) => normalizeKlineSymbol(s)),
+    ...extra.map((s) => normalizeKlineSymbol(s)),
+  ]);
   return [...merged];
 }
 

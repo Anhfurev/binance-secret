@@ -49,15 +49,20 @@ export function computePaperWorkspaceNav(
   };
 }
 
-export function formatNavTelegramBlock(nav: PaperWorkspaceNav): string {
+export function formatNavTelegramBlock(
+  nav: PaperWorkspaceNav,
+  openLegCount = 0,
+): string {
   const pnlSign = nav.session_pnl_usdt >= 0 ? "+" : "";
   const pctSign = nav.session_pnl_pct >= 0 ? "+" : "";
   return [
-    `• Balance (free USDT): $${nav.available_usdt.toFixed(2)}`,
+    `• Free cash (USDT): $${nav.available_usdt.toFixed(2)}`,
     nav.open_positions_usdt > 0
-      ? `• Open positions (mark): $${nav.open_positions_usdt.toFixed(2)}`
-      : null,
-    `• Live Portfolio Value (NAV): $${nav.portfolio_nav_usdt.toFixed(2)} USDT`,
+      ? `• Open legs (${openLegCount}): $${nav.open_positions_usdt.toFixed(2)} at mark`
+      : openLegCount > 0
+        ? `• Open legs: ${openLegCount}`
+        : null,
+    `• Live NAV: $${nav.portfolio_nav_usdt.toFixed(2)} USDT`,
     `• Session P&L: ${pnlSign}$${nav.session_pnl_usdt.toFixed(2)} (${pctSign}${nav.session_pnl_pct}%) vs $${nav.starting_usdt.toFixed(2)} start`,
   ]
     .filter(Boolean)
@@ -74,8 +79,13 @@ export function humanPaperScalpReason(summary: string): string {
       "RSI above overbought threshold — skip chasing extended move",
     "holding-position": "Managing open 1h position (ATR stop / TP / EMA exit)",
     "insufficient-balance":
-      "NAV too low for the 20% position size slot",
-    "max-open-positions": "Copy-profile max open positions reached",
+      "Free USDT too low for configured risk slot",
+    "insufficient-free-margin-floor":
+      "Free cash below $5.50 min-notional floor or sized trade",
+    "max-open-positions":
+      "Legacy cap — copy-profile max open positions reached",
+    "max-open-positions-reached":
+      "Max concurrent open positions reached (workspace limit)",
     "no-1m-snapshots":
       "1h indicator snapshots missing (klines blocked or empty)",
     "no-hourly-snapshots":

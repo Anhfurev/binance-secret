@@ -1,5 +1,9 @@
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
+import {
+  resolvePaperScalpWorkspaceSettings,
+  type PaperScalpWorkspaceSettings,
+} from "@/lib/trading/paper-scalp-settings";
 
 const DEMO_DEVICE_ID_STORAGE_KEY = "nextrade-demo-device-id";
 const DEMO_WORKSPACES_TABLE = "demo_workspaces";
@@ -20,6 +24,7 @@ export interface DemoWorkspaceSnapshot {
   demoAutoPilot: boolean;
   autoPilotMode: "signals" | "dca";
   copyProfile: "conservative" | "balanced" | "aggressive";
+  paperSettings: PaperScalpWorkspaceSettings;
 }
 
 export interface DemoWorkspaceLoadResult {
@@ -64,6 +69,7 @@ function formatWorkspaceError(message: string) {
 
 function normalizeSnapshot(
   raw: Partial<DemoWorkspaceSnapshot> | null | undefined,
+  dbSettings?: Record<string, unknown> | null,
 ): DemoWorkspaceSnapshot | null {
   if (!raw) return null;
 
@@ -85,6 +91,11 @@ function normalizeSnapshot(
       ? raw.activeId
       : profiles[0].id;
 
+  const paperSettings = resolvePaperScalpWorkspaceSettings({
+    ...(raw.paperSettings as Record<string, unknown> | undefined),
+    ...(dbSettings ?? undefined),
+  });
+
   return {
     activeId,
     profiles,
@@ -95,6 +106,7 @@ function normalizeSnapshot(
       raw.copyProfile === "conservative" || raw.copyProfile === "aggressive"
         ? raw.copyProfile
         : "balanced",
+    paperSettings,
   };
 }
 
@@ -220,13 +232,18 @@ async function listDeviceDemoWorkspaces() {
   const client = supabaseAdmin ?? supabase;
   if (!client) return [];
 
-  let data: { device_id: string; payload: unknown; updated_at: string | null }[] | null;
+  let data: {
+    device_id: string;
+    payload: unknown;
+    settings: unknown;
+    updated_at: string | null;
+  }[] | null;
   let error: { message: string } | null;
 
   try {
     const result = await client
       .from(DEMO_WORKSPACES_TABLE)
-      .select("device_id, payload, updated_at");
+      .select("device_id, payload, settings, updated_at");
     data = result.data;
     error = result.error;
   } catch (fetchError) {
@@ -248,6 +265,7 @@ async function listDeviceDemoWorkspaces() {
     .map((row) => {
       const snapshot = normalizeSnapshot(
         row.payload as Partial<DemoWorkspaceSnapshot> | null,
+        row.settings as Record<string, unknown> | null,
       );
       if (!snapshot || typeof row.device_id !== "string") return null;
 
@@ -266,13 +284,18 @@ async function listUserDemoWorkspaces() {
     return [];
   }
 
-  let data: { user_id: string; payload: unknown; updated_at: string | null }[] | null;
+  let data: {
+    user_id: string;
+    payload: unknown;
+    settings: unknown;
+    updated_at: string | null;
+  }[] | null;
   let error: { message: string } | null;
 
   try {
     const result = await supabaseAdmin
       .from(USER_DEMO_WORKSPACES_TABLE)
-      .select("user_id, payload, updated_at");
+      .select("user_id, payload, settings, updated_at");
     data = result.data;
     error = result.error;
   } catch (fetchError) {
@@ -297,6 +320,7 @@ async function listUserDemoWorkspaces() {
     .map((row) => {
       const snapshot = normalizeSnapshot(
         row.payload as Partial<DemoWorkspaceSnapshot> | null,
+        row.settings as Record<string, unknown> | null,
       );
       if (!snapshot || typeof row.user_id !== "string") return null;
 
@@ -334,6 +358,7 @@ export async function saveDemoWorkspaceForOwner(
     {
       [queryParts.column]: ownerId,
       payload: snapshot,
+      settings: snapshot.paperSettings,
       updated_at: updatedAt,
     },
     { onConflict: queryParts.column },

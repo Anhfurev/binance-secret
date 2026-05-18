@@ -99,8 +99,9 @@ export function notifyPaperScalpBuy(params: {
   atr14: number;
   rsi14: number;
   nav?: PaperWorkspaceNav;
+  openLegCount?: number;
 }): void {
-  const { symbol, entryPrice, positionSizeUsd, stopLoss, takeProfit, ema9, ema21, atr14, rsi14, nav } =
+  const { symbol, entryPrice, positionSizeUsd, stopLoss, takeProfit, ema9, ema21, atr14, rsi14, nav, openLegCount } =
     params;
   const lines = [
     `🚀 *[paper-scalp] BUY SIGNAL | ${symbol}*`,
@@ -110,7 +111,7 @@ export function notifyPaperScalpBuy(params: {
     `• Target TP: ${fmtUsd(takeProfit, takeProfit >= 1 ? 4 : 6)}`,
     `• Indicators (1h): EMA9: ${fmtNum(ema9)} | EMA21: ${fmtNum(ema21)} | RSI14: ${rsi14.toFixed(1)} | ATR: ${fmtNum(atr14)}`,
   ];
-  if (nav) lines.push(formatNavTelegramBlock(nav));
+  if (nav) lines.push(formatNavTelegramBlock(nav, openLegCount ?? 1));
   sendTelegramNotification(lines.join("\n"));
 }
 
@@ -122,8 +123,9 @@ export function notifyPaperScalpExit(params: {
   entryPrice?: number;
   pnlUsd?: number;
   nav?: PaperWorkspaceNav;
+  openLegCount?: number;
 }): void {
-  const { symbol, reason, exitPrice, performancePct, entryPrice, pnlUsd, nav } = params;
+  const { symbol, reason, exitPrice, performancePct, entryPrice, pnlUsd, nav, openLegCount } = params;
   const lines = [
     `🔒 *[paper-scalp] POSITION CLOSED | ${symbol}*`,
     `• Reason: \`${reason}\``,
@@ -137,7 +139,7 @@ export function notifyPaperScalpExit(params: {
   if (pnlUsd != null) {
     lines.push(`• PnL: ${pnlUsd >= 0 ? "+" : ""}${fmtUsd(pnlUsd)}`);
   }
-  if (nav) lines.push(formatNavTelegramBlock(nav));
+  if (nav) lines.push(formatNavTelegramBlock(nav, openLegCount ?? 0));
   sendTelegramNotification(lines.join("\n"));
 }
 
@@ -148,6 +150,7 @@ export function notifyPaperScalpDecision(params: {
   details?: Record<string, string | number | boolean | null | undefined>;
   throttleKey?: string;
   nav?: PaperWorkspaceNav;
+  openLegCount?: number;
 }): void {
   const key = params.throttleKey ?? `${params.kind}:${params.reason}:${params.symbol ?? "all"}`;
   if (
@@ -170,7 +173,9 @@ export function notifyPaperScalpDecision(params: {
     `• Why no trade: ${humanPaperScalpReason(params.reason)}`,
   ];
   if (params.symbol) lines.push(`• Symbol: \`${params.symbol}\``);
-  if (params.nav) lines.push(formatNavTelegramBlock(params.nav));
+  if (params.nav) {
+    lines.push(formatNavTelegramBlock(params.nav, params.openLegCount ?? 0));
+  }
 
   if (params.details) {
     for (const [k, v] of Object.entries(params.details)) {

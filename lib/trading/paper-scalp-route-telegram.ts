@@ -30,6 +30,7 @@ export function relayPaperScalpTickTelegram(params: {
 }): void {
   const { summary, account, scalpSnapshots, marketCoins = [] } = params;
   const nav = computePaperWorkspaceNav(account, marketCoins);
+  const openLegCount = account.openPositions.length;
 
   if (summary.startsWith("opened:")) {
     const trade = account.openPositions[0];
@@ -47,6 +48,7 @@ export function relayPaperScalpTickTelegram(params: {
       atr14: snap?.atr14 ?? 0,
       rsi14: snap?.rsi14 ?? 50,
       nav,
+      openLegCount,
     });
     return;
   }
@@ -65,6 +67,7 @@ export function relayPaperScalpTickTelegram(params: {
       entryPrice: trade.entryPrice,
       pnlUsd: trade.pnl,
       nav,
+      openLegCount: account.openPositions.length,
     });
     return;
   }
@@ -90,6 +93,7 @@ export function relayPaperScalpTickTelegram(params: {
       },
       throttleKey: `hold:${sym}`,
       nav,
+      openLegCount,
     });
     return;
   }
@@ -107,6 +111,7 @@ export function relayPaperScalpTickTelegram(params: {
       },
       throttleKey: "no-ema-bullish-cross",
       nav,
+      openLegCount,
     });
     return;
   }
@@ -120,20 +125,41 @@ export function relayPaperScalpTickTelegram(params: {
       },
       throttleKey: "rsi-overbought",
       nav,
+      openLegCount,
     });
     return;
   }
 
-  if (summary === "insufficient-balance") {
+  if (
+    summary === "insufficient-balance" ||
+    summary === "insufficient-free-margin-floor"
+  ) {
     notifyPaperScalpDecision({
       kind: "skip",
       reason: summary,
       details: {
-        requiredNotional: Number((nav.portfolio_nav_usdt * 0.2).toFixed(2)),
-        available: nav.available_usdt,
+        freeCash: nav.available_usdt,
+        minNotionalFloor: 5.5,
+        nav: nav.portfolio_nav_usdt,
       },
-      throttleKey: "insufficient-balance",
+      throttleKey: summary,
       nav,
+      openLegCount,
+    });
+    return;
+  }
+
+  if (
+    summary === "max-open-positions-reached" ||
+    summary === "max-open-positions"
+  ) {
+    notifyPaperScalpDecision({
+      kind: "skip",
+      reason: summary,
+      details: { openCount: account.openPositions.length },
+      throttleKey: "max-open-positions-reached",
+      nav,
+      openLegCount,
     });
     return;
   }
@@ -145,6 +171,7 @@ export function relayPaperScalpTickTelegram(params: {
       details: { hint: "1h klines fetch failed or symbols empty" },
       throttleKey: "no-hourly-snapshots",
       nav,
+      openLegCount,
     });
     return;
   }
@@ -160,5 +187,6 @@ export function relayPaperScalpTickTelegram(params: {
           : undefined,
     throttleKey: summary,
     nav,
+    openLegCount,
   });
 }
