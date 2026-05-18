@@ -1,4 +1,6 @@
 import { percentOf, recalculateAccountMetrics } from "@/lib/demo-account";
+import { formatAssetPrice } from "@/lib/trading/paper-scalp-metrics-format";
+import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
 import { defaultScalpingSettings } from "@/lib/trading/settings";
 import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
 import type { PaperAutomationTickResult } from "@/lib/trading/paper-scalp-types";
@@ -17,16 +19,6 @@ function normalizeSymbol(symbol: string): string {
   return s.endsWith("USDT") ? s : `${s}USDT`;
 }
 
-function livePrice(
-  symbol: string,
-  marketCoins: CoinData[],
-  fallback: number,
-): number {
-  const base = normalizeSymbol(symbol).replace(/USDT$/, "").toLowerCase();
-  const coin = marketCoins.find((c) => c.symbol.toLowerCase() === base);
-  return coin?.current_price ?? fallback;
-}
-
 function trailingAtrStop(trade: DemoTrade, mark: number, atr14: number): number {
   const dist = atr14 * ATR_STOP_MULT;
   const raw = mark - dist;
@@ -43,7 +35,7 @@ export function closePaperScalpTrade(
   const rawPnl = isLong
     ? (closePrice - trade.entryPrice) * trade.amount
     : (trade.entryPrice - closePrice) * trade.amount;
-  const pnl = Number(rawPnl.toFixed(2));
+  const pnl = Number(rawPnl.toFixed(4));
   const effectiveValue = trade.value;
   const pnlPercent = Number(((pnl / effectiveValue) * 100).toFixed(2));
   const newDailyPnl = (account.dailyPnl ?? 0) + pnl;
@@ -53,8 +45,8 @@ export function closePaperScalpTrade(
       defaultScalpingSettings.maxDailyLossPct;
 
   logScalp(`EXIT ${trade.symbol} | reason=${reason}`, {
-    entryPrice: trade.entryPrice,
-    closePrice: Number(closePrice.toFixed(8)),
+    entryPrice: formatAssetPrice(trade.entryPrice),
+    closePrice: formatAssetPrice(closePrice),
     pnl,
     pnlPercent,
   });
@@ -106,7 +98,11 @@ export function evaluateOpenPaperPosition(params: {
   const { account, trade, snapshots, marketCoins } = params;
   const sym = normalizeSymbol(trade.symbol);
   const snap = snapshots.get(sym);
-  const mark = livePrice(sym, marketCoins, snap?.close ?? trade.entryPrice);
+  const mark = resolvePaperLiveMarkPrice(
+    sym,
+    marketCoins,
+    snap?.close ?? trade.entryPrice,
+  );
   const atr14 =
     snap?.atr14 ?? Math.abs(trade.entryPrice - trade.stopLoss) / ATR_STOP_MULT;
 

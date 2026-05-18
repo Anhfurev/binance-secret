@@ -140,7 +140,8 @@ export function relayPaperScalpTickTelegram(params: {
       details: {
         freeCash: nav.available_usdt,
         minNotionalFloor: 5.5,
-        nav: nav.portfolio_nav_usdt,
+        liveNav: nav.portfolio_nav_usdt,
+        openUnrealizedPnl: nav.open_unrealized_pnl_usdt,
       },
       throttleKey: summary,
       nav,

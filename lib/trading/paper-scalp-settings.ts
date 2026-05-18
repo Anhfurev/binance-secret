@@ -4,6 +4,9 @@ import { sanitizePaperScalpSymbolList } from "@/lib/trading/paper-scalp-kline-sy
 
 export const PAPER_MIN_NOTIONAL_USDT = 5.5;
 
+/** Below this live NAV, use %-of-wallet only (no $5.50 floor). */
+export const PAPER_NAV_COMPOUND_THRESHOLD_USDT = 50;
+
 export const DEFAULT_RISK_PER_TRADE_PERCENT = 23;
 
 export const DEFAULT_MAX_OPEN_POSITIONS = 5;
@@ -76,15 +79,32 @@ export function resolvePaperScalpWorkspaceSettings(
 }
 
 /**
- * positionSizeUsdt = (freeBalance * risk%) / 100, floored at $5.50 (Binance MIN_NOTIONAL).
+ * Dynamic fractional compounding: size = live NAV × risk%.
+ * NAV < $50 → percent-only (23% default, no $5.50 floor).
+ * NAV ≥ $50 → enforce Binance min-notional floor.
  */
 export function computePaperPositionSizeUsdt(
-  freeBalanceUsdt: number,
+  liveNavUsdt: number,
   riskPerTradePercent: number,
-): number {
-  const free = Math.max(0, freeBalanceUsdt);
-  const raw = (free * riskPerTradePercent) / 100;
-  return Number(Math.max(PAPER_MIN_NOTIONAL_USDT, raw).toFixed(2));
+): { sizeUsdt: number; usedNavCompounding: boolean; appliedMinFloor: boolean } {
+  const nav = Math.max(0, liveNavUsdt);
+  const riskPct = Math.min(Math.max(riskPerTradePercent, 1), 50);
+  const raw = (nav * riskPct) / 100;
+  const underThreshold = nav < PAPER_NAV_COMPOUND_THRESHOLD_USDT;
+
+  if (underThreshold) {
+    return {
+      sizeUsdt: Number(raw.toFixed(4)),
+      usedNavCompounding: true,
+      appliedMinFloor: false,
+    };
+  }
+
+  return {
+    sizeUsdt: Number(Math.max(PAPER_MIN_NOTIONAL_USDT, raw).toFixed(4)),
+    usedNavCompounding: true,
+    appliedMinFloor: raw < PAPER_MIN_NOTIONAL_USDT,
+  };
 }
 
 export function mergeWorkspacePaperSymbolLists(

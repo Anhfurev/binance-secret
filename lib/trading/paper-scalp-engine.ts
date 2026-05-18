@@ -4,8 +4,12 @@ import {
 } from "@/lib/trading/paper-scalp-indicators";
 import { logPaperScalpActiveLine } from "@/lib/trading/paper-scalp-active-log";
 import { maybeResetPaperDailyPnl } from "@/lib/trading/paper-scalp-daily";
-import { formatMicroPrice } from "@/lib/trading/micro-price";
-import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
+import { formatAssetPrice } from "@/lib/trading/paper-scalp-metrics-format";
+import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
+import {
+  computePaperWorkspaceNav,
+  formatNavLogLine,
+} from "@/lib/trading/paper-scalp-nav";
 import { evaluateOpenPaperPosition } from "@/lib/trading/paper-scalp-positions";
 import {
   rankMomentumCandidates,
@@ -14,7 +18,6 @@ import {
 } from "@/lib/trading/paper-scalp-momentum";
 import {
   computePaperPositionSizeUsdt,
-  PAPER_MIN_NOTIONAL_USDT,
   type PaperScalpWorkspaceSettings,
 } from "@/lib/trading/paper-scalp-settings";
 import type { PaperAutomationTickResult } from "@/lib/trading/paper-scalp-types";
@@ -35,16 +38,6 @@ function resolveRsiMaxBuy(): number {
 function normalizeSymbol(symbol: string): string {
   const s = symbol.toUpperCase().replace(/\//g, "");
   return s.endsWith("USDT") ? s : `${s}USDT`;
-}
-
-function livePrice(
-  symbol: string,
-  marketCoins: CoinData[],
-  fallback: number,
-): number {
-  const base = normalizeSymbol(symbol).replace(/USDT$/, "").toLowerCase();
-  const coin = marketCoins.find((c) => c.symbol.toLowerCase() === base);
-  return coin?.current_price ?? fallback;
 }
 
 export function runPaperScalp1hTick(params: {
@@ -127,15 +120,19 @@ export function runPaperScalp1hTick(params: {
     snap: entrySnap,
   });
 
-  const entryPrice = livePrice(sym, marketCoins, entrySnap.close);
-  const nav = computePaperWorkspaceNav(account, marketCoins);
-  const freeBalanceUsdt = nav.available_usdt;
-  const positionSizeUsdt = computePaperPositionSizeUsdt(
-    freeBalanceUsdt,
-    paperSettings.riskPerTradePercent,
+  const entryPrice = resolvePaperLiveMarkPrice(
+    sym,
+    marketCoins,
+    entrySnap.close,
   );
+  const nav = computePaperWorkspaceNav(account, marketCoins);
+  const { sizeUsdt: positionSizeUsdt, appliedMinFloor } =
+    computePaperPositionSizeUsdt(
+      nav.portfolio_nav_usdt,
+      paperSettings.riskPerTradePercent,
+    );
 
-  if (freeBalanceUsdt < positionSizeUsdt) {
+  if (positionSizeUsdt <= 0 || nav.available_usdt < positionSizeUsdt) {
     return { account, changed: false, summary: "insufficient-free-margin-floor" };
   }
 
@@ -147,10 +144,12 @@ export function runPaperScalp1hTick(params: {
   const amount = Number((positionSizeUsdt / entryPrice).toFixed(6));
 
   console.log(`[paper-scalp] BUY ${sym} | ${buyReason}`, {
-    entryPrice: formatMicroPrice(entryPrice),
+    entryPrice: formatAssetPrice(entryPrice),
     rsi14: entrySnap.rsi14.toFixed(2),
     positionSizeUsdt,
-    nav: nav.portfolio_nav_usdt,
+    navPct: paperSettings.riskPerTradePercent,
+    minFloor: appliedMinFloor,
+    navSummary: formatNavLogLine(nav),
     riskRewardRatio: riskUsd > 0 ? Number((rewardUsd / riskUsd).toFixed(2)) : 2,
   });
 

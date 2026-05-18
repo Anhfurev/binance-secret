@@ -3,6 +3,11 @@
  * Fire-and-forget: never await in the hot tick path.
  */
 
+import {
+  formatAssetPrice,
+  formatNavUsd,
+  formatSignedNavUsd,
+} from "@/lib/trading/paper-scalp-metrics-format";
 import { formatMicroPrice } from "@/lib/trading/micro-price";
 import { writeServerLogAsync } from "@/lib/server-logs";
 import {
@@ -11,7 +16,7 @@ import {
   type PaperWorkspaceNav,
 } from "@/lib/trading/paper-scalp-nav";
 
-const SKIP_THROTTLE_MS = 90_000;
+const SKIP_THROTTLE_MS = 60_000;
 const lastSkipSentAt = new Map<string, number>();
 
 function resolveToken(): string {
@@ -22,10 +27,9 @@ function resolveChatId(): string {
   return (process.env.TELEGRAM_CHAT_ID ?? "").trim();
 }
 
-function fmtUsd(n: number, digits?: number): string {
-  if (digits != null && Math.abs(n) >= 0.01) {
-    return `$${Number(n).toFixed(digits)}`;
-  }
+function fmtUsd(n: number, useNavPrecision = false): string {
+  if (useNavPrecision) return `$${formatNavUsd(n)}`;
+  if (Math.abs(n) < 1) return `$${formatAssetPrice(n)}`;
   return `$${formatMicroPrice(n)}`;
 }
 
@@ -105,10 +109,10 @@ export function notifyPaperScalpBuy(params: {
     params;
   const lines = [
     `🚀 *[paper-scalp] BUY SIGNAL | ${symbol}*`,
-    `• Entry Price: ${fmtUsd(entryPrice, entryPrice >= 1 ? 4 : 6)}`,
-    `• Size Allocated: ${fmtUsd(positionSizeUsd)}`,
-    `• ATR Stop Loss: ${fmtUsd(stopLoss, stopLoss >= 1 ? 4 : 6)}`,
-    `• Target TP: ${fmtUsd(takeProfit, takeProfit >= 1 ? 4 : 6)}`,
+    `• Entry Price: ${fmtUsd(entryPrice)}`,
+    `• Size Allocated: ${fmtUsd(positionSizeUsd, true)}`,
+    `• ATR Stop Loss: ${fmtUsd(stopLoss)}`,
+    `• Target TP: ${fmtUsd(takeProfit)}`,
     `• Indicators (1h): EMA9: ${fmtNum(ema9)} | EMA21: ${fmtNum(ema21)} | RSI14: ${rsi14.toFixed(1)} | ATR: ${fmtNum(atr14)}`,
   ];
   if (nav) lines.push(formatNavTelegramBlock(nav, openLegCount ?? 1));
@@ -130,14 +134,14 @@ export function notifyPaperScalpExit(params: {
     `🔒 *[paper-scalp] POSITION CLOSED | ${symbol}*`,
     `• Reason: \`${reason}\``,
     `• Why: ${humanPaperScalpReason(`closed:${symbol}:${reason}`)}`,
-    `• Exit Price: ${fmtUsd(exitPrice, exitPrice >= 1 ? 4 : 6)}`,
+    `• Exit Price: ${fmtUsd(exitPrice)}`,
     `• Performance: ${performancePct >= 0 ? "+" : ""}${fmtNum(performancePct, 3)}%`,
   ];
   if (entryPrice != null) {
-    lines.push(`• Entry Price: ${fmtUsd(entryPrice, entryPrice >= 1 ? 4 : 6)}`);
+    lines.push(`• Entry Price: ${fmtUsd(entryPrice)}`);
   }
   if (pnlUsd != null) {
-    lines.push(`• PnL: ${pnlUsd >= 0 ? "+" : ""}${fmtUsd(pnlUsd)}`);
+    lines.push(`• PnL: ${formatSignedNavUsd(pnlUsd)}`);
   }
   if (nav) lines.push(formatNavTelegramBlock(nav, openLegCount ?? 0));
   sendTelegramNotification(lines.join("\n"));

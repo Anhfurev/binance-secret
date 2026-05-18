@@ -22,6 +22,10 @@ import {
   resolvePaperScalpWalletUsd,
 } from "@/lib/trading/paper-scalp-wallet";
 import {
+  resolvePaperTelegramMasterWorkspaceKey,
+  shouldDispatchPaperScalpTelegram,
+} from "@/lib/trading/paper-scalp-notify-gate";
+import {
   relayPaperScalpTickTelegram,
   safePaperScalpRouteTelegram,
 } from "@/lib/trading/paper-scalp-route-telegram";
@@ -118,6 +122,9 @@ export async function runPaperScalpOrchestrator(): Promise<
     });
   }
 
+  const masterWorkspaceKey = resolvePaperTelegramMasterWorkspaceKey(
+    listResult.data,
+  );
   const prepared = await preparePaperRun(listResult.data);
   const sampleSettings = listResult.data[0]?.snapshot.paperSettings;
   const momentum = resolvePaperMomentumSettings(
@@ -183,12 +190,21 @@ export async function runPaperScalpOrchestrator(): Promise<
       cashUsdt: nav.available_usdt,
     });
 
-    dispatchRouteTelegram(
-      result.summary,
-      result.account,
-      prepared.scalpSnapshots,
-      prepared.marketCoins,
-    );
+    if (
+      shouldDispatchPaperScalpTelegram({
+        workspaceKey: key,
+        masterWorkspaceKey,
+        action,
+        summary: result.summary,
+      })
+    ) {
+      dispatchRouteTelegram(
+        result.summary,
+        result.account,
+        prepared.scalpSnapshots,
+        prepared.marketCoins,
+      );
+    }
 
     if (!result.changed && !walletReset) continue;
 

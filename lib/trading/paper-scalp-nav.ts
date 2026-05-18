@@ -1,42 +1,68 @@
-import type { CoinData, DemoAccount } from "@/lib/types";
+import type { CoinData, DemoAccount, DemoTrade } from "@/lib/types";
+import {
+  formatNavUsd,
+  formatPct4,
+  formatSignedNavUsd,
+} from "@/lib/trading/paper-scalp-metrics-format";
+import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
 
 export type PaperWorkspaceNav = {
   available_usdt: number;
   open_positions_usdt: number;
   portfolio_nav_usdt: number;
   starting_usdt: number;
+  /** Wallet session: live NAV − persisted starting balance. */
   session_pnl_usdt: number;
   session_pnl_pct: number;
+  /** Open legs: Σ (mark − entry) × qty — anchored to DB entry price. */
+  open_unrealized_pnl_usdt: number;
 };
 
+function unrealizedLegPnl(
+  trade: DemoTrade,
+  mark: number,
+): number {
+  if (trade.type === "buy") {
+    return (mark - trade.entryPrice) * trade.amount;
+  }
+  return (trade.entryPrice - mark) * trade.amount;
+}
+
+/** Live NAV = free cash + Σ(tokens × live mark). Never cost basis. */
 export function computePaperWorkspaceNav(
   account: DemoAccount,
   marketCoins: CoinData[] = [],
 ): PaperWorkspaceNav {
-  const available_usdt = Number(
-    Math.max(0, account.currentBalance).toFixed(2),
-  );
+  const available_usdt = Number(Math.max(0, account.currentBalance).toFixed(4));
   const starting_usdt = Number(
-    Math.max(0, account.startingBalance || available_usdt).toFixed(2),
+    Math.max(0, account.startingBalance || available_usdt).toFixed(4),
   );
 
   let open_positions_usdt = 0;
+  let open_unrealized_pnl_usdt = 0;
+
   for (const pos of account.openPositions) {
-    const sym = pos.symbol.toUpperCase().replace(/\//g, "");
-    const base = sym.replace(/USDT$/, "").toLowerCase();
-    const coin = marketCoins.find((c) => c.symbol.toLowerCase() === base);
-    const mark = coin?.current_price ?? pos.entryPrice;
+    const mark = resolvePaperLiveMarkPrice(
+      pos.symbol,
+      marketCoins,
+      pos.entryPrice,
+    );
     open_positions_usdt += pos.amount * mark;
+    open_unrealized_pnl_usdt += unrealizedLegPnl(pos, mark);
   }
-  open_positions_usdt = Number(open_positions_usdt.toFixed(2));
+
+  open_positions_usdt = Number(open_positions_usdt.toFixed(4));
+  open_unrealized_pnl_usdt = Number(open_unrealized_pnl_usdt.toFixed(4));
 
   const portfolio_nav_usdt = Number(
-    (available_usdt + open_positions_usdt).toFixed(2),
+    (available_usdt + open_positions_usdt).toFixed(4),
   );
-  const session_pnl_usdt = Number((portfolio_nav_usdt - starting_usdt).toFixed(2));
+  const session_pnl_usdt = Number(
+    (portfolio_nav_usdt - starting_usdt).toFixed(4),
+  );
   const session_pnl_pct =
     starting_usdt > 0
-      ? Number(((session_pnl_usdt / starting_usdt) * 100).toFixed(2))
+      ? Number(((session_pnl_usdt / starting_usdt) * 100).toFixed(4))
       : 0;
 
   return {
@@ -46,6 +72,7 @@ export function computePaperWorkspaceNav(
     starting_usdt,
     session_pnl_usdt,
     session_pnl_pct,
+    open_unrealized_pnl_usdt,
   };
 }
 
@@ -53,20 +80,25 @@ export function formatNavTelegramBlock(
   nav: PaperWorkspaceNav,
   openLegCount = 0,
 ): string {
-  const pnlSign = nav.session_pnl_usdt >= 0 ? "+" : "";
-  const pctSign = nav.session_pnl_pct >= 0 ? "+" : "";
   return [
-    `• Free cash (USDT): $${nav.available_usdt.toFixed(2)}`,
+    `• Free cash (USDT): $${formatNavUsd(nav.available_usdt)}`,
     nav.open_positions_usdt > 0
-      ? `• Open legs (${openLegCount}): $${nav.open_positions_usdt.toFixed(2)} at mark`
+      ? `• Open legs (${openLegCount}): $${formatNavUsd(nav.open_positions_usdt)} at live mark`
       : openLegCount > 0
         ? `• Open legs: ${openLegCount}`
         : null,
-    `• Live NAV: $${nav.portfolio_nav_usdt.toFixed(2)} USDT`,
-    `• Session P&L: ${pnlSign}$${nav.session_pnl_usdt.toFixed(2)} (${pctSign}${nav.session_pnl_pct}%) vs $${nav.starting_usdt.toFixed(2)} start`,
+    `• Live NAV: $${formatNavUsd(nav.portfolio_nav_usdt)} USDT`,
+    openLegCount > 0
+      ? `• Open P&L (vs entry): ${formatSignedNavUsd(nav.open_unrealized_pnl_usdt)}`
+      : null,
+    `• Session P&L: ${formatSignedNavUsd(nav.session_pnl_usdt)} (${formatPct4(nav.session_pnl_pct)}) vs $${formatNavUsd(nav.starting_usdt)} start`,
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+export function formatNavLogLine(nav: PaperWorkspaceNav): string {
+  return `NAV=$${formatNavUsd(nav.portfolio_nav_usdt)} session=${formatSignedNavUsd(nav.session_pnl_usdt)} open=${formatSignedNavUsd(nav.open_unrealized_pnl_usdt)}`;
 }
 
 export function humanPaperScalpReason(summary: string): string {
@@ -83,7 +115,7 @@ export function humanPaperScalpReason(summary: string): string {
     "insufficient-balance":
       "Free USDT too low for configured risk slot",
     "insufficient-free-margin-floor":
-      "Free cash below $5.50 min-notional floor or sized trade",
+      "Free cash below compounding slot size for this NAV tier",
     "max-open-positions":
       "Legacy cap — copy-profile max open positions reached",
     "max-open-positions-reached":

@@ -3,7 +3,10 @@ import {
   evaluatePaperBuySignal,
   type PaperMomentumSettings,
 } from "@/lib/trading/paper-scalp-momentum";
-import { formatMicroPrice } from "@/lib/trading/micro-price";
+import {
+  formatAssetPrice,
+  formatNavUsd,
+} from "@/lib/trading/paper-scalp-metrics-format";
 
 function emaRelation(snap: Scalp1mSnapshot): string {
   if (snap.ema9 > snap.ema21) return "EMA9>EMA21";
@@ -25,7 +28,7 @@ export function logPaperScalpActiveLine(params: {
     return;
   }
   console.log(
-    `[paper-scalp-active] ${symbol} | ${action} | ${reason} | RSI ${snap.rsi14.toFixed(1)} | ${emaRelation(snap)} (${formatMicroPrice(snap.ema9)} / ${formatMicroPrice(snap.ema21)})`,
+    `[paper-scalp-active] ${symbol} | ${action} | ${reason} | RSI ${snap.rsi14.toFixed(1)} | ${emaRelation(snap)} (${formatAssetPrice(snap.ema9)} / ${formatAssetPrice(snap.ema21)})`,
   );
 }
 
@@ -61,6 +64,6 @@ export function logPaperWorkspaceResult(params: {
   cashUsdt: number;
 }): void {
   console.log(
-    `[paper-scalp-active] workspace=${params.workspaceKey} | ${params.action} | ${params.summary} | NAV=$${params.navUsdt.toFixed(2)} | cash=$${params.cashUsdt.toFixed(2)}`,
+    `[paper-scalp-active] workspace=${params.workspaceKey} | ${params.action} | ${params.summary} | NAV=$${formatNavUsd(params.navUsdt)} | cash=$${formatNavUsd(params.cashUsdt)}`,
   );
 }
