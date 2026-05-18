@@ -16,14 +16,15 @@ import {
   type PaperMomentumSettings,
 } from "@/lib/trading/paper-scalp-momentum";
 import { humanPaperScalpReason, type PaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
-import { sendTelegramNotificationAsync } from "@/lib/trading/paper-scalp-telegram";
 import {
   escapeTelegramHtml,
   formatNavHtmlBlock,
   tgBold,
   tgBullet,
   tgCode,
+  tgManifestTitle,
   tgSection,
+  transmitManifestHtmlDashboard,
 } from "@/lib/trading/paper-scalp-telegram-html";
 
 export type WorkspaceTickRow = {
@@ -160,7 +161,7 @@ export function buildUnifiedEngineManifest(input: EngineManifestInput): string {
   const atMaxLegs = !passesCorrelationExposureGate(openLegCount);
 
   const lines: string[] = [
-    `📋 ${tgBold("UNIFIED ENGINE MANIFEST")}`,
+    tgManifestTitle("📋 UNIFIED ENGINE MANIFEST"),
     tgBullet(
       `${escapeTelegramHtml(input.ranAt)} · ${escapeTelegramHtml(String(input.durationMs.toFixed(0)))}ms · ${input.partial ? "PARTIAL" : "OK"}`,
     ),
@@ -261,15 +262,9 @@ export function compileUnifiedEngineManifest(input: EngineManifestInput): string
 
 let pendingManifestTelegram: Promise<void> | null = null;
 
-function shipManifestTelegramDetached(text: string): Promise<void> {
-  return sendTelegramNotificationAsync(text)
-    .then(() => {
-      console.log("[paper-scalp-manifest] telegram dispatch settled");
-    })
-    .catch((error: unknown) => {
-      const err = error instanceof Error ? error : new Error(String(error));
-      console.error("[paper-scalp-manifest] telegram failed:", err.message);
-    });
+async function shipManifestTelegramDetached(html: string): Promise<void> {
+  await transmitManifestHtmlDashboard(html);
+  console.log("[paper-scalp-manifest] telegram dispatch settled");
 }
 
 export function flushPendingManifestTelegram(): Promise<void> {
@@ -280,9 +275,9 @@ export function scheduleUnifiedEngineManifestDispatch(
   input: EngineManifestInput,
 ): string {
   const text = compileUnifiedEngineManifest(input);
-  pendingManifestTelegram = new Promise<void>((resolve) => {
+  pendingManifestTelegram = new Promise<void>((resolve, reject) => {
     process.nextTick(() => {
-      void shipManifestTelegramDetached(text).finally(resolve);
+      void shipManifestTelegramDetached(text).then(resolve).catch(reject);
     });
   });
   return text;
@@ -291,7 +286,6 @@ export function scheduleUnifiedEngineManifestDispatch(
 export async function dispatchUnifiedEngineManifest(
   input: EngineManifestInput,
 ): Promise<void> {
-  const text = compileUnifiedEngineManifest(input);
-  await sendTelegramNotificationAsync(text);
-  console.log("[paper-scalp-manifest] telegram dispatch settled");
+  const html = compileUnifiedEngineManifest(input);
+  await shipManifestTelegramDetached(html);
 }

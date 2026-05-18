@@ -22,7 +22,11 @@ export function tgCode(text: string): string {
 }
 
 export function tgSection(title: string): string {
-  return tgBold(title);
+  return `<b>${escapeTelegramHtml(title)}</b>`;
+}
+
+export function tgManifestTitle(title: string): string {
+  return `<b>${escapeTelegramHtml(title)}</b>`;
 }
 
 export function tgBullet(line: string): string {
@@ -53,4 +57,55 @@ export function formatNavHtmlBlock(
     ),
   ];
   return rows.filter(Boolean).join("\n");
+}
+
+/** Manifest-only POST — parse_mode HTML, awaited, logs API errors. */
+export async function transmitManifestHtmlDashboard(
+  htmlBody: string,
+): Promise<void> {
+  const token = String(process.env.TELEGRAM_BOT_TOKEN ?? "").trim();
+  const chatId = String(process.env.TELEGRAM_CHAT_ID ?? "").trim();
+  if (!token || !chatId) {
+    console.warn(
+      "[paper-scalp-manifest] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing",
+    );
+    return;
+  }
+  if (!htmlBody.trim()) return;
+
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: htmlBody.slice(0, 4096),
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    }),
+  });
+
+  const raw = await res.text().catch(() => "");
+  let payload: { ok?: boolean; description?: string; result?: { message_id?: number } } =
+    {};
+  try {
+    payload = raw ? (JSON.parse(raw) as typeof payload) : {};
+  } catch {
+    payload = {};
+  }
+
+  if (!res.ok || payload.ok === false) {
+    console.error("[paper-scalp-manifest] Telegram HTML rejected", {
+      httpStatus: res.status,
+      description: payload.description ?? raw.slice(0, 400),
+    });
+    throw new Error(
+      payload.description ?? `Telegram HTTP ${res.status}`,
+    );
+  }
+
+  console.log("[paper-scalp-manifest] Telegram delivered", {
+    messageId: payload.result?.message_id ?? null,
+    chatIdSuffix: chatId.slice(-4),
+  });
 }
