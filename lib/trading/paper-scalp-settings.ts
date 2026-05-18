@@ -1,3 +1,5 @@
+import { sanitizePaperScalpSymbolList } from "@/lib/trading/paper-scalp-kline-symbols";
+
 /** Tunable 1h paper-scalp workspace policy (stored in demo_workspaces payload). */
 
 export const PAPER_MIN_NOTIONAL_USDT = 5.5;
@@ -75,7 +77,83 @@ export function mergeWorkspacePaperSymbolLists(
 ): string[] {
   const merged = new Set<string>();
   for (const list of lists) {
-    for (const s of list) merged.add(s);
+    if (!Array.isArray(list)) continue;
+    for (const s of list) {
+      if (s == null || s === undefined) continue;
+      const t = String(s).trim().toUpperCase();
+      if (t) merged.add(t.endsWith("USDT") ? t : `${t}USDT`);
+    }
   }
   return [...merged];
+}
+
+const PAPER_PROFILE_ID_HINTS = ["paper-28", "paper-scalp", "paper_28"];
+
+/** Demo / paper profiles — never tied to bot_settings.is_live_trading_enabled. */
+export function isPaperScanWorkspace(snapshot: {
+  walletMode: "demo" | "real";
+  demoAutoPilot: boolean;
+  activeId: string;
+}): boolean {
+  if (snapshot.walletMode !== "real") return true;
+  if (snapshot.demoAutoPilot) return true;
+  const id = snapshot.activeId.toLowerCase();
+  return PAPER_PROFILE_ID_HINTS.some((hint) => id.includes(hint));
+}
+
+/** Collect watch-list tickers from workspace payload.paperSettings / settings.symbols. */
+export function extractPaperWatchSymbolsFromWorkspaces(
+  workspaces: ReadonlyArray<{ snapshot: { walletMode: "demo" | "real"; demoAutoPilot: boolean; activeId: string; paperSettings: PaperScalpWorkspaceSettings } }>,
+): string[] {
+  const primary: string[][] = [];
+  const fallback: string[][] = [];
+
+  for (const ws of workspaces) {
+    const syms = ws.snapshot.paperSettings?.symbols ?? [];
+    if (isPaperScanWorkspace(ws.snapshot)) {
+      primary.push(syms);
+    } else if (ws.snapshot.walletMode !== "real") {
+      fallback.push(syms);
+    }
+  }
+
+  const merged = mergeWorkspacePaperSymbolLists(
+    primary.length > 0 ? primary : fallback,
+  );
+  return merged.length > 0 ? merged : [...DEFAULT_PAPER_WATCH_SYMBOLS];
+}
+
+/**
+ * Union workspace JSON, env, defaults, and open-position extras.
+ * Never replaces workspace list with a shorter env-only list.
+ */
+export function resolvePaperScalpSymbols(
+  extra: string[] = [],
+  workspaceSymbols: string[] = [],
+): string[] {
+  const raw = String(process.env.PAPER_SCALP_SYMBOLS ?? "").trim();
+  const fromEnv = raw
+    ? raw
+        .split(",")
+        .map((s) => String(s ?? "").trim().toUpperCase())
+        .filter(Boolean)
+    : [];
+
+  const workspaceClean = mergeWorkspacePaperSymbolLists([workspaceSymbols]);
+  const extraClean = mergeWorkspacePaperSymbolLists([extra]);
+
+  const union = mergeWorkspacePaperSymbolLists([
+    [...DEFAULT_PAPER_WATCH_SYMBOLS],
+    workspaceClean,
+    fromEnv,
+    extraClean,
+  ]);
+
+  const resolved = sanitizePaperScalpSymbolList(union);
+
+  console.log(
+    `[paper-scalp] resolvePaperScalpSymbols: workspace=${workspaceClean.length} env=${fromEnv.length} default=${DEFAULT_PAPER_WATCH_SYMBOLS.length} → ${resolved.length} tickers`,
+  );
+
+  return resolved;
 }

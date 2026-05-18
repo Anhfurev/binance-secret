@@ -14,7 +14,12 @@ import {
   normalizeKlineSymbol,
   sanitizePaperScalpSymbolList,
 } from "@/lib/trading/paper-scalp-kline-symbols";
-import { DEFAULT_PAPER_WATCH_SYMBOLS } from "@/lib/trading/paper-scalp-settings";
+import {
+  DEFAULT_PAPER_WATCH_SYMBOLS,
+  resolvePaperScalpSymbols,
+} from "@/lib/trading/paper-scalp-settings";
+
+export { resolvePaperScalpSymbols };
 
 const DEFAULT_SYMBOLS = DEFAULT_PAPER_WATCH_SYMBOLS;
 const DEFAULT_LIMIT = 100;
@@ -41,26 +46,6 @@ function sleep(ms: number): Promise<void> {
 function klineSymbolCandidates(symbol: string): string[] {
   const base = normalizeKlineSymbol(symbol);
   return KLINE_SYMBOL_CANDIDATES[base] ?? [base];
-}
-
-export function resolvePaperScalpSymbols(
-  extra: string[] = [],
-  workspaceSymbols: string[] = [],
-): string[] {
-  const raw = (process.env.PAPER_SCALP_SYMBOLS ?? "").trim();
-  const fromEnv = raw
-    ? raw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
-    : [];
-  const base =
-    workspaceSymbols.length > 0
-      ? workspaceSymbols
-      : fromEnv.length > 0
-        ? fromEnv
-        : [...DEFAULT_SYMBOLS];
-  return sanitizePaperScalpSymbolList([
-    ...base.map((s) => normalizeKlineSymbol(s)),
-    ...extra.map((s) => normalizeKlineSymbol(s)),
-  ]);
 }
 
 function parseKlineRows(rows: unknown[], priceScale = 1): ScalpCandle[] {
@@ -110,11 +95,14 @@ async function fetchHourlyKlinesForSymbol(
     return parseKlineRows(rows, priceScale);
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
-    console.warn("[paper-1h] binance klines fetch failed — skipping symbol", {
+    console.warn("[BINANCE-FETCH-SKIP] Skipping malformed or failed ticker", {
       symbol: binanceSymbol,
       url,
       message: err.message,
-      cause: err.cause,
+      code:
+        err && typeof err === "object" && "code" in err
+          ? String((err as { code?: string }).code)
+          : undefined,
     });
     return [];
   } finally {
@@ -148,7 +136,7 @@ export async function fetch1hKlines(
     return [];
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
-    console.error("[BINANCE-FETCH-BLOCKED] fetch1hKlines failed", {
+    console.warn("[BINANCE-FETCH-SKIP] Skipping malformed ticker", {
       symbol: base,
       message: err.message,
     });
@@ -160,9 +148,14 @@ export async function fetch1hKlines(
 export const fetch1mKlines = fetch1hKlines;
 
 export async function loadPaperScalpSnapshots(
-  symbols: string[],
+  symbols: unknown[] | string[],
 ): Promise<Map<string, Scalp1mSnapshot>> {
-  const unique = sanitizePaperScalpSymbolList(symbols);
+  const cleaned = symbols.filter(
+    (s): s is string => s != null && String(s).trim() !== "",
+  );
+  const unique = sanitizePaperScalpSymbolList(
+    cleaned.map((s) => String(s)),
+  );
   const delayMs = Number(process.env.PAPER_BINANCE_FETCH_DELAY_MS ?? FETCH_DELAY_MS);
   const map = new Map<string, Scalp1mSnapshot>();
 
@@ -185,7 +178,7 @@ export async function loadPaperScalpSnapshots(
       }
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
-      console.warn("[paper-1h] symbol loop error — continuing", {
+      console.warn("[BINANCE-FETCH-SKIP] symbol loop error — continuing", {
         symbol,
         message: err.message,
       });

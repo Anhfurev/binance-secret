@@ -25,6 +25,8 @@ export interface DemoWorkspaceSnapshot {
   autoPilotMode: "signals" | "dca";
   copyProfile: "conservative" | "balanced" | "aggressive";
   paperSettings: PaperScalpWorkspaceSettings;
+  /** Legacy payload key — merged into paperSettings at load time. */
+  settings?: Record<string, unknown>;
 }
 
 export interface DemoWorkspaceLoadResult {
@@ -91,7 +93,13 @@ function normalizeSnapshot(
       ? raw.activeId
       : profiles[0].id;
 
+  const payloadSettings =
+    raw.settings && typeof raw.settings === "object"
+      ? (raw.settings as Record<string, unknown>)
+      : undefined;
+
   const paperSettings = resolvePaperScalpWorkspaceSettings({
+    ...payloadSettings,
     ...(raw.paperSettings as Record<string, unknown> | undefined),
     ...(dbSettings ?? undefined),
   });
@@ -241,10 +249,15 @@ async function listDeviceDemoWorkspaces() {
   let error: { message: string } | null;
 
   try {
-    const result = await client
+    let result = await client
       .from(DEMO_WORKSPACES_TABLE)
       .select("device_id, payload, settings, updated_at");
-    data = result.data;
+    if (result.error?.message?.includes("settings")) {
+      result = await client
+        .from(DEMO_WORKSPACES_TABLE)
+        .select("device_id, payload, updated_at");
+    }
+    data = result.data as typeof data;
     error = result.error;
   } catch (fetchError) {
     const err =
@@ -263,9 +276,13 @@ async function listDeviceDemoWorkspaces() {
 
   return (data ?? [])
     .map((row) => {
+      const rowSettings =
+        row && typeof row === "object" && "settings" in row
+          ? (row.settings as Record<string, unknown> | null)
+          : null;
       const snapshot = normalizeSnapshot(
         row.payload as Partial<DemoWorkspaceSnapshot> | null,
-        row.settings as Record<string, unknown> | null,
+        rowSettings,
       );
       if (!snapshot || typeof row.device_id !== "string") return null;
 
@@ -293,10 +310,15 @@ async function listUserDemoWorkspaces() {
   let error: { message: string } | null;
 
   try {
-    const result = await supabaseAdmin
+    let result = await supabaseAdmin
       .from(USER_DEMO_WORKSPACES_TABLE)
       .select("user_id, payload, settings, updated_at");
-    data = result.data;
+    if (result.error?.message?.includes("settings")) {
+      result = await supabaseAdmin
+        .from(USER_DEMO_WORKSPACES_TABLE)
+        .select("user_id, payload, updated_at");
+    }
+    data = result.data as typeof data;
     error = result.error;
   } catch (fetchError) {
     const err =
@@ -318,9 +340,13 @@ async function listUserDemoWorkspaces() {
 
   return (data ?? [])
     .map((row) => {
+      const rowSettings =
+        row && typeof row === "object" && "settings" in row
+          ? (row.settings as Record<string, unknown> | null)
+          : null;
       const snapshot = normalizeSnapshot(
         row.payload as Partial<DemoWorkspaceSnapshot> | null,
-        row.settings as Record<string, unknown> | null,
+        rowSettings,
       );
       if (!snapshot || typeof row.user_id !== "string") return null;
 

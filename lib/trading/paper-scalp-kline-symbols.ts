@@ -22,7 +22,8 @@ export function sanitizePaperScalpSymbolList(symbols: string[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const raw of symbols) {
-    const sym = normalizeKlineSymbol(raw);
+    if (raw == null || raw === undefined) continue;
+    const sym = normalizeKlineSymbol(String(raw));
     if (!sym) {
       console.warn("[paper-1h] skip blank ticker in symbol list");
       continue;
