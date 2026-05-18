@@ -55,7 +55,7 @@ async function postTelegramMessage(text: string): Promise<void> {
     body: JSON.stringify({
       chat_id: chatId,
       text: text.slice(0, 4096),
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
       disable_web_page_preview: true,
     }),
   });

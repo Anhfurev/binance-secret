@@ -1,4 +1,4 @@
-import type { CoinData, DemoAccount, DemoTrade } from "@/lib/types";
+import type { DemoAccount, DemoTrade } from "@/lib/types";
 import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
 import {
   isAltcoinSymbol,
@@ -15,12 +15,16 @@ import {
   evaluatePaperBuySignal,
   type PaperMomentumSettings,
 } from "@/lib/trading/paper-scalp-momentum";
-import {
-  formatNavTelegramBlock,
-  humanPaperScalpReason,
-  type PaperWorkspaceNav,
-} from "@/lib/trading/paper-scalp-nav";
+import { humanPaperScalpReason, type PaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import { sendTelegramNotificationAsync } from "@/lib/trading/paper-scalp-telegram";
+import {
+  escapeTelegramHtml,
+  formatNavHtmlBlock,
+  tgBold,
+  tgBullet,
+  tgCode,
+  tgSection,
+} from "@/lib/trading/paper-scalp-telegram-html";
 
 export type WorkspaceTickRow = {
   workspaceKey: string;
@@ -49,13 +53,7 @@ export type EngineManifestInput = {
   scanned: number;
   updated: number;
   persistQueued: number;
-  /** Explicit BTC gate telemetry (defaults to snapshot EMA check). */
   btcRegimeActive?: boolean;
-};
-
-type SymbolGridRow = {
-  symbol: string;
-  line: string;
 };
 
 function norm(sym: string): string {
@@ -71,31 +69,31 @@ function buildSymbolGridRow(
     btcBearish: boolean;
     atMaxLegs: boolean;
   },
-): SymbolGridRow {
-  const sym = norm(symbol);
+): string {
+  const sym = escapeTelegramHtml(norm(symbol));
   if (!snap) {
-    return { symbol: sym, line: `• ${sym}: — | No Snapshot [BLOCKED]` };
+    return tgBullet(`${sym}: — | No Snapshot [BLOCKED]`);
   }
 
-  const rsi = snap.rsi14.toFixed(1);
-  const base = `• ${sym}: RSI ${rsi}`;
+  const rsi = escapeTelegramHtml(snap.rsi14.toFixed(1));
+  const base = `${sym}: RSI ${rsi}`;
 
-  if (ctx.held.has(sym)) {
-    return { symbol: sym, line: `${base} | Open Leg [HELD]` };
+  if (ctx.held.has(norm(symbol))) {
+    return tgBullet(`${base} | Open Leg [HELD]`);
   }
 
   const evaluation = evaluatePaperBuySignal(snap, momentum);
 
-  if (ctx.btcBearish && isAltcoinSymbol(sym)) {
-    return { symbol: sym, line: `${base} | BTC Regime [BLOCKED]` };
+  if (ctx.btcBearish && isAltcoinSymbol(norm(symbol))) {
+    return tgBullet(`${base} | BTC Regime [BLOCKED]`);
   }
 
   if (ctx.atMaxLegs && evaluation.shouldBuy) {
-    return { symbol: sym, line: `${base} | Max Risk Cap Hit [BLOCKED]` };
+    return tgBullet(`${base} | Max Risk Cap Hit [BLOCKED]`);
   }
 
   if (evaluation.reason === "rsi_overbought") {
-    return { symbol: sym, line: `${base} | RSI High [BLOCKED]` };
+    return tgBullet(`${base} | RSI High [BLOCKED]`);
   }
 
   if (evaluation.shouldBuy) {
@@ -103,33 +101,29 @@ function buildSymbolGridRow(
       evaluation.reason === "oversold_bounce"
         ? "Oversold Bounce"
         : "Trend Resumption";
-    return { symbol: sym, line: `${base} | ${tag} [SIGNAL]` };
+    return tgBullet(`${base} | ${escapeTelegramHtml(tag)} [SIGNAL]`);
   }
 
-  return { symbol: sym, line: `${base} | No Signal [PASSED]` };
+  return tgBullet(`${base} | No Signal [PASSED]`);
 }
 
-function formatActiveLeg(trade: DemoTrade): string {
-  const sym = norm(trade.symbol);
-  return [
-    `• ${sym} LONG`,
-    `  entry ${formatAssetPrice(trade.entryPrice)}`,
-    `· SL ${formatAssetPrice(trade.stopLoss)}`,
-    `· TP ${formatAssetPrice(trade.takeProfit)}`,
-    `· $${formatNavUsd(trade.value)}`,
-  ].join(" ");
+function formatActiveLegHtml(trade: DemoTrade): string {
+  const sym = escapeTelegramHtml(norm(trade.symbol));
+  return tgBullet(
+    `${sym} LONG — entry ${escapeTelegramHtml(formatAssetPrice(trade.entryPrice))} · SL ${escapeTelegramHtml(formatAssetPrice(trade.stopLoss))} · TP ${escapeTelegramHtml(formatAssetPrice(trade.takeProfit))} · $${escapeTelegramHtml(formatNavUsd(trade.value))}`,
+  );
 }
 
-function buildGatesBlock(
+function buildGatesBlockHtml(
   btcBearish: boolean,
   openLegCount: number,
   masterSummary: string,
 ): string[] {
-  const lines: string[] = ["*[GATES & FILTERS]*"];
+  const lines: string[] = [tgSection("[GATES & FILTERS]")];
 
   if (btcBearish) {
     lines.push(
-      "🛑 *BTC REGIME GATE: TRUE* (EMA9 < EMA21) · All Altcoin entries are currently blocked.",
+      `🛑 ${tgBold("BTC REGIME GATE: TRUE")} (EMA9 &lt; EMA21) · All Altcoin entries are currently blocked.`,
     );
   } else {
     lines.push("✅ BTC REGIME GATE: FALSE · Altcoin entries allowed.");
@@ -138,18 +132,18 @@ function buildGatesBlock(
   const atCap = !passesCorrelationExposureGate(openLegCount);
   lines.push(
     atCap
-      ? `🛑 *CORRELATION CAP:* ${openLegCount}/${MAX_OPEN_LEGS_PER_WORKSPACE} legs — new entries blocked.`
-      : `✅ *CORRELATION CAP:* ${openLegCount}/${MAX_OPEN_LEGS_PER_WORKSPACE} legs — slot(s) available.`,
+      ? `🛑 ${tgBold("CORRELATION CAP:")} ${openLegCount}/${MAX_OPEN_LEGS_PER_WORKSPACE} legs — new entries blocked.`
+      : `✅ ${tgBold("CORRELATION CAP:")} ${openLegCount}/${MAX_OPEN_LEGS_PER_WORKSPACE} legs — slot(s) available.`,
   );
 
   if (masterSummary === "circuit-breaker") {
-    lines.push("🛑 *CIRCUIT BREAKER:* tripped — new entries blocked.");
+    lines.push(`🛑 ${tgBold("CIRCUIT BREAKER:")} tripped — new entries blocked.`);
   }
   if (masterSummary === "btc-bearish-pause") {
-    lines.push("🛑 *TICK OUTCOME:* BTC bearish pause (no alt entries this cycle).");
+    lines.push(`🛑 ${tgBold("TICK OUTCOME:")} BTC bearish pause (no alt entries this cycle).`);
   }
   if (masterSummary === "correlation-max-exposure") {
-    lines.push("🛑 *TICK OUTCOME:* max correlated exposure reached.");
+    lines.push(`🛑 ${tgBold("TICK OUTCOME:")} max correlated exposure reached.`);
   }
 
   return lines;
@@ -166,12 +160,17 @@ export function buildUnifiedEngineManifest(input: EngineManifestInput): string {
   const atMaxLegs = !passesCorrelationExposureGate(openLegCount);
 
   const lines: string[] = [
-    "📋 *UNIFIED ENGINE MANIFEST*",
-    `🕐 ${input.ranAt} · ${input.durationMs.toFixed(0)}ms · ${input.partial ? "PARTIAL" : "OK"}`,
-    `• Snapshots: ${input.snapshotsLoaded}/${input.symbols.length} (${input.snapshotSource}) · marks: ${input.marketSource}`,
+    `📋 ${tgBold("UNIFIED ENGINE MANIFEST")}`,
+    tgBullet(
+      `${escapeTelegramHtml(input.ranAt)} · ${escapeTelegramHtml(String(input.durationMs.toFixed(0)))}ms · ${input.partial ? "PARTIAL" : "OK"}`,
+    ),
+    tgBullet(
+      `Snapshots: ${input.snapshotsLoaded}/${input.symbols.length} (${escapeTelegramHtml(input.snapshotSource)}) · marks: ${escapeTelegramHtml(input.marketSource)}`,
+    ),
+    "",
+    tgSection("[PORTFOLIO NAV]"),
   ];
 
-  lines.push("", "*[PORTFOLIO NAV]*");
   if (account) {
     const masterRow = input.workspaceRows.find(
       (r) => r.workspaceKey === input.masterWorkspaceKey,
@@ -185,71 +184,77 @@ export function buildUnifiedEngineManifest(input: EngineManifestInput): string {
       session_pnl_pct: 0,
       open_unrealized_pnl_usdt: 0,
     };
-    lines.push(formatNavTelegramBlock(nav, openLegCount));
+    lines.push(formatNavHtmlBlock(nav, openLegCount));
     if (input.masterWorkspaceKey) {
-      lines.push(`• Master workspace: \`${input.masterWorkspaceKey}\``);
+      lines.push(tgBullet(`Master workspace: ${tgCode(input.masterWorkspaceKey)}`));
     }
   } else {
-    lines.push("• No master workspace tick this cycle.");
+    lines.push(tgBullet("No master workspace tick this cycle."));
   }
 
-  lines.push("", "*[ACTIVE LEGS]*");
+  lines.push("", tgSection("[ACTIVE LEGS]"));
   if (account && account.openPositions.length > 0) {
     for (const leg of account.openPositions) {
-      lines.push(formatActiveLeg(leg));
+      lines.push(formatActiveLegHtml(leg));
     }
   } else {
-    lines.push("• None — flat or cash-only.");
+    lines.push(tgBullet("None — flat or cash-only."));
   }
 
-  lines.push("", ...buildGatesBlock(btcBearish, openLegCount, input.masterSummary));
+  lines.push("", ...buildGatesBlockHtml(btcBearish, openLegCount, input.masterSummary));
 
-  lines.push("", "*[MARKET SCAN]*");
-  const grid = input.symbols.map((s) =>
-    buildSymbolGridRow(s, input.scalpSnapshots.get(norm(s)), input.momentum, {
-      held,
-      btcBearish,
-      atMaxLegs,
-    }),
-  );
-  for (const row of grid) {
-    lines.push(row.line);
+  lines.push("", tgSection("[MARKET SCAN]"));
+  for (const s of input.symbols) {
+    lines.push(
+      buildSymbolGridRow(s, input.scalpSnapshots.get(norm(s)), input.momentum, {
+        held,
+        btcBearish,
+        atMaxLegs,
+      }),
+    );
   }
 
-  lines.push("", "*[WORKSPACE HEALTH]*");
+  lines.push("", tgSection("[WORKSPACE HEALTH]"));
   if (input.workspaceRows.length === 0) {
-    lines.push("• No demo workspaces processed.");
+    lines.push(tgBullet("No demo workspaces processed."));
   } else {
     for (const row of input.workspaceRows) {
-      const tag = row.workspaceKey === input.masterWorkspaceKey ? " ★" : "";
+      const star = row.workspaceKey === input.masterWorkspaceKey ? " ★" : "";
       lines.push(
-        `• \`${row.workspaceKey}\`${tag}: ${row.action} · ${humanPaperScalpReason(row.summary)} · NAV $${formatNavUsd(row.nav.portfolio_nav_usdt)}`,
+        tgBullet(
+          `${tgCode(row.workspaceKey)}${star}: ${escapeTelegramHtml(row.action)} · ${escapeTelegramHtml(humanPaperScalpReason(row.summary))} · NAV $${escapeTelegramHtml(formatNavUsd(row.nav.portfolio_nav_usdt))}`,
+        ),
       );
     }
   }
 
   if (input.partial && input.partialReason) {
-    lines.push(`• ⚠️ Partial run: ${input.partialReason}`);
+    lines.push(
+      tgBullet(`⚠️ Partial run: ${escapeTelegramHtml(input.partialReason)}`),
+    );
   }
 
-  lines.push("", "*[EXECUTION]*");
+  lines.push("", tgSection("[EXECUTION]"));
   lines.push(
-    `• Scanned ${input.scanned} · persisted ${input.updated} · async queue ${input.persistQueued}`,
+    tgBullet(
+      `Scanned ${input.scanned} · persisted ${input.updated} · async queue ${input.persistQueued}`,
+    ),
   );
   if (input.actions.length > 0) {
-    lines.push(`• Actions: ${input.actions.slice(0, 8).join(" | ")}`);
+    lines.push(
+      tgBullet(`Actions: ${escapeTelegramHtml(input.actions.slice(0, 8).join(" | "))}`),
+    );
   } else {
-    lines.push(`• Tick summary: \`${input.masterSummary}\``);
+    lines.push(tgBullet(`Tick summary: ${tgCode(input.masterSummary)}`));
   }
 
   return lines.join("\n").slice(0, 4090);
 }
 
-/** Sync compile + PM2 log — safe on the HTTP hot path. */
 export function compileUnifiedEngineManifest(input: EngineManifestInput): string {
   console.log("[paper-scalp-manifest] dispatch start");
   const text = buildUnifiedEngineManifest(input);
-  console.log("[paper-scalp-manifest] dashboard compiled");
+  console.log("[paper-scalp-manifest] dashboard compiled (HTML)");
   console.log(`[paper-scalp-manifest]\n${text}`);
   return text;
 }
@@ -267,15 +272,10 @@ function shipManifestTelegramDetached(text: string): Promise<void> {
     });
 }
 
-/** Next.js `after()` — drain Telegram without blocking res.json. */
 export function flushPendingManifestTelegram(): Promise<void> {
   return pendingManifestTelegram ?? Promise.resolve();
 }
 
-/**
- * Compile on hot path; Telegram ships on nextTick (does not block res.json).
- * Always runs — never skips on HOLD/BLOCKED.
- */
 export function scheduleUnifiedEngineManifestDispatch(
   input: EngineManifestInput,
 ): string {
@@ -288,7 +288,6 @@ export function scheduleUnifiedEngineManifestDispatch(
   return text;
 }
 
-/** Blocking send — tests / manual tooling only. */
 export async function dispatchUnifiedEngineManifest(
   input: EngineManifestInput,
 ): Promise<void> {
