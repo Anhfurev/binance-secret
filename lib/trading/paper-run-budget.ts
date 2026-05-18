@@ -1,7 +1,10 @@
+/** Temporarily lifted for Next.js dev server overhead while testing all workspaces. */
+const BUDGET_MS = 4_000;
+
 function resolvePaperRunBudgetMs(): number {
   const raw = String(process.env.PAPER_RUN_BUDGET_MS ?? "").trim();
-  const n = raw ? Number(raw) : 950;
-  if (!Number.isFinite(n) || n < 200) return 950;
+  const n = raw ? Number(raw) : BUDGET_MS;
+  if (!Number.isFinite(n) || n < 200) return BUDGET_MS;
   return Math.min(n, 30_000);
 }
 
