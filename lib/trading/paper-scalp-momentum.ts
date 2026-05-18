@@ -83,10 +83,6 @@ export function rankMomentumCandidates(
       ) {
         return 1;
       }
-      return (
-        b.snap.ema9 -
-        b.snap.ema21 -
-        (a.snap.ema9 - a.snap.ema21)
-      );
+      return b.snap.rsi14 - a.snap.rsi14;
     });
 }

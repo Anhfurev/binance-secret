@@ -68,8 +68,14 @@ export function runPaperScalpAlphaTick(params: {
   let stopsAdjusted = false;
   let pyramided = false;
   let velocityPartial = false;
+  let positionClosed = false;
+  let lastCloseSummary: string | null = null;
 
-  for (const open of [...account.openPositions]) {
+  const legsToEvaluate = [...account.openPositions];
+  for (const leg of legsToEvaluate) {
+    const open = account.openPositions.find((p) => p.id === leg.id);
+    if (!open) continue;
+
     const evalResult = evaluateOpenPaperPosition({
       account,
       trade: open,
@@ -80,11 +86,9 @@ export function runPaperScalpAlphaTick(params: {
     if (evalResult.stopAdjusted) stopsAdjusted = true;
     if (evalResult.velocityPartial) velocityPartial = true;
     if (evalResult.exit?.changed) {
-      return withTickMeta(evalResult.exit, {
-        positionClosed: true,
-        velocityPartial: velocityPartial || undefined,
-        pyramided: pyramided || undefined,
-      });
+      positionClosed = true;
+      lastCloseSummary = evalResult.exit.summary;
+      account = evalResult.exit.account;
     }
   }
 
@@ -106,6 +110,8 @@ export function runPaperScalpAlphaTick(params: {
     }
   }
 
+  const openLegCount = account.openPositions.length;
+
   if (velocityPartial) {
     const sym =
       account.openPositions.find((p) => p.velocityTakeProfitSecured)?.symbol ??
@@ -116,11 +122,20 @@ export function runPaperScalpAlphaTick(params: {
         changed: true,
         summary: `velocity-tp-70:${normalizeSymbol(sym)}`,
       },
-      { velocityPartial: true, pyramided: pyramided || undefined },
+      {
+        velocityPartial: true,
+        positionClosed: positionClosed || undefined,
+        pyramided: pyramided || undefined,
+      },
     );
   }
 
-  const openLegCount = account.openPositions.length;
+  if (lastCloseSummary && openLegCount === 0) {
+    return withTickMeta(
+      { account, changed: true, summary: lastCloseSummary },
+      { positionClosed: true, pyramided: pyramided || undefined },
+    );
+  }
   const maxLegs = Math.min(
     paperSettings.maxOpenPositions,
     MAX_OPEN_LEGS_PER_WORKSPACE,
@@ -218,17 +233,41 @@ export function runPaperScalpAlphaTick(params: {
   }
 
   if (!entrySnap) {
+    if (lastCloseSummary) {
+      return withTickMeta(
+        { account, changed: true, summary: lastCloseSummary },
+        {
+          positionClosed: true,
+          velocityPartial: velocityPartial || undefined,
+          pyramided: pyramided || undefined,
+        },
+      );
+    }
     if (openLegCount > 0) {
       return withTickMeta(
         {
           account,
-          changed: stopsAdjusted || pyramided,
-          summary: pyramided ? "pyramid-layer-added" : "holding-position",
+          changed: stopsAdjusted || pyramided || velocityPartial,
+          summary: pyramided
+            ? "pyramid-layer-added"
+            : velocityPartial
+              ? `velocity-tp-70:${normalizeSymbol(
+                  account.openPositions.find((p) => p.velocityTakeProfitSecured)
+                    ?.symbol ?? "unknown",
+                )}`
+              : "holding-position",
         },
-        { pyramided: pyramided || undefined },
+        {
+          pyramided: pyramided || undefined,
+          velocityPartial: velocityPartial || undefined,
+        },
       );
     }
-    return { account, changed: false, summary: "no-signal" };
+    return {
+      account,
+      changed: stopsAdjusted || velocityPartial,
+      summary: "no-signal",
+    };
   }
 
   const sym = normalizeSymbol(entrySnap.symbol);
@@ -243,7 +282,20 @@ export function runPaperScalpAlphaTick(params: {
   );
 
   if (positionSizeUsdt <= 0 || nav.available_usdt < positionSizeUsdt) {
-    return { account, changed: false, summary: "insufficient-free-margin-floor" };
+    if (lastCloseSummary) {
+      return withTickMeta(
+        { account, changed: true, summary: lastCloseSummary },
+        { positionClosed: true, pyramided: pyramided || undefined },
+      );
+    }
+    return withTickMeta(
+      {
+        account,
+        changed: stopsAdjusted || pyramided || velocityPartial,
+        summary: "insufficient-free-margin-floor",
+      },
+      { pyramided: pyramided || undefined, velocityPartial: velocityPartial || undefined },
+    );
   }
 
   const entryAtr =
