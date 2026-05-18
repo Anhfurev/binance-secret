@@ -23,7 +23,7 @@ export { resolvePaperScalpSymbols };
 
 const DEFAULT_SYMBOLS = DEFAULT_PAPER_WATCH_SYMBOLS;
 const DEFAULT_LIMIT = 100;
-const FETCH_DELAY_MS = 350;
+const PARALLEL_FETCH_TIMEOUT_MS = 5_000;
 
 const KLINE_SYMBOL_CANDIDATES: Record<string, string[]> = {
   PEPEUSDT: ["PEPEUSDT", "1000PEPEUSDT"],
@@ -38,10 +38,6 @@ const KLINE_TO_BASE_SCALE: Record<string, number> = {
   "1000FLOKIUSDT": 1 / 1000,
   "1000BONKUSDT": 1 / 1000,
 };
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function klineSymbolCandidates(symbol: string): string[] {
   const base = normalizeKlineSymbol(symbol);
@@ -74,7 +70,7 @@ async function fetchHourlyKlinesForSymbol(
   if (!url) return [];
 
   const controller = new AbortController();
-  const timeoutMs = 20_000;
+  const timeoutMs = PARALLEL_FETCH_TIMEOUT_MS;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
@@ -110,7 +106,7 @@ async function fetchHourlyKlinesForSymbol(
   }
 }
 
-/** Sequential 1h kline fetch — avoids Binance IP burst rate limits. */
+/** Single-symbol 1h kline fetch (PEPE/1000PEPE fallback inside symbol). */
 export async function fetch1hKlines(
   symbol: string,
   limit = DEFAULT_LIMIT,
@@ -147,6 +143,30 @@ export async function fetch1hKlines(
 /** @deprecated Use fetch1hKlines — kept for imports. */
 export const fetch1mKlines = fetch1hKlines;
 
+async function loadSnapshotForSymbol(
+  symbol: string,
+): Promise<{ symbol: string; snap: Scalp1mSnapshot | null }> {
+  try {
+    const candles = await fetch1hKlines(symbol);
+    const snap = buildScalp1mSnapshot(symbol, candles);
+    if (!snap) {
+      console.warn("[paper-1h] no 1h snapshot built", {
+        symbol,
+        candles: candles.length,
+      });
+    }
+    return { symbol, snap };
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.warn("[BINANCE-FETCH-SKIP] parallel symbol error — continuing", {
+      symbol,
+      message: err.message,
+    });
+    return { symbol, snap: null };
+  }
+}
+
+/** Parallel 1h kline harvest — one REST round-trip per symbol via Promise.all. */
 export async function loadPaperScalpSnapshots(
   symbols: unknown[] | string[],
 ): Promise<Map<string, Scalp1mSnapshot>> {
@@ -156,40 +176,21 @@ export async function loadPaperScalpSnapshots(
   const unique = sanitizePaperScalpSymbolList(
     cleaned.map((s) => String(s)),
   );
-  const delayMs = Number(process.env.PAPER_BINANCE_FETCH_DELAY_MS ?? FETCH_DELAY_MS);
   const map = new Map<string, Scalp1mSnapshot>();
+  const startedAt = performance.now();
 
   console.log(
-    `[paper-1h] sequential kline scan: ${unique.length} symbol(s) [${unique.join(", ")}]`,
+    `[paper-1h] parallel kline scan: ${unique.length} symbol(s) [${unique.join(", ")}]`,
   );
 
-  for (let i = 0; i < unique.length; i++) {
-    const symbol = unique[i];
-    try {
-      const candles = await fetch1hKlines(symbol);
-      const snap = buildScalp1mSnapshot(symbol, candles);
-      if (snap) {
-        map.set(symbol, snap);
-      } else {
-        console.warn("[paper-1h] no 1h snapshot built", {
-          symbol,
-          candles: candles.length,
-        });
-      }
-    } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
-      console.warn("[BINANCE-FETCH-SKIP] symbol loop error — continuing", {
-        symbol,
-        message: err.message,
-      });
-    }
-    if (i < unique.length - 1 && delayMs > 0) {
-      await sleep(delayMs);
-    }
+  const rows = await Promise.all(unique.map((symbol) => loadSnapshotForSymbol(symbol)));
+  for (const { symbol, snap } of rows) {
+    if (snap) map.set(symbol, snap);
   }
 
+  const durationMs = Number((performance.now() - startedAt).toFixed(1));
   console.log(
-    `[paper-1h] kline scan done: ${map.size}/${unique.length} snapshots loaded`,
+    `[paper-1h] kline scan done: ${map.size}/${unique.length} snapshots in ${durationMs}ms`,
   );
   return map;
 }

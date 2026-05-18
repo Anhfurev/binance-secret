@@ -2,9 +2,9 @@ import { serializeAccount } from "@/lib/demo-account";
 import { runPaperTradingAutomationTick } from "@/lib/paper-trading-automation";
 import {
   listDemoWorkspacesFromSupabase,
-  saveDemoWorkspaceForOwner,
   type DemoWorkspaceRecord,
 } from "@/lib/supabase-demo";
+import { queuePaperWorkspacePersist } from "@/lib/trading/paper-run-persist";
 import { logPaperMarketScan, logPaperWorkspaceResult } from "@/lib/trading/paper-scalp-active-log";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import {
@@ -44,6 +44,8 @@ export type PaperRunOrchestratorResult = {
   partial?: boolean;
   partialReason?: string;
   workspacesSkipped?: number;
+  persistAsync?: boolean;
+  persistQueued?: number;
 };
 
 function resolveTradingAction(summary: string): string {
@@ -131,19 +133,19 @@ export async function runPaperScalpOrchestrator(): Promise<
 
   let scanned = 0;
   let updated = 0;
+  let persistQueued = 0;
   let workspacesSkipped = 0;
   const actions: string[] = [];
-  const pendingSaves: Promise<void>[] = [];
   let partial = false;
   let partialReason: string | undefined;
 
   for (const workspace of listResult.data) {
     if (isPaperRunBudgetExceeded(startTime)) {
       partial = true;
-      partialReason = "execution_budget_9s";
+      partialReason = "execution_budget_hot_path";
       workspacesSkipped = listResult.data.length - scanned;
       console.warn(
-        `[paper-scalp] ${PAPER_RUN_BUDGET_MS}ms budget hit — partial return (${workspacesSkipped} workspace(s) skipped)`,
+        `[paper-scalp] ${PAPER_RUN_BUDGET_MS}ms hot-path budget hit — partial return (${workspacesSkipped} workspace(s) skipped)`,
       );
       break;
     }
@@ -197,26 +199,27 @@ export async function runPaperScalpOrchestrator(): Promise<
         : profile,
     );
 
-    pendingSaves.push(
-      saveDemoWorkspaceForOwner(workspace.ownerType, workspace.ownerId, {
-        ...snapshot,
-        profiles: nextProfiles,
-      }).then((saveResult) => {
-        if (!saveResult.ok) {
-          actions.push(`save-failed:${key}`);
-          return;
-        }
-        updated += 1;
-        actions.push(
-          walletReset && !result.changed
-            ? `${key}:wallet-reset-$${resolvePaperScalpWalletUsd()}`
-            : `${key}:${result.summary}`,
-        );
-      }),
-    );
-  }
+    persistQueued += 1;
+    const persistSnapshot = { ...snapshot, profiles: nextProfiles };
+    const actionLabel =
+      walletReset && !result.changed
+        ? `${key}:wallet-reset-$${resolvePaperScalpWalletUsd()}`
+        : `${key}:${result.summary}`;
+    actions.push(actionLabel);
+    updated += 1;
 
-  await Promise.all(pendingSaves);
+    queuePaperWorkspacePersist({
+      ownerType: workspace.ownerType,
+      ownerId: workspace.ownerId,
+      workspaceKey: key,
+      snapshot: persistSnapshot,
+      onSettled: (outcome) => {
+        if (!outcome.ok) {
+          console.warn("[paper-scalp] background persist failed", outcome);
+        }
+      },
+    });
+  }
 
   return buildPartialResult(startTime, {
     scanned,
@@ -229,6 +232,8 @@ export async function runPaperScalpOrchestrator(): Promise<
     partial,
     partialReason,
     workspacesSkipped: partial ? workspacesSkipped : 0,
+    persistAsync: persistQueued > 0,
+    persistQueued,
   });
 }
 

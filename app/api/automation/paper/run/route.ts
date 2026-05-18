@@ -66,6 +66,8 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       ...outcome,
       partial: outcome.partial ?? false,
+      persistAsync: outcome.persistAsync ?? false,
+      persistQueued: outcome.persistQueued ?? 0,
     });
   } catch (error: unknown) {
     logFatalRouteException(error);
