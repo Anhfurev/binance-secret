@@ -111,6 +111,17 @@ export type IndicatorSnapshot = {
   candles15: Candle[];
   candles15m: Candle[];
   candles1h: Candle[];
+  /** Last 15×5m bars for cascade Gemini scanner (optional if fetch skipped). */
+  candles5m?: Candle[];
+  /** Daily bars for major S/R (optional). */
+  candles1d?: Candle[];
+  /** Precomputed daily pivot / swing S/R for LLM cascade. */
+  daily_support_resistance?: import("./daily-support-resistance.ts").DailySupportResistance;
+  /** Top-10 bid/ask levels for Groq gatekeeper. */
+  order_book_top10?: {
+    bids: Array<{ price: number; volume: number }>;
+    asks: Array<{ price: number; volume: number }>;
+  };
   /** Last bars of 4h series for higher-timeframe context (may be empty if fetch short). */
   candles4h: Candle[];
   /** Multi-TF context: strict 1h/4h, faster 15m/1h, and combined trade filter. */
@@ -229,6 +240,11 @@ export type AiAnalysis = {
   order_book_score?: number;
   /** ≤15 words; surfaced in Telegram + `trades.ai_reasoning` JSON. */
   pro_tip?: string;
+  /** Tier 2 Gemini cascade structural narrative for Groq gatekeeper. */
+  structural_reasoning?: string;
+  /** Tier 2 Gemini `isSetupValid` mapped to BUY/HOLD path. */
+  is_setup_valid?: boolean;
+  reason?: string;
   groq_verdict?: "APPROVE" | "REJECT" | "SKIPPED";
   groq_reason?: string;
   raw_ai_response?: unknown;

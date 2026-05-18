@@ -6,7 +6,8 @@
     "jsr:@std/internal@^1.0.12": "1.0.13",
     "npm:@sentry/deno@10": "10.52.0",
     "npm:@supabase/supabase-js@2": "2.105.4",
-    "npm:ccxt@^4.5.0": "4.5.52"
+    "npm:ccxt@4.5.0": "4.5.0",
+    "npm:ccxt@^4.5.0": "4.5.0"
   },
   "jsr": {
     "@std/assert@1.0.19": {
@@ -78,8 +79,8 @@
         "@supabase/storage-js"
       ]
     },
-    "ccxt@4.5.52": {
-      "integrity": "sha512-SKbi1pfi4vKAxiIM4gy1aXLcrGIKZMK83HHpy6/o+ViYKAw+O5Lf55SyXSzvkcyOdokXysFIEjSs32PZt6TCqQ==",
+    "ccxt@4.5.0": {
+      "integrity": "sha512-82BqP9xprPd6CATOArY3t1UKfLG+MpQoR/DoeWQce7ddleZqtFG4Rwu68hq0YutbuCYePsfSI6ofj5uCs0X76g==",
       "dependencies": [
         "ws"
       ],

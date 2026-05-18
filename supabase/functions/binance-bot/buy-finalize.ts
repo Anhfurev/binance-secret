@@ -5,6 +5,7 @@ import { sendTelegramAlert } from "./notifier.ts";
 import { adjustPaperDemoBalance, insertTrade } from "./trade-store.ts";
 import { logMockTrade } from "./buy-logging.ts";
 import { persistRunTelemetry } from "./bot-telemetry.ts";
+import { syncProfilePortfolioHoldings } from "./portfolio-holdings-sync.ts";
 import { escapeHtml, formatTelegramPrice, formatUsdAlertAmount, fromUsdCents, toUsdCents } from "./bot-shared.ts";
 import { botDebug } from "./bot-debug.ts";
 import { releaseTradeExecutionLock } from "./trade-execution-lock.ts";
@@ -39,6 +40,13 @@ export async function finalizeBuyExecution(params: {
   volBurstMeta?: Record<string, unknown>;
   slDistance: number;
   trailDistance: number;
+  atrExitAtFill?: {
+    atrPct: number | null;
+    slAtrMult: number;
+    tpAtrMult: number;
+    rewardRiskRatio: number;
+    basis: string;
+  };
   effectiveConfidence: number;
   rawWeighted: number;
   bearish1hCap: boolean;
@@ -57,7 +65,7 @@ export async function finalizeBuyExecution(params: {
     stopLossPersist, takeProfitPersist, initialTrailingPersist, trailingStopPct, atr14,
     atrTrailEffective, vb, volBurstMeta, slDistance, trailDistance, effectiveConfidence,
     rawWeighted, bearish1hCap, aiReasoningJson, coinId, technical, buyOrder, openedAt,
-    feeUsdBuy = 0, sizingMeta = {},
+    feeUsdBuy = 0, sizingMeta = {}, atrExitAtFill,
   } = params;
 
   const buyFeeUsd = Number.isFinite(Number(feeUsdBuy)) && Number(feeUsdBuy) >= 0
@@ -106,6 +114,15 @@ export async function finalizeBuyExecution(params: {
       trailing_stop_price: initialTrailingPersist,
       trailing_stop_pct: trailingStopPct,
       atr14_at_entry: Number.isFinite(atr14) && atr14 > 0 ? atr14 : null,
+      atr_pct_at_entry: atrExitAtFill?.atrPct ?? (
+        Number.isFinite(atr14) && atr14 > 0 && entryForDb > 0
+          ? Number(((atr14 / entryForDb) * 100).toFixed(6))
+          : null
+      ),
+      atr_sl_mult: atrExitAtFill?.slAtrMult ?? 2,
+      atr_tp_mult: atrExitAtFill?.tpAtrMult ?? 3.5,
+      reward_risk_ratio_at_entry: atrExitAtFill?.rewardRiskRatio ?? null,
+      atr_exit_basis: atrExitAtFill?.basis ?? null,
       atr_stop_trail_mult: 1.5,
       vol_burst_widen_mult: vb,
       vol_burst_effective_atr_mult: atrTrailEffective,
@@ -186,6 +203,12 @@ export async function finalizeBuyExecution(params: {
   }
 
   await persistRunTelemetry({ supabase, userId, symbol, action: "buy", detail: `BUY ${filledQty} @ ${formatTelegramPrice(snapshotPrice)}`, balance: nextBalance });
+  await syncProfilePortfolioHoldings({
+    supabase,
+    userId,
+    availableUsdt: nextBalance,
+    priceByBase: { [symbol.replace(/USDT$/, "")]: snapshotPrice },
+  });
   if (ghostMode) {
     await logMockTrade({
       supabase,

@@ -1,5 +1,7 @@
 // @ts-nocheck
 /** Dynamic regime switcher: sideways grinder vs trending defensive gates (no throws). */
+import type { ConfidencePolicy } from "./confidence-policy.ts";
+import { isOversoldBounceStrategyReason } from "./strategy-oversold-bounce.ts";
 import type { AiAnalysis, IndicatorSnapshot, SignalDecision } from "./types.ts";
 import { toNumber } from "./utils.ts";
 
@@ -21,6 +23,10 @@ export type RegimeGatePolicy = {
   rsiPreflightUpper: number;
   rsiPreflightLower: number;
   minAiConfidenceFloor: number;
+  /** Max weighted / hybrid conviction floor % in REGIME_TRENDING (lowers strict trade-regime caps). */
+  minWeightedConvictionFloor: number;
+  /** Minimum 24h quote volume for trending volume-track gate (below legacy 500k). */
+  minVolume24hQuoteUsd: number;
   requireMacdHistogramExpansion: boolean;
   requireVolume24hTrack: boolean;
   /** Tight TP % for sideways grinder (null = use bot_settings). */
@@ -30,6 +36,24 @@ export type RegimeGatePolicy = {
 export function readDynamicRegimeEnabled(): boolean {
   const raw = String(Deno.env.get("DYNAMIC_REGIME_SWITCHER") ?? "1").trim().toLowerCase();
   return raw !== "0" && raw !== "false" && raw !== "off";
+}
+
+/** When AI confidence is at/above this, trending defensive skips MACD-flat / below-EMA200 blocks. */
+export function readTrendingDefensiveAiOverrideConfidence(): number {
+  const raw = String(
+    Deno.env.get("TRENDING_DEFENSIVE_AI_OVERRIDE_CONF") ??
+      Deno.env.get("HIGH_AI_CONF_TRENDING_OVERRIDE") ??
+      "80",
+  ).trim();
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 80;
+  return Math.min(95, Math.max(55, Math.floor(n)));
+}
+
+export function trendingDefensiveAiOverridesTechnicalGates(aiConfidence: number | undefined): boolean {
+  const conf = Number(aiConfidence ?? 0);
+  if (!Number.isFinite(conf)) return false;
+  return conf >= readTrendingDefensiveAiOverrideConfidence();
 }
 
 function readEnvNum(key: string, fallback: number, min: number, max: number): number {
@@ -110,12 +134,28 @@ export function detectDynamicTradingRegime(
   };
 }
 
+export function readRegimeTrendingWeightedFloor(): number {
+  return readEnvNum("REGIME_TRENDING_WEIGHTED_FLOOR", 55, 45, 70);
+}
+
 export function resolveRegimeGatePolicy(
   regime: DynamicTradingRegime,
 ): RegimeGatePolicy {
   const grinderTp = readEnvNum("REGIME_SIDEWAYS_GRINDER_TP_PCT", 1.0, 0.8, 1.2);
-  const sidewaysRsiMax = readEnvNum("REGIME_SIDEWAYS_RSI_ENTRY_MAX", 42, 35, 48);
-  const trendingAiFloor = readEnvNum("REGIME_TRENDING_MIN_AI_CONF", 65, 55, 85);
+  const sidewaysRsiMax = readEnvNum("REGIME_SIDEWAYS_RSI_ENTRY_MAX", 55, 35, 65);
+  const trendingWeightedFloor = readRegimeTrendingWeightedFloor();
+  const trendingAiFloor = readEnvNum(
+    "REGIME_TRENDING_MIN_AI_CONF",
+    trendingWeightedFloor,
+    45,
+    85,
+  );
+  const trendingMinVolQuote = readEnvNum(
+    "REGIME_TRENDING_MIN_VOLUME_24H_QUOTE",
+    100_000,
+    25_000,
+    500_000,
+  );
 
   if (regime === "REGIME_SIDEWAYS") {
     return {
@@ -125,6 +165,8 @@ export function resolveRegimeGatePolicy(
       rsiPreflightUpper: 58,
       rsiPreflightLower: 24,
       minAiConfidenceFloor: readEnvNum("REGIME_SIDEWAYS_MIN_AI_CONF", 52, 45, 70),
+      minWeightedConvictionFloor: readEnvNum("REGIME_SIDEWAYS_WEIGHTED_FLOOR", 52, 45, 70),
+      minVolume24hQuoteUsd: 0,
       requireMacdHistogramExpansion: false,
       requireVolume24hTrack: false,
       grinderTakeProfitPct: grinderTp,
@@ -133,14 +175,42 @@ export function resolveRegimeGatePolicy(
   return {
     regime,
     ema200Required: true,
-    rsiEntryMax: 35,
+    rsiEntryMax: readEnvNum("REGIME_TRENDING_RSI_ENTRY_MAX", 60, 35, 70),
     rsiPreflightUpper: 70,
     rsiPreflightLower: 28,
     minAiConfidenceFloor: trendingAiFloor,
+    minWeightedConvictionFloor: trendingWeightedFloor,
+    minVolume24hQuoteUsd: trendingMinVolQuote,
     requireMacdHistogramExpansion: true,
     requireVolume24hTrack: true,
     grinderTakeProfitPct: null,
   };
+}
+
+/** Lower execution / war-room floors when dynamic regime is trending (e.g. 55 vs 70+). */
+export function tuneConfidencePolicyForRegimeGate(
+  policy: ConfidencePolicy,
+  gate: RegimeGatePolicy,
+): ConfidencePolicy {
+  if (gate.regime !== "REGIME_TRENDING") return policy;
+  const cap = gate.minWeightedConvictionFloor;
+  return {
+    ...policy,
+    hybrid_min_ai_confidence: Math.min(policy.hybrid_min_ai_confidence, cap),
+    grinder_weighted_floor: Math.min(policy.grinder_weighted_floor, cap),
+    trade_regime_weighted_floor: Math.min(policy.trade_regime_weighted_floor, cap),
+    execution_weighted_floor: Math.min(policy.execution_weighted_floor, cap),
+    war_room_base_floor: Math.min(policy.war_room_base_floor, cap),
+  };
+}
+
+/** After composite min-AI math, cap required confidence in trending regime. */
+export function capMinAiConfidenceForTrendingRegime(
+  minAiConfidence: number,
+  gate: RegimeGatePolicy,
+): number {
+  if (gate.regime !== "REGIME_TRENDING") return minAiConfidence;
+  return Math.min(minAiConfidence, gate.minWeightedConvictionFloor);
 }
 
 export function resolveMacdHistogram(snapshot: IndicatorSnapshot): number {
@@ -165,9 +235,13 @@ export function macdHistogramExpanding(snapshot: IndicatorSnapshot): boolean {
   return hist > 0 && fast > slow * 0.998;
 }
 
-export function passesVolume24hTrack(snapshot: IndicatorSnapshot): boolean {
+export function passesVolume24hTrack(
+  snapshot: IndicatorSnapshot,
+  minQuoteUsd = 500_000,
+): boolean {
   const quote = toNumber(snapshot.volume24hQuote, 0);
-  if (quote >= 500_000) return true;
+  const floor = Math.max(0, Number(minQuoteUsd) || 0);
+  if (floor <= 0 || quote >= floor) return true;
   const avg1m = toNumber(snapshot.avgVolume1m, 0);
   const c5 = snapshot.candles5 ?? [];
   const lastVol = toNumber(c5.at(-1)?.volume, 0);
@@ -223,23 +297,48 @@ export function evaluateTrendingDefensiveGates(params: {
   policy: RegimeGatePolicy;
   snapshot: IndicatorSnapshot;
   strategySignal: SignalDecision;
-}): { ok: boolean; failCodes: string[] } {
+  /** Ultra-high AI conviction can skip MACD-flat and below-EMA200 blocks (volume gate still applies). */
+  aiConfidence?: number;
+  /** Rubber-band bounce: skip MACD-flat at capitulation lows. */
+  strategyReason?: string | null;
+}): { ok: boolean; failCodes: string[]; aiOverrideApplied?: boolean } {
   const fails: string[] = [];
   if (params.policy.regime !== "REGIME_TRENDING" || params.strategySignal !== "BUY") {
     return { ok: true, failCodes: fails };
   }
-  if (params.policy.requireMacdHistogramExpansion && !macdHistogramExpanding(params.snapshot)) {
+  const oversoldBounceStrategy = isOversoldBounceStrategyReason(params.strategyReason);
+  const aiOverride = trendingDefensiveAiOverridesTechnicalGates(params.aiConfidence);
+  if (
+    params.policy.requireMacdHistogramExpansion &&
+    !aiOverride &&
+    !oversoldBounceStrategy &&
+    !macdHistogramExpanding(params.snapshot)
+  ) {
     fails.push("FAIL_MACD_HIST_FLAT");
   }
-  if (params.policy.requireVolume24hTrack && !passesVolume24hTrack(params.snapshot)) {
+  if (
+    params.policy.requireVolume24hTrack &&
+    !passesVolume24hTrack(params.snapshot, params.policy.minVolume24hQuoteUsd)
+  ) {
     fails.push("FAIL_TRENDING_VOLUME_TRACK");
   }
   const px = toNumber(params.snapshot.latestPrice, 0);
   const ema200 = toNumber(params.snapshot.ema200, 0);
-  if (params.policy.ema200Required && px > 0 && ema200 > 0 && px < ema200 * 0.998) {
+  if (
+    !aiOverride &&
+    !oversoldBounceStrategy &&
+    params.policy.ema200Required &&
+    px > 0 &&
+    ema200 > 0 &&
+    px < ema200 * 0.998
+  ) {
     fails.push("FAIL_EMA200");
   }
-  return { ok: fails.length === 0, failCodes: fails };
+  return {
+    ok: fails.length === 0,
+    failCodes: fails,
+    aiOverrideApplied: aiOverride && fails.length === 0,
+  };
 }
 
 export function resolveGrinderTakeProfitPct(params: {

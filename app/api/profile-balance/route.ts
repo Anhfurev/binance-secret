@@ -6,6 +6,9 @@ type ProfileBalanceRow = {
   demo_balance: number | string | null;
   starting_balance: number | string | null;
   updated_at: string | null;
+  available_usdt?: number | string | null;
+  portfolio_nav_usdt?: number | string | null;
+  portfolio_holdings?: Record<string, { free?: number; locked?: number }> | null;
 };
 
 function toNullableNumber(value: number | string | null | undefined) {
@@ -28,12 +31,16 @@ export async function GET(req: Request) {
   const query = userId
     ? supabaseAdmin
       .from("profiles")
-      .select("id, demo_balance, starting_balance, updated_at")
+      .select(
+        "id, demo_balance, starting_balance, updated_at, available_usdt, portfolio_nav_usdt, portfolio_holdings",
+      )
       .eq("id", userId)
       .single()
     : supabaseAdmin
       .from("profiles")
-      .select("id, demo_balance, starting_balance, updated_at")
+      .select(
+        "id, demo_balance, starting_balance, updated_at, available_usdt, portfolio_nav_usdt, portfolio_holdings",
+      )
       .order("updated_at", { ascending: false })
       .limit(1)
       .single();
@@ -58,6 +65,9 @@ export async function GET(req: Request) {
     demo_balance: toNullableNumber(row.demo_balance),
     starting_balance: toNullableNumber(row.starting_balance),
     updated_at: row.updated_at,
+    available_usdt: toNullableNumber(row.available_usdt ?? row.demo_balance),
+    portfolio_nav_usdt: toNullableNumber(row.portfolio_nav_usdt),
+    portfolio_holdings: row.portfolio_holdings ?? null,
   };
 
   return NextResponse.json({ ok: true, profile }, { status: 200 });

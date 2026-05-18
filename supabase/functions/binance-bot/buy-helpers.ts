@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { resolveAssetRiskProfile } from "./asset-risk-profile.ts";
 import { ATR_STOP_TRAIL_MULTIPLIER } from "./constants.ts";
 import type { AiAnalysis, MarketRegime } from "./types.ts";
 import type { WarRoomConsensus } from "./war-room.ts";
@@ -11,11 +12,22 @@ export const MIN_1H_BARS_FOR_LIVE_MTF = 201;
 /** When 1h is bearish (close < EMA200 on 1h series), weighted score cannot exceed this before War Room. */
 export const ONE_H_BEARISH_MAX_CONFIDENCE = 55;
 
+const AGGRESSIVE_MATRIX_BUY_REASONS = new Set([
+  "aggressive_buy_confirmed_orderbook",
+  "aggressive_buy_confirmed_fallback",
+]);
+
+/** Matrix cleared BUY via orderbook / no-trade fallback — sizing may use tuned trend floor. */
+export function isAggressiveMatrixBuyReason(reason?: string | null): boolean {
+  if (!reason || typeof reason !== "string") return false;
+  return reason.split("|").some((token) => AGGRESSIVE_MATRIX_BUY_REASONS.has(token.trim()));
+}
+
 /** Default minimum weighted score to open a BUY (override via `GRINDER_MIN_WEIGHTED_CONFIDENCE`). */
 export const DEFAULT_GRINDER_MIN_WEIGHTED_ENTRY = 62;
 
 /** Meme symbols: trailing stop cannot be tighter than this fraction below the high. */
-export const DEFAULT_MEME_MIN_TRAILING_PCT = 0.015;
+export const DEFAULT_MEME_MIN_TRAILING_PCT = 0.06;
 
 export function readGrinderMinWeightedEntry(): number {
   const raw = String(Deno.env.get("GRINDER_MIN_WEIGHTED_CONFIDENCE") ?? "").trim();
@@ -26,11 +38,13 @@ export function readGrinderMinWeightedEntry(): number {
 
 export function readMemeTrailingPctFloor(symbol: string): number {
   const sym = String(symbol ?? "").toUpperCase();
-  if (!/PEPE|BONK|WIF|FLOKI|MEME/.test(sym)) return 0;
+  if (!/PEPE|BONK|WIF|FLOKI|MEME|SHIB|DOGE/.test(sym)) return 0;
+  const profileFloor = resolveAssetRiskProfile(symbol).trailingStopPct;
   const raw = String(Deno.env.get("MEME_MIN_TRAILING_PCT") ?? "").trim();
-  const n = raw.length ? Number(raw) : DEFAULT_MEME_MIN_TRAILING_PCT * 100;
-  if (!Number.isFinite(n) || n <= 0) return DEFAULT_MEME_MIN_TRAILING_PCT;
-  return clamp(n > 1 ? n / 100 : n, 0.005, 0.2);
+  const n = raw.length ? Number(raw) : profileFloor * 100;
+  if (!Number.isFinite(n) || n <= 0) return profileFloor;
+  const parsed = n > 1 ? n / 100 : n;
+  return clamp(Math.max(profileFloor, parsed), 0.005, 0.2);
 }
 
 /** Long: never trail tighter than the configured percent floor below the high. */
@@ -82,10 +96,11 @@ export function readPaperWeightedFloorRelaxPoints(): number {
   if (!Number.isFinite(n) || n < 0) return 7;
   return clamp(Math.floor(n), 0, 15);
 }
-/** TP must be >= this multiple of the stop-loss distance (positive R:R). */
-export const MIN_REWARD_RISK_RATIO = 2.0;
-/** When ATR is valid, default TP distance = `ATR × this` unless R:R floor lifts it higher. */
-export const ATR_TAKE_PROFIT_MULTIPLIER = 2.5;
+
+/** TP must be >= this multiple of SL distance (default ~1:1.75 with 2× / 3.5× ATR). */
+export const MIN_REWARD_RISK_RATIO = 1.75;
+/** Default TP ATR multiple (align with `atr-exit-targets.ts`). */
+export const ATR_TAKE_PROFIT_MULTIPLIER = 3.5;
 
 /**
  * Stop / initial trail distance below entry.

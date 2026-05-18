@@ -5,6 +5,8 @@ import { escapeHtml } from "./bot-shared.ts";
 import { botDebug, botWarn } from "./bot-debug.ts";
 import { safeInsertLog } from "./buy-logging.ts";
 import { enforceBankrollMutex } from "./bankroll-mutex.ts";
+import { getUsdtBalance } from "./binance.ts";
+import { readOversoldBounceRigidFloorUsd } from "./buy-live-wallet-sizing.ts";
 
 export async function acquireBuyCapitalReservation(params: {
   supabase: ReturnType<typeof createClient>;
@@ -21,6 +23,8 @@ export async function acquireBuyCapitalReservation(params: {
   ghostMode: boolean;
   isPaperOnly: boolean;
   usdtBalance: number;
+  /** Rubber-band micro-clip: trust exchange free USDT, not DB open-notional headroom. */
+  oversoldBounceMicroClip?: boolean;
 }) {
   const {
     supabase,
@@ -37,8 +41,31 @@ export async function acquireBuyCapitalReservation(params: {
     ghostMode,
     isPaperOnly,
     usdtBalance,
+    oversoldBounceMicroClip = false,
   } = params;
   if (ghostMode) return { reservationId: null as string | null };
+
+  if (oversoldBounceMicroClip && !isPaperOnly) {
+    try {
+      const exchangeFree = await getUsdtBalance(false);
+      const rigid = readOversoldBounceRigidFloorUsd();
+      if (exchangeFree >= Math.min(tradeUsd, rigid) - 1e-6) {
+        botDebug("buyFlow", "bounce_micro_clip_exchange_free_ok", {
+          userId,
+          symbol,
+          exchange_free_usdt: Number(exchangeFree.toFixed(4)),
+          trade_usd: Number(tradeUsd.toFixed(4)),
+        });
+        return { reservationId: null, exchangeFreeUsdt: exchangeFree };
+      }
+    } catch (error) {
+      botWarn("buyFlow", "bounce_micro_clip_exchange_free_fetch_failed", {
+        userId,
+        symbol,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   const mutex = await enforceBankrollMutex({ supabase, userId, symbol });
   if (!mutex.allowed) {
     botWarn("buyFlow", "bankroll_mutex_blocked", {

@@ -5,6 +5,12 @@ import type { ConfidencePolicy } from "./confidence-policy.ts";
 import { evaluateWarRoomConsensus } from "./war-room.ts";
 import { sentryWarRoomVetoBreadcrumb, botDebug } from "./bot-debug.ts";
 import { logWarRoomGhostSnapshot, safeInsertLog } from "./buy-logging.ts";
+import {
+  isBounceOverrideAiSoftSell,
+  qualifiesOversoldBounceRelaxedPath,
+  readOversoldBouncePepeSoftSellFloor,
+  readOversoldBounceSymbolExecutionCap,
+} from "./buy-bounce-floor.ts";
 
 export async function resolveWarRoomOutcome(params: {
   supabase: ReturnType<typeof createClient>;
@@ -22,12 +28,19 @@ export async function resolveWarRoomOutcome(params: {
   snapshotImbalanceRatio?: number;
   snapshotVolume24hQuote?: number | null;
   confidencePolicy: ConfidencePolicy;
+  /** Matrix BUY reason from `decideHybridMatrix` (oversold bounce stamp). */
+  matrixBuyReason?: string | null;
+  combinedStrategyTrace?: string | null;
 }) {
   const {
     supabase, row, userId, symbol, ai, regime, rawWeighted, effectiveConfidence,
     mtf, bearish1hCap, ghostMode, demoProbePaper, snapshotImbalanceRatio, snapshotVolume24hQuote,
-    confidencePolicy,
+    confidencePolicy, matrixBuyReason = null, combinedStrategyTrace = null,
   } = params;
+  const oversoldBounceMatrix = qualifiesOversoldBounceRelaxedPath({
+    matrixBuyReason,
+    combinedTrace: combinedStrategyTrace,
+  });
 
   if (demoProbePaper) {
     const baseFloor = confidencePolicy.war_room_base_floor;
@@ -60,7 +73,9 @@ export async function resolveWarRoomOutcome(params: {
         ? null
         : Number(snapshotVolume24hQuote),
   };
-  const baseRegimeFloor = confidencePolicy.war_room_base_floor;
+  const baseRegimeFloor = oversoldBounceMatrix
+    ? readOversoldBounceSymbolExecutionCap(symbol)
+    : confidencePolicy.war_room_base_floor;
   const warRoom = evaluateWarRoomConsensus({
     rawWeightedConfidence: rawWeighted,
     effectiveChartConfidence: effectiveConfidence,
@@ -114,6 +129,43 @@ export async function resolveWarRoomOutcome(params: {
         `BUY blocked: War Room news veto (sentiment fear/hack with penalty — chart raw ${rawWeighted.toFixed(2)}%, effective chart ${effectiveConfidence.toFixed(2)}%).`,
       warRoom,
     };
+  }
+
+  if (oversoldBounceMatrix) {
+    const softSellPepe = isBounceOverrideAiSoftSell(matrixBuyReason) &&
+      String(symbol).toUpperCase().includes("PEPE");
+    const quorumFloor = softSellPepe
+      ? Math.min(baseRegimeFloor, readOversoldBouncePepeSoftSellFloor())
+      : baseRegimeFloor;
+    const chartFloor = bearish1hCap
+      ? Math.min(quorumFloor, 55)
+      : quorumFloor;
+    if (rawWeighted >= quorumFloor && effectiveConfidence >= chartFloor) {
+      const executionConfidence = Number.isFinite(effectiveConfidence) && effectiveConfidence > 0
+        ? effectiveConfidence
+        : rawWeighted;
+      botDebug("buyFlow", "war_room_oversold_bounce_bypass", {
+        userId,
+        symbol,
+        matrixBuyReason,
+        executionConfidence,
+        bounce_floor: quorumFloor,
+        chart_floor: chartFloor,
+        raw_weighted: rawWeighted,
+        soft_sell_pepe: softSellPepe,
+      });
+      return {
+        warRoom: {
+          ...warRoom,
+          quorum_passed: true,
+          final_governance: "quorum_met",
+          governance_floor: quorumFloor,
+          base_floor: quorumFloor,
+          effective_confidence_after_governance: executionConfidence,
+        },
+        executionConfidence,
+      };
+    }
   }
 
   if (!warRoom.quorum_passed) {

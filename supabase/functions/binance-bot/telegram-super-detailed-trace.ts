@@ -30,10 +30,13 @@ function resolveSuperTraceChatId(): string {
     (Deno.env.get("TELEGRAM_BOT_CHAT_ID") ?? "").trim();
 }
 
-function fmtNum(n: unknown, digits: number, fallback = "N/A"): string {
+function fmtNum(n: unknown, digits: number, fallback = "N/A", referencePrice?: number): string {
   const x = Number(n);
   if (!Number.isFinite(x)) return fallback;
-  return x.toFixed(digits);
+  if (digits >= 4) {
+    return formatIndicatorForLog(x, referencePrice);
+  }
+  return formatLogNumber(x, digits, referencePrice);
 }
 
 function finiteIndicator(n: unknown): number | null {

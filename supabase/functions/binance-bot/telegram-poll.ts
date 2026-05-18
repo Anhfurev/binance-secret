@@ -1,5 +1,6 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import { pooledFetch } from "./pooled-http-client.ts";
 
 const TELEGRAM_POLL_SOURCE = "telegram-poll";
 const TELEGRAM_POLL_MESSAGE = "poll_offset";
@@ -61,7 +62,7 @@ export async function pollTelegramCommandUpdate(
   const url =
     `https://api.telegram.org/bot${token}/getUpdates?limit=30&timeout=0&offset=${offset}`;
   try {
-    const response = await fetch(url, { method: "GET" });
+    const response = await pooledFetch(url, { method: "GET" });
     if (!response.ok) return null;
     const payload = await response.json() as {
       ok?: boolean;

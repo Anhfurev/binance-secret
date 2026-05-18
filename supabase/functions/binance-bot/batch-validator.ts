@@ -4,7 +4,7 @@ import { fetchIndicatorSnapshot } from "./binance.ts";
 import { getCachedSnapshot } from "./index-ai.ts";
 import { resolveGhostMode, resolveTestMode } from "./bot-shared.ts";
 import { safeExecute } from "./safe-execute.ts";
-import { DEFAULT_SYMBOL } from "./constants.ts";
+import { CRON_SYMBOL_MATRIX_ORDER, DEFAULT_SYMBOL } from "./constants.ts";
 import { normalizeSymbol, toStringValue } from "./utils.ts";
 import { readCronSerialSymbolCyclesEnabled, readSymbolMatrixGapMs } from "./ai-provider-matrix.ts";
 import { resolveBtcOverboughtFromMarketCache } from "./market-anchor.ts";
@@ -25,10 +25,10 @@ export function readBotSymbolStaggerMs(): number {
   return Math.min(15_000, Math.floor(n));
 }
 
-/** Run active bots for the same symbol in parallel (`Promise.allSettled`). Default **off** (serialized); set `BOT_PARALLEL_SYMBOL_CYCLES=1` to enable. Ignored when Gemini may run (`readSerialSymbolCyclesForGeminiQuota`) so shared keys / DB quota are not raced. */
+/** Run active bots for the same symbol in parallel. Default **on**; set `BOT_PARALLEL_SYMBOL_CYCLES=0` to serialize. */
 export function readBotParallelSymbolCyclesEnabled(): boolean {
-  const raw = String(Deno.env.get("BOT_PARALLEL_SYMBOL_CYCLES") ?? "0").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes";
+  const raw = String(Deno.env.get("BOT_PARALLEL_SYMBOL_CYCLES") ?? "1").trim().toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "no";
 }
 
 /**
@@ -46,14 +46,38 @@ export function readGeminiCronSymbolGapMs(): number {
   return readSymbolMatrixGapMs();
 }
 
+/** Matrix index for provider routing (matches cron body symbol order). */
+export function resolveCronSymbolMatrixIndex(symbol: string): number | undefined {
+  const sym = normalizeSymbol(symbol, DEFAULT_SYMBOL);
+  const idx = (CRON_SYMBOL_MATRIX_ORDER as readonly string[]).indexOf(sym);
+  return idx >= 0 ? idx : undefined;
+}
+
+/** True when validateSymbolBatchInput should call Binance for a BTCUSDT anchor snapshot. */
+export function shouldPrefetchBtcMarketAnchor(params: {
+  btcOverboughtHint?: boolean;
+  skipBtcMarketAnchor?: boolean;
+}): boolean {
+  if (params.skipBtcMarketAnchor) return false;
+  return params.btcOverboughtHint === undefined;
+}
+
 export async function validateSymbolBatchInput(params: {
   supabase: ReturnType<typeof createClient>;
   symbolFilter: string;
   marketCache?: Map<string, import("./types.ts").IndicatorSnapshot>;
   /** Cron preflight BTC anchor — skips redundant BTCUSDT snapshot work per symbol. */
   btcOverbought?: boolean;
+  /** Single-symbol staging (e.g. test-sol-loop): no BTCUSDT fetch or cache entries. */
+  skipBtcMarketAnchor?: boolean;
 }) {
-  const { supabase, symbolFilter, marketCache, btcOverbought: btcOverboughtHint } = params;
+  const {
+    supabase,
+    symbolFilter,
+    marketCache,
+    btcOverbought: btcOverboughtHint,
+    skipBtcMarketAnchor,
+  } = params;
   const botsQuery = await safeExecute("db_bot_settings_for_symbol", async () => {
     const r = await supabase.from("bot_settings").select("*").eq("is_autopilot_enabled", true).eq("symbol", symbolFilter);
     if (r.error) throw r.error;
@@ -78,9 +102,7 @@ export async function validateSymbolBatchInput(params: {
   }
   const symbolCache = marketCache ?? new Map<string, import("./types.ts").IndicatorSnapshot>();
   let btcOverbought: boolean;
-  if (btcOverboughtHint !== undefined) {
-    btcOverbought = btcOverboughtHint;
-  } else {
+  if (shouldPrefetchBtcMarketAnchor({ btcOverboughtHint, skipBtcMarketAnchor })) {
     if (!symbolCache.has("BTCUSDT")) {
       await safeExecute(
         "market_snapshot_BTCUSDT",
@@ -89,6 +111,8 @@ export async function validateSymbolBatchInput(params: {
       );
     }
     btcOverbought = resolveBtcOverboughtFromMarketCache(symbolCache);
+  } else {
+    btcOverbought = btcOverboughtHint ?? false;
   }
   const balanceSyncTargets = new Map<string, { isLiveMode: boolean; hasPaperMode: boolean; symbols: Set<string> }>();
   for (const row of activeBots) {

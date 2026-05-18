@@ -3,14 +3,12 @@ import type { AiAnalysis, IndicatorSnapshot } from "./types.ts";
 import { type GeminiKeySlot } from "./ai-keys.ts";
 import {
   readLlmApiKeysDbHardTimeoutMs,
-  recordLlmApiKeyHttpFailure,
   touchLlmApiKeyUsed,
 } from "./llm-api-keys-repo.ts";
 import {
   resolveGeminiSlotsForRuntime,
   resolveGroqKeyPlanForRuntime,
 } from "./llm-api-keys-resolve.ts";
-import { isLlmHttpError } from "./llm-http-error.ts";
 import {
   getAiQuotaState,
   getRecentAiCache,
@@ -27,6 +25,7 @@ import {
   geminiAnalyze,
   groqAnalyze,
   openAiAnalyze,
+  readGeminiPrimaryMatrixTimeoutMs,
 } from "./ai-models.ts";
 import { applyGroqBuyVeto, buildSymbolStrategyHint } from "./ai-veto.ts";
 import {
@@ -51,11 +50,9 @@ import {
   GEMINI_QUOTA_COOLDOWN_MS,
   hasAnyAvailableGeminiKey,
   isGeminiKeyAvailable,
-  isPermanentCredentialOrSuspension,
   isSoftQuotaOrRateLimit,
-  readGeminiAuthKeyCooldownMs,
-  resolveLlmKeyFailureCooldownMs,
 } from "./llm-key-backoff.ts";
+import { isLlmRateLimitHttpFailure } from "./llm-key-failure-classify.ts";
 import { resolveGroqKeyFailureCooldownMs } from "./groq-key-failure-cooldown.ts";
 import {
   readAiProviderMatrixEnabled,
@@ -71,8 +68,9 @@ import { readAiPrimaryLlmIsGroq, readAiSkipGemini } from "./ai-llm-route.ts";
 import {
   buildPreemptiveRotationOrder,
   buildQuotaRotationOrder,
+  claimCronLlmLaneOffset,
   getCronBatchLlmKeyPools,
-  resolvePreemptiveKeyIndex,
+  resolvePreemptiveKeyIndexForLane,
   shouldPreemptiveRouteForSymbolIndex,
 } from "./llm-key-preemptive-route.ts";
 import {
@@ -82,14 +80,47 @@ import {
   readAiLlmIncludeScoringRubric,
   tailCandles,
 } from "./ai-payload-slim.ts";
+import { isAbortOrTimeoutError } from "./ai-gemini-timeout.ts";
+import { buildTechnicalIndicatorFallback } from "./ai-technical-fallback.ts";
+import {
+  cloneLlmAnalyzePayload,
+  freshCrossProviderAbortSignal,
+  readCrossProviderFallbackTimeoutMs,
+} from "./llm-provider-fallback.ts";
+import {
+  countLanePoolKeysEligible,
+  withLlmKeyCheckout,
+} from "./llm-key-checkout.ts";
+import { geminiPoolKeyId, groqScanPoolKeyId } from "./llm-key-pool.ts";
+import { applyRotationCircuitAfterHttpFailure } from "./llm-rotation-circuit-breaker.ts";
+import { geminiSlotToLlmMeta, groqIndexToLlmMeta } from "./llm-key-slot-gate.ts";
+import {
+  canStartRotationHttpAttempt,
+  createSymbolRotationBudget,
+} from "./llm-symbol-rotation-budget.ts";
+import { readAiCascadePipelineEnabled } from "./ai-cascade-config.ts";
+import { runCascadeAiAnalysis } from "./ai-cascade-pipeline.ts";
+import {
+  assertLlmDispatchConvictionCeiling,
+  evaluatePhase3SlotPrefilter,
+  type LlmGatekeeperPrefilterResult,
+} from "./llm-gatekeeper-prefilter.ts";
+import { resolveTradeRegime } from "./regime-scaling.ts";
+import { buildGeminiStructuralSummary } from "./ai-cascade-summary.ts";
+import {
+  buildCascadeGeminiPayload,
+  GEMINI_CASCADE_SCANNER_SYSTEM,
+} from "./ai-cascade-gemini-payload.ts";
+import { normalizeCascadeGeminiResponse } from "./ai-cascade-gemini-normalize.ts";
 
 export { GEMINI_QUOTA_COOLDOWN_MS };
+export { isAbortOrTimeoutError };
 
-function isAbortOrTimeoutError(error: unknown): boolean {
-  if (error instanceof Error && error.name === "AbortError") return true;
-  const m = String((error as Error)?.message ?? error).toLowerCase();
-  return m.includes("abort") || m.includes("timeout");
-}
+export type TryGeminiFlowResult = {
+  ai: AiAnalysis | null;
+  /** Matrix-primary Gemini hit per-key timeout — caller should fast-path Groq rescue. */
+  primaryTimedOut?: boolean;
+};
 
 const AI_STALE_CACHE_FALLBACK_MS = 2 * 60 * 1000;
 const AI_UNAVAILABLE_LOG = "AI currently unavailable - switching to Technical-Only mode.";
@@ -205,9 +236,20 @@ export async function getAiAnalysis(
     signal?: AbortSignal;
     /** Cron batch position for multi-provider matrix (0=BTC Groq-first, 1=SOL Gemini-first, …). */
     symbolMatrixIndex?: number;
+    /** Cycle gatekeeper phases 1–2; when short-circuited, no LLM dispatch. */
+    llmGatekeeper?: LlmGatekeeperPrefilterResult;
+    /** Cycle-resolved min AI / weighted floor (e.g. 55%). */
+    llmDispatchConvictionFloor?: number;
+    /** Structural block when flat-book buy preflight failed (e.g. FAIL_STRATEGY_NO_BUY). */
+    buyPreflightBlocked?: boolean;
   },
 ): Promise<AiAnalysis> {
   const symbol = String(snapshot.symbol || "BTCUSDT").toUpperCase();
+  const tradeRegime = resolveTradeRegime(
+    symbol,
+    Number(snapshot.latestPrice),
+    Number(snapshot.atr14),
+  );
   const batchPools = getCronBatchLlmKeyPools();
   const groqPlan = batchPools?.groqPlan ?? await resolveGroqKeyPlanForRuntime();
   const geminiSlots = batchPools?.geminiSlots ?? await resolveGeminiSlotsForRuntime();
@@ -215,6 +257,12 @@ export async function getAiAnalysis(
   const groqVetoKeys = groqPlan.vetoKeys;
   const groqScanDbIds = groqPlan.scanDbIds;
   const groqVetoDbIds = groqPlan.vetoDbIds;
+  const groqScanDbErrorCounts = groqPlan.scanDbErrorCounts;
+  const groqVetoDbErrorCounts = groqPlan.vetoDbErrorCounts;
+  const groqScanDbStatuses = groqPlan.scanDbStatuses;
+  const groqVetoDbStatuses = groqPlan.vetoDbStatuses;
+  const groqScanDbCooldownUntils = groqPlan.scanDbCooldownUntils;
+  const groqVetoDbCooldownUntils = groqPlan.vetoDbCooldownUntils;
   const groqDbHardCap = groqPlan.useDbHardTimeout ? readLlmApiKeysDbHardTimeoutMs() : undefined;
   const geminiDbHardCap = geminiSlots.some((s) => Boolean(s.llmDbKeyId))
     ? readLlmApiKeysDbHardTimeoutMs()
@@ -222,14 +270,23 @@ export async function getAiAnalysis(
   const llmGroqCtx = groqPlan.useDbHardTimeout && groqDbHardCap != null
     ? {
       scanRowIds: groqScanDbIds,
+      scanDbErrorCounts: groqScanDbErrorCounts,
+      scanDbStatuses: groqScanDbStatuses,
+      scanDbCooldownUntils: groqScanDbCooldownUntils,
       scanHardTimeoutMs: groqDbHardCap,
       vetoRowIds: groqVetoDbIds,
+      vetoDbErrorCounts: groqVetoDbErrorCounts,
+      vetoDbStatuses: groqVetoDbStatuses,
+      vetoDbCooldownUntils: groqVetoDbCooldownUntils,
       vetoHardTimeoutMs: groqDbHardCap,
     }
     : undefined;
   const llmGeminiCtx = geminiDbHardCap != null
     ? {
       groqVetoDbIds,
+      groqVetoDbErrorCounts,
+      groqVetoDbStatuses,
+      groqVetoDbCooldownUntils,
       groqVetoDbHardTimeoutMs: groqDbHardCap,
       geminiDbHardTimeoutMs: geminiDbHardCap,
     }
@@ -241,6 +298,7 @@ export async function getAiAnalysis(
     options?.botSettingsRow ?? null,
   );
   const shouldBypassCache = Boolean(options?.skipCache);
+  const cascadePipeline = readAiCascadePipelineEnabled();
   const sw = options?.scoreWeights ?? null;
   const matrixIndex = options?.symbolMatrixIndex;
   const useProviderMatrix =
@@ -249,14 +307,15 @@ export async function getAiAnalysis(
     Number.isFinite(matrixIndex) &&
     matrixIndex >= 0;
   const usePreemptiveKeys = shouldPreemptiveRouteForSymbolIndex(matrixIndex);
+  const laneSalt = usePreemptiveKeys ? claimCronLlmLaneOffset() : 0;
   const preferredGroqScanIdx = usePreemptiveKeys && groqScanKeys.length
-    ? resolvePreemptiveKeyIndex(matrixIndex!, groqScanKeys.length)
+    ? resolvePreemptiveKeyIndexForLane(matrixIndex!, groqScanKeys.length, laneSalt)
     : undefined;
   const preferredGroqVetoIdx = usePreemptiveKeys && groqVetoKeys.length
-    ? resolvePreemptiveKeyIndex(matrixIndex!, groqVetoKeys.length)
+    ? resolvePreemptiveKeyIndexForLane(matrixIndex!, groqVetoKeys.length, laneSalt)
     : undefined;
   const preferredGeminiIdx = usePreemptiveKeys && geminiSlots.length
-    ? resolvePreemptiveKeyIndex(matrixIndex!, geminiSlots.length)
+    ? resolvePreemptiveKeyIndexForLane(matrixIndex!, geminiSlots.length, laneSalt)
     : undefined;
   const skipInMemoryKeyCooldowns = usePreemptiveKeys && groqPlan.useDbHardTimeout;
   const groqVetoBase = {
@@ -268,18 +327,80 @@ export async function getAiAnalysis(
     logGroqVeto,
     signal: options?.signal,
     groqDbKeyIds: groqVetoDbIds,
+    groqDbKeyErrorCounts: groqVetoDbErrorCounts,
+    groqDbKeyStatuses: groqVetoDbStatuses,
+    groqDbKeyCooldownUntils: groqVetoDbCooldownUntils,
     groqDbHardTimeoutMs: groqDbHardCap,
     preferredGroqKeyIndex: preferredGroqVetoIdx,
     usePreemptiveKeyRouting: usePreemptiveKeys,
     skipInMemoryCooldownHint: skipInMemoryKeyCooldowns,
   };
+  const dispatchFloor = options?.llmDispatchConvictionFloor;
   const llmFlowOpts = {
     usePreemptiveKeyRouting: usePreemptiveKeys,
     dbBackedPool: groqPlan.useDbHardTimeout,
     preferredGroqScanKeyIndex: preferredGroqScanIdx,
     preferredGroqVetoKeyIndex: preferredGroqVetoIdx,
     preferredGeminiKeyIndex: preferredGeminiIdx,
+    llmDispatchConvictionFloor: dispatchFloor,
+    botSettingsRow: options?.botSettingsRow ?? null,
   };
+
+  const sentimentPrefetch = collectSentimentVibe(snapshot.symbol);
+
+  const gatekeeperHoldFromPrefilter = (): AiAnalysis => {
+    const gk = options?.llmGatekeeper;
+    const path = gk?.phase != null
+      ? `gatekeeper_phase_${gk.phase}_skip`
+      : "gatekeeper_skip";
+    return withAiTrace(buildTechnicalIndicatorFallback(snapshot), {
+      provider: "fallback",
+      providerPath: path,
+      cacheStatus: shouldBypassCache ? "bypassed" : "miss",
+    });
+  };
+
+  const blockLlmDispatchIfConvictionFails = (): AiAnalysis | null => {
+    const block = assertLlmDispatchConvictionCeiling({
+      symbol,
+      snapshot,
+      botSettingsRow: options?.botSettingsRow ?? null,
+      tradeRegime,
+      cycleMinAiConfidence: dispatchFloor,
+    });
+    if (!block) return null;
+    if (block.log) console.log(block.log);
+    console.log(
+      `[PRE-FILTER] ${symbol} LLM dispatch blocked phase=2 short_circuit=true detail=${block.detail}`,
+    );
+    return gatekeeperHoldFromPrefilter();
+  };
+
+  if (options?.buyPreflightBlocked) {
+    console.log(
+      `[PIPELINE] ${symbol} getAiAnalysis blocked buy_preflight_fail detail=buy_preflight_blocked`,
+    );
+    return await applySentimentVibeCheck(
+      gatekeeperHoldFromPrefilter(),
+      snapshot,
+      sw,
+      await sentimentPrefetch,
+    );
+  }
+
+  if (options?.llmGatekeeper?.shortCircuit || options?.llmGatekeeper?.allowLlm === false) {
+    return await applySentimentVibeCheck(
+      gatekeeperHoldFromPrefilter(),
+      snapshot,
+      sw,
+      await sentimentPrefetch,
+    );
+  }
+
+  const convictionHold = blockLlmDispatchIfConvictionFails();
+  if (convictionHold) {
+    return await applySentimentVibeCheck(convictionHold, snapshot, sw, await sentimentPrefetch);
+  }
 
   if (!shouldBypassCache) {
     const cached = await getRecentAiCache(symbol, GLOBAL_BOT_CONFIG.AI_CACHE_WINDOW_MS);
@@ -288,12 +409,20 @@ export async function getAiAnalysis(
       await logAiCacheHit(symbol, cached.ageMs);
       const quota = await getAiQuotaState();
       let analysis = applyStaleSignalBuyVeto(snapshot, cached.analysis);
-      if (analysis.action === "BUY" && !hasFinalGroqBuyVeto(analysis) && GLOBAL_BOT_CONFIG.GROQ_VETO_ON_CACHE_HIT) {
+      const needsGroqGate = analysis.action === "BUY" && !hasFinalGroqBuyVeto(analysis) &&
+        (cascadePipeline || GLOBAL_BOT_CONFIG.GROQ_VETO_ON_CACHE_HIT);
+      if (needsGroqGate) {
         const reviewed = await applyGroqBuyVeto({
           ...groqVetoBase,
           ai: analysis,
           currentGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0),
           groqKeyCooldownsHint: skipInMemoryKeyCooldowns ? {} : (quota?.groq_key_cooldowns ?? {}),
+          ...(cascadePipeline
+            ? {
+              cascadeLean: true,
+              geminiStructuralSummary: buildGeminiStructuralSummary(analysis),
+            }
+            : {}),
         });
         analysis = reviewed.ai;
         if (!usePreemptiveKeys && reviewed.nextGroqKeyIndex !== Number(quota?.current_groq_key_index ?? 0)) {
@@ -315,8 +444,14 @@ export async function getAiAnalysis(
     console.log(`[Cache Bypass] ${symbol} reason=${options?.cacheBypassReason ?? "manual_bypass"}`);
   }
 
-  const sentimentPrefetch = collectSentimentVibe(snapshot.symbol);
-  const llmBatched = !shouldBypassCache && !useProviderMatrix
+  const assertGeminiDispatchPhase3 = (): boolean => {
+    const phase3 = evaluatePhase3SlotPrefilter(symbol, geminiSlots);
+    if (phase3.allowLlm) return true;
+    if (phase3.log) console.log(phase3.log);
+    return false;
+  };
+
+  const llmBatched = !shouldBypassCache && !useProviderMatrix && !cascadePipeline
     ? takeMultiSymbolBatchAi(symbol)
     : null;
   if (llmBatched) {
@@ -346,6 +481,51 @@ export async function getAiAnalysis(
         providerPath: batchPath,
         cacheStatus: shouldBypassCache ? "bypassed" : "miss",
       }),
+      snapshot,
+      sw,
+      await sentimentPrefetch,
+    );
+  }
+
+  if (cascadePipeline) {
+    const convictionHoldCascade = blockLlmDispatchIfConvictionFails();
+    if (convictionHoldCascade) {
+      return await applySentimentVibeCheck(convictionHoldCascade, snapshot, sw, await sentimentPrefetch);
+    }
+    if (!assertGeminiDispatchPhase3()) {
+      return await applySentimentVibeCheck(
+        gatekeeperHoldFromPrefilter(),
+        snapshot,
+        sw,
+        await sentimentPrefetch,
+      );
+    }
+    const cascadePayload = buildCascadeGeminiPayload(snapshot, symbol);
+    const cascadeAi = await runCascadeAiAnalysis({
+      gatekeeperCleared: true,
+      symbol,
+      snapshot,
+      payload: cascadePayload,
+      geminiSlots,
+      groqVetoKeys,
+      groqVetoDbIds,
+      groqVetoDbErrorCounts,
+      groqVetoDbStatuses,
+      groqVetoDbCooldownUntils,
+      groqDbHardCap,
+      geminiDbHardCap,
+      signal: options?.signal,
+      llmFlowOpts,
+      botSettingsRow: options?.botSettingsRow ?? null,
+      tradeRegime,
+      llmDispatchConvictionFloor: dispatchFloor,
+      runGeminiTier: tryGeminiFlow,
+      neutralFallback: buildNeutralFallback,
+      withTrace: (ai, trace) =>
+        withAiTrace(ai, { ...trace, cacheStatus: trace.cacheStatus }),
+    });
+    return await applySentimentVibeCheck(
+      cascadeAi,
       snapshot,
       sw,
       await sentimentPrefetch,
@@ -391,24 +571,39 @@ export async function getAiAnalysis(
           `[AI DEBUG] ${symbol}: Groq 429 but all Gemini keys benched — skip Gemini fallback (no 403 flood)`,
         );
       } else {
-      if (groqPrimary.groqQuotaExhausted) {
+      if (!groqPrimary.groqQuotaExhausted) {
+        await enforceCrossProviderFallbackGap(options?.signal);
+      } else {
         console.warn(
-          `[AI DEBUG] Groq 429/quota for ${symbol} — skipping inter-provider gap (fast-fail; was ${readGroqToGeminiFallbackGapMs()}ms)`,
+          `[AI DEBUG] Groq 429/quota for ${symbol} — cross-provider gap skipped; fresh Gemini signal/payload`,
         );
       }
+      if (!assertGeminiDispatchPhase3()) {
+        return await applySentimentVibeCheck(
+          gatekeeperHoldFromPrefilter(),
+          snapshot,
+          sw,
+          await sentimentPrefetch,
+        );
+      }
+      const geminiFallbackPayload = cloneLlmAnalyzePayload(payload);
+      const geminiFallbackSignal = freshCrossProviderAbortSignal(
+        options?.signal,
+        readCrossProviderFallbackTimeoutMs("gemini"),
+      );
       const geminiFallback = await tryGeminiFlow(
         geminiSlots,
         groqVetoKeys,
         snapshot,
-        payload,
+        geminiFallbackPayload,
         symbol,
-        options?.signal,
+        geminiFallbackSignal,
         llmGeminiCtx,
         llmFlowOpts,
       );
-      if (geminiFallback) {
+      if (geminiFallback.ai) {
         return await applySentimentVibeCheck(
-          geminiFallback,
+          geminiFallback.ai,
           snapshot,
           sw,
           await sentimentPrefetch,
@@ -418,7 +613,15 @@ export async function getAiAnalysis(
     }
   } else {
     if (!skipGemini) {
-      const geminiResult = await tryGeminiFlow(
+      if (!assertGeminiDispatchPhase3()) {
+        return await applySentimentVibeCheck(
+          gatekeeperHoldFromPrefilter(),
+          snapshot,
+          sw,
+          await sentimentPrefetch,
+        );
+      }
+      const geminiFlow = await tryGeminiFlow(
         geminiSlots,
         groqVetoKeys,
         snapshot,
@@ -426,30 +629,35 @@ export async function getAiAnalysis(
         symbol,
         options?.signal,
         llmGeminiCtx,
-        llmFlowOpts,
+        { ...llmFlowOpts, matrixPrimaryRescue: useProviderMatrix },
       );
-      if (geminiResult) {
+      if (geminiFlow.ai) {
         return await applySentimentVibeCheck(
-          geminiResult,
+          geminiFlow.ai,
           snapshot,
           sw,
           await sentimentPrefetch,
         );
       }
-      if (useProviderMatrix) {
+      if (useProviderMatrix && !geminiFlow.primaryTimedOut) {
         console.warn(
           `[AI MATRIX] ${symbol} Gemini primary miss — cross-provider gap before Groq`,
         );
         await enforceCrossProviderFallbackGap(options?.signal);
       }
     }
+    const groqFallbackPayload = cloneLlmAnalyzePayload(payload);
+    const groqFallbackSignal = freshCrossProviderAbortSignal(
+      options?.signal,
+      readCrossProviderFallbackTimeoutMs("groq"),
+    );
     const groqResult = await tryGroqFlow(
       groqScanKeys,
       groqVetoKeys,
       snapshot,
-      payload,
+      groqFallbackPayload,
       symbol,
-      options?.signal,
+      groqFallbackSignal,
       llmGroqCtx,
       llmFlowOpts,
     );
@@ -476,7 +684,19 @@ export async function getAiAnalysis(
       return await applySentimentVibeCheck(buildNeutralFallback(), snapshot, sw);
     }
   }
-  return await applySentimentVibeCheck(buildNeutralFallback(), snapshot, sw);
+  const technicalOnly = buildTechnicalIndicatorFallback(snapshot);
+  console.warn(
+    `[AI] ${symbol} all LLM providers exhausted — technical RSI/volume fallback (action=${technicalOnly.action})`,
+  );
+  return await applySentimentVibeCheck(
+    withAiTrace(technicalOnly, {
+      provider: "fallback",
+      providerPath: "technical_rsi_volume_all_keys_exhausted",
+      cacheStatus: shouldBypassCache ? "bypassed" : "miss",
+    }),
+    snapshot,
+    sw,
+  );
 }
 
 export async function getRecentAiCacheForSymbol(symbol: string): Promise<AiAnalysis | null> {
@@ -497,6 +717,9 @@ function geminiSlotLabel(slot: GeminiKeySlot, keyIndex: number, nKeys: number): 
 
 type LlmGeminiFlowDbCtx = {
   groqVetoDbIds?: (string | undefined)[];
+  groqVetoDbErrorCounts?: (number | undefined)[];
+  groqVetoDbStatuses?: import("./llm-api-keys-types.ts").LlmApiKeyRow["status"][];
+  groqVetoDbCooldownUntils?: (string | null | undefined)[];
   groqVetoDbHardTimeoutMs?: number;
   geminiDbHardTimeoutMs?: number;
 };
@@ -507,9 +730,17 @@ type LlmFlowPreemptiveOpts = {
   preferredGroqScanKeyIndex?: number;
   preferredGroqVetoKeyIndex?: number;
   preferredGeminiKeyIndex?: number;
+  /** Odd matrix slots: one fast Gemini attempt then Groq rescue on timeout. */
+  matrixPrimaryRescue?: boolean;
+  /** 3-tier cascade Tier 2: Gemini only — Groq runs in Tier 3 gatekeeper. */
+  skipGroqVeto?: boolean;
+  /** Set when `runCascadeAiAnalysis` already ran conviction ceiling. */
+  skipConvictionRecheck?: boolean;
+  llmDispatchConvictionFloor?: number;
+  botSettingsRow?: Record<string, unknown> | null;
 };
 
-async function tryGeminiFlow(
+export async function tryGeminiFlow(
   geminiSlots: GeminiKeySlot[],
   groqVetoKeys: string[],
   snapshot: IndicatorSnapshot,
@@ -518,9 +749,22 @@ async function tryGeminiFlow(
   signal?: AbortSignal,
   llmDb?: LlmGeminiFlowDbCtx,
   flowOpts?: LlmFlowPreemptiveOpts,
-) {
+): Promise<TryGeminiFlowResult> {
   const geminiKeys = geminiSlots.map((s) => s.value);
-  if (geminiKeys.length === 0) return null;
+  if (geminiKeys.length === 0) return { ai: null };
+  if (!flowOpts?.skipConvictionRecheck) {
+    const block = assertLlmDispatchConvictionCeiling({
+      symbol,
+      snapshot,
+      botSettingsRow: flowOpts?.botSettingsRow ?? null,
+      tradeRegime: resolveTradeRegime(symbol, Number(snapshot.latestPrice), Number(snapshot.atr14)),
+      cycleMinAiConfidence: flowOpts?.llmDispatchConvictionFloor,
+    });
+    if (block) {
+      if (block.log) console.log(block.log);
+      return { ai: null };
+    }
+  }
   const quota = await getAiQuotaState();
   const usePreemptive = Boolean(
     flowOpts?.usePreemptiveKeyRouting &&
@@ -540,11 +784,15 @@ async function tryGeminiFlow(
     : buildQuotaRotationOrder(baseIndex, nKeys);
   if (!skipInMemoryCooldowns && !hasAnyAvailableGeminiKey(geminiKeys, mergedCooldowns)) {
     console.warn(`[AI DEBUG] All Gemini keys benched in DB for ${symbol} — skip live Gemini fetch`);
-    return null;
+    return { ai: null };
   }
-  const maxGeminiFetches = GLOBAL_BOT_CONFIG.GEMINI_MAX_KEY_ATTEMPTS_PER_CALL;
+  const matrixPrimaryRescue = Boolean(flowOpts?.matrixPrimaryRescue);
+  const maxGeminiFetches = matrixPrimaryRescue
+    ? 1
+    : GLOBAL_BOT_CONFIG.GEMINI_MAX_KEY_ATTEMPTS_PER_CALL;
   let geminiFetchAttempts = 0;
   const preferredGeminiIdx = flowOpts?.preferredGeminiKeyIndex;
+  const rotBudget = createSymbolRotationBudget(symbol, "gemini_scan");
   for (const keyIndex of rotationOrder) {
     const key = geminiKeys[keyIndex];
     const slot = geminiSlots[keyIndex];
@@ -561,120 +809,183 @@ async function tryGeminiFlow(
       );
       break;
     }
-    geminiFetchAttempts += 1;
+    if (!canStartRotationHttpAttempt(rotBudget)) {
+      console.warn(
+        `[CIRCUIT BREAKER] Gemini ${symbol} — local rotation budget exhausted, stop lane`,
+      );
+      break;
+    }
+    const keyId = geminiPoolKeyId(keyIndex);
     try {
-      const gemOpts = llmDb?.geminiDbHardTimeoutMs != null
-        ? { dbHardTimeoutMs: llmDb.geminiDbHardTimeoutMs }
-        : undefined;
-      const fresh = await geminiAnalyze(key, payload, signal, symbol, gemOpts);
-      const reviewed = fresh.action === "BUY"
-        ? await applyGroqBuyVeto({
-          groqKeys: groqVetoKeys,
-          snapshot,
-          ai: fresh,
-          symbol,
-          currentGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0),
-          logGroqKeySuccess: (index) => logGroqKeySuccess(index, groqVetoKeys.length),
-          logGroqKeyLimit: (index) => logGroqKeyLimit(index, groqVetoKeys.length),
-          logGroqVeto,
-          signal,
-          groqKeyCooldownsHint: skipInMemoryCooldowns ? {} : (quota?.groq_key_cooldowns ?? {}),
-          groqDbKeyIds: llmDb?.groqVetoDbIds,
-          groqDbHardTimeoutMs: llmDb?.groqVetoDbHardTimeoutMs,
-          preferredGroqKeyIndex: flowOpts?.preferredGroqVetoKeyIndex,
-          usePreemptiveKeyRouting: usePreemptive,
-          skipInMemoryCooldownHint: skipInMemoryCooldowns,
-        })
-        : { ai: fresh, nextGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0) };
+      const reviewed = await withLlmKeyCheckout(
+        {
+          provider: "gemini",
+          preferredKeyId: keyId,
+          dbRowId: slot.llmDbKeyId,
+          rowErrorCount: slot.llmDbErrorCount,
+          slotMeta: geminiSlotToLlmMeta(slot),
+          providerLabel: `Gemini ${geminiSlotLabel(slot, keyIndex, nKeys)}`,
+        },
+        async (handle) => {
+          geminiFetchAttempts += 1;
+          const matrixPrimaryMs = matrixPrimaryRescue
+            ? readGeminiPrimaryMatrixTimeoutMs()
+            : undefined;
+          const gemOpts = matrixPrimaryMs != null || llmDb?.geminiDbHardTimeoutMs != null
+            ? {
+              dbHardTimeoutMs: matrixPrimaryMs != null
+                ? Math.min(matrixPrimaryMs, llmDb?.geminiDbHardTimeoutMs ?? matrixPrimaryMs)
+                : llmDb!.geminiDbHardTimeoutMs,
+              primaryMatrixTimeoutMs: matrixPrimaryMs,
+            }
+            : undefined;
+          const geminiOpts = flowOpts?.skipGroqVeto
+            ? {
+              ...gemOpts,
+              systemInstruction: GEMINI_CASCADE_SCANNER_SYSTEM,
+              normalizeResponse: normalizeCascadeGeminiResponse,
+              cacheProfile: "cascade" as const,
+              userTextPrefix: "D:",
+            }
+            : gemOpts;
+          const fresh = await geminiAnalyze(handle.secret, payload, signal, symbol, geminiOpts);
+          return fresh.action === "BUY" && !flowOpts?.skipGroqVeto
+            ? await applyGroqBuyVeto({
+              groqKeys: groqVetoKeys,
+              snapshot,
+              ai: fresh,
+              symbol,
+              currentGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0),
+              logGroqKeySuccess: (index) => logGroqKeySuccess(index, groqVetoKeys.length),
+              logGroqKeyLimit: (index) => logGroqKeyLimit(index, groqVetoKeys.length),
+              logGroqVeto,
+              signal,
+              groqKeyCooldownsHint: skipInMemoryCooldowns ? {} : (quota?.groq_key_cooldowns ?? {}),
+              groqDbKeyIds: llmDb?.groqVetoDbIds,
+              groqDbKeyErrorCounts: llmDb?.groqVetoDbErrorCounts,
+              groqDbKeyStatuses: llmDb?.groqVetoDbStatuses,
+              groqDbKeyCooldownUntils: llmDb?.groqVetoDbCooldownUntils,
+              groqDbHardTimeoutMs: llmDb?.groqVetoDbHardTimeoutMs,
+              preferredGroqKeyIndex: flowOpts?.preferredGroqVetoKeyIndex,
+              usePreemptiveKeyRouting: usePreemptive,
+              skipInMemoryCooldownHint: skipInMemoryCooldowns,
+            })
+            : { ai: fresh, nextGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0) };
+        },
+      );
+      if (!reviewed) continue;
       const quotaPatch: Record<string, unknown> = { current_gemini_key_index: keyIndex };
       if (!usePreemptive) quotaPatch.current_groq_key_index = reviewed.nextGroqKeyIndex;
       await patchAiQuotaState(quotaPatch);
       await logGeminiKeySuccess(keyIndex, geminiKeys.length);
       if (slot.llmDbKeyId) await touchLlmApiKeyUsed(slot.llmDbKeyId);
       await saveAiCache(symbol, reviewed.ai);
-      return withAiTrace(reviewed.ai, {
-        provider: "gemini",
-        providerPath: `gemini_key_${keyIndex + 1}_success`,
-        cacheStatus: "miss",
-      });
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (slot.llmDbKeyId && (isLlmHttpError(error) || isSoftQuotaOrRateLimit(msg) || isAbortOrTimeoutError(error))) {
-        await recordLlmApiKeyHttpFailure(slot.llmDbKeyId, error, {
+      return {
+        ai: withAiTrace(reviewed.ai, {
           provider: "gemini",
+          providerPath: `gemini_key_${keyIndex + 1}_success`,
+          cacheStatus: "miss",
+        }),
+      };
+    } catch (error) {
+      const { action, outcome: releaseOutcome } = await applyRotationCircuitAfterHttpFailure({
+        budget: rotBudget,
+        keyId,
+        dbRowId: slot.llmDbKeyId,
+        rowErrorCount: slot.llmDbErrorCount,
+        error,
+        context: { provider: "gemini", keyIndex, symbol },
+      });
+      if (action === "stop_miss") {
+        return { ai: null };
+      }
+      const msg = error instanceof Error ? error.message : String(error);
+      if (releaseOutcome === "rate_limit" && isLlmRateLimitHttpFailure(error)) {
+        await logGeminiKeyLimit(keyIndex, geminiKeys.length);
+        mergedCooldowns = {
+          ...mergedCooldowns,
+          [key]: Date.now() + GEMINI_QUOTA_COOLDOWN_MS,
+        };
+        await patchAiQuotaState({
+          gemini_key_cooldowns: mergedCooldowns,
+          current_gemini_key_index: keyIndex,
+        });
+        console.warn(
+          `[AI DEBUG] Gemini ${geminiSlotLabel(slot, keyIndex, nKeys)} live 429 — cooldown (${msg.slice(0, 120)})`,
+        );
+        const laneKeysLeft = countLanePoolKeysEligible(
+          rotationOrder,
+          (i) => geminiPoolKeyId(i),
+          (i) => {
+            const assigned = usePreemptive && i === preferredGeminiIdx;
+            return !isGeminiKeyAvailable(geminiKeys[i], mergedCooldowns) && !assigned;
+          },
           keyIndex,
-          symbol,
-        });
-      }
-      if (isPermanentCredentialOrSuspension(msg)) {
-        const benchMs = readGeminiAuthKeyCooldownMs();
-        await logGeminiKeyLimit(keyIndex, geminiKeys.length);
-        mergedCooldowns = {
-          ...mergedCooldowns,
-          [key]: Date.now() + benchMs,
-        };
-        await patchAiQuotaState({
-          gemini_key_cooldowns: mergedCooldowns,
-          current_gemini_key_index: keyIndex,
-        });
-        console.warn(
-          `[AI DEBUG] Gemini ${geminiSlotLabel(slot, keyIndex, nKeys)} terminal auth — benched ${Math.round(benchMs / 3600000)}h, try next key (${msg.slice(0, 120)})`,
         );
-        continue;
-      }
-      const backoffMs = resolveLlmKeyFailureCooldownMs(msg);
-      if (backoffMs != null) {
-        await logGeminiKeyLimit(keyIndex, geminiKeys.length);
-        mergedCooldowns = {
-          ...mergedCooldowns,
-          [key]: Date.now() + backoffMs,
-        };
-        await patchAiQuotaState({
-          gemini_key_cooldowns: mergedCooldowns,
-          current_gemini_key_index: keyIndex,
-        });
-        console.warn(
-          `[AI DEBUG] Gemini ${geminiSlotLabel(slot, keyIndex, nKeys)} moved to cooldown (${msg.slice(0, 120)})`,
-        );
-        if (isSoftQuotaOrRateLimit(msg)) {
+        if (laneKeysLeft <= 0) {
           console.warn(
-            `[AI DEBUG] Gemini quota circuit for ${symbol} — stop key rotation this invocation`,
+            `[AI DEBUG] Gemini lane ${symbol} — no alternate keys after 429 (key pool)`,
           );
           break;
         }
+        console.warn(
+          `[AI DEBUG] Gemini 429 on ${geminiSlotLabel(slot, keyIndex, nKeys)} — lane ${symbol} tries next (${laneKeysLeft} left)`,
+        );
         continue;
       }
       if (isAbortOrTimeoutError(error)) {
+        if (matrixPrimaryRescue) {
+          console.warn(
+            `[AI MATRIX] ${symbol} Gemini primary timeout — cascading immediately to Groq fallback rescue.`,
+          );
+          return { ai: null, primaryTimedOut: true };
+        }
         console.warn(
           `[AI DEBUG] Gemini timeout/abort ${geminiSlotLabel(slot, keyIndex, nKeys)} for ${symbol} — trying next key`,
         );
         continue;
       }
+      if (matrixPrimaryRescue) {
+        console.warn(
+          `[AI DEBUG] Gemini primary miss for ${symbol} (${msg.slice(0, 120)}) — Groq rescue`,
+        );
+        return { ai: null };
+      }
       console.error("Gemini Failure:", msg);
       break;
     }
   }
-  const staleCached = await getRecentAiCache(symbol, AI_STALE_CACHE_FALLBACK_MS);
-  if (staleCached) {
-    const ageSeconds = Math.max(0, Math.round(staleCached.ageMs / 1000));
-    await logAiCacheHit(symbol, staleCached.ageMs);
-    const analysis = applyStaleSignalBuyVeto(snapshot, staleCached.analysis);
-    return withAiTrace(analysis, {
-      provider: "cache",
-      providerPath: `cache_stale_fallback_${ageSeconds}s`,
-      cacheStatus: "bypassed",
-      cacheAgeMs: staleCached.ageMs,
-    });
+  if (!matrixPrimaryRescue) {
+    const staleCached = await getRecentAiCache(symbol, AI_STALE_CACHE_FALLBACK_MS);
+    if (staleCached) {
+      const ageSeconds = Math.max(0, Math.round(staleCached.ageMs / 1000));
+      await logAiCacheHit(symbol, staleCached.ageMs);
+      const analysis = applyStaleSignalBuyVeto(snapshot, staleCached.analysis);
+      return {
+        ai: withAiTrace(analysis, {
+          provider: "cache",
+          providerPath: `cache_stale_fallback_${ageSeconds}s`,
+          cacheStatus: "bypassed",
+          cacheAgeMs: staleCached.ageMs,
+        }),
+      };
+    }
   }
-  return null;
+  return { ai: null };
 }
 
 type GroqFlowResult = { ai: AiAnalysis | null; groqQuotaExhausted: boolean };
 
 type LlmGroqFlowDbCtx = {
   scanRowIds?: (string | undefined)[];
+  scanDbErrorCounts?: (number | undefined)[];
+  scanDbStatuses?: import("./llm-api-keys-types.ts").LlmApiKeyRow["status"][];
+  scanDbCooldownUntils?: (string | null | undefined)[];
   scanHardTimeoutMs?: number;
   vetoRowIds?: (string | undefined)[];
+  vetoDbErrorCounts?: (number | undefined)[];
+  vetoDbStatuses?: import("./llm-api-keys-types.ts").LlmApiKeyRow["status"][];
+  vetoDbCooldownUntils?: (string | null | undefined)[];
   vetoHardTimeoutMs?: number;
 };
 
@@ -712,36 +1023,67 @@ async function tryGroqFlow(
     ? buildPreemptiveRotationOrder(flowOpts!.preferredGroqScanKeyIndex!, nScan)
     : buildQuotaRotationOrder(scanBase, nScan);
   const preferredScanIdx = flowOpts?.preferredGroqScanKeyIndex;
+  const rotBudget = createSymbolRotationBudget(symbol, "groq_scan");
   for (const keyIndex of rotationOrder) {
     const key = groqScanKeys[keyIndex];
     const isAssignedPreemptiveKey = usePreemptive && keyIndex === preferredScanIdx;
     if (Number(mergedCooldowns[key] ?? 0) > Date.now() && !isAssignedPreemptiveKey) continue;
+    if (!canStartRotationHttpAttempt(rotBudget)) {
+      console.warn(
+        `[CIRCUIT BREAKER] Groq scan ${symbol} — local rotation budget exhausted, stop lane`,
+      );
+      break;
+    }
+    const scanRow = llmDb?.scanRowIds?.[keyIndex];
+    const scanMeta = groqIndexToLlmMeta(
+      keyIndex,
+      llmDb?.scanRowIds,
+      llmDb?.scanDbErrorCounts,
+      llmDb?.scanDbStatuses,
+      llmDb?.scanDbCooldownUntils,
+    );
+    const scanKeyId = groqScanPoolKeyId(keyIndex);
     try {
-      const gopts = llmDb?.scanHardTimeoutMs != null
-        ? { dbHardTimeoutMs: llmDb.scanHardTimeoutMs }
-        : undefined;
-      const groqResult = await groqAnalyze(key, payload, signal, symbol, gopts);
-      const reviewed = groqResult.action === "BUY"
-        ? await applyGroqBuyVeto({
-          groqKeys: groqVetoKeys,
-          snapshot,
-          ai: groqResult,
-          symbol,
-          currentGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0),
-          logGroqKeySuccess: (index) => logGroqKeySuccess(index, groqVetoKeys.length),
-          logGroqKeyLimit: (index) => logGroqKeyLimit(index, groqVetoKeys.length),
-          logGroqVeto,
-          signal,
-          groqKeyCooldownsHint: skipInMemoryCooldowns ? {} : mergedCooldowns,
-          groqDbKeyIds: llmDb?.vetoRowIds,
-          groqDbHardTimeoutMs: llmDb?.vetoHardTimeoutMs,
-          preferredGroqKeyIndex: flowOpts?.preferredGroqVetoKeyIndex,
-          usePreemptiveKeyRouting: usePreemptive,
-          skipInMemoryCooldownHint: skipInMemoryCooldowns,
-        })
-        : { ai: groqResult, nextGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0) };
+      const reviewed = await withLlmKeyCheckout(
+        {
+          provider: "groq",
+          preferredKeyId: scanKeyId,
+          dbRowId: scanRow,
+          rowErrorCount: scanMeta.errorCount,
+          slotMeta: scanMeta,
+          providerLabel: `Groq scan key #${keyIndex + 1} symbol=${symbol}`,
+        },
+        async (handle) => {
+          const gopts = llmDb?.scanHardTimeoutMs != null
+            ? { dbHardTimeoutMs: llmDb.scanHardTimeoutMs }
+            : undefined;
+          const groqResult = await groqAnalyze(handle.secret, payload, signal, symbol, gopts);
+          return groqResult.action === "BUY"
+            ? await applyGroqBuyVeto({
+              groqKeys: groqVetoKeys,
+              snapshot,
+              ai: groqResult,
+              symbol,
+              currentGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0),
+              logGroqKeySuccess: (index) => logGroqKeySuccess(index, groqVetoKeys.length),
+              logGroqKeyLimit: (index) => logGroqKeyLimit(index, groqVetoKeys.length),
+              logGroqVeto,
+              signal,
+              groqKeyCooldownsHint: skipInMemoryCooldowns ? {} : mergedCooldowns,
+              groqDbKeyIds: llmDb?.vetoRowIds,
+              groqDbKeyErrorCounts: llmDb?.vetoDbErrorCounts,
+              groqDbKeyStatuses: llmDb?.vetoDbStatuses,
+              groqDbKeyCooldownUntils: llmDb?.vetoDbCooldownUntils,
+              groqDbHardTimeoutMs: llmDb?.vetoHardTimeoutMs,
+              preferredGroqKeyIndex: flowOpts?.preferredGroqVetoKeyIndex,
+              usePreemptiveKeyRouting: usePreemptive,
+              skipInMemoryCooldownHint: skipInMemoryCooldowns,
+            })
+            : { ai: groqResult, nextGroqKeyIndex: Number(quota?.current_groq_key_index ?? 0) };
+        },
+      );
+      if (!reviewed) continue;
       await logGroqKeySuccess(keyIndex, groqScanKeys.length);
-      const scanRow = llmDb?.scanRowIds?.[keyIndex];
       if (scanRow) await touchLlmApiKeyUsed(scanRow);
       const quotaPatch: Record<string, unknown> = { current_groq_scan_key_index: keyIndex };
       if (!usePreemptive) quotaPatch.current_groq_key_index = reviewed.nextGroqKeyIndex;
@@ -756,16 +1098,19 @@ async function tryGroqFlow(
         groqQuotaExhausted: false,
       };
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      const scanRow = llmDb?.scanRowIds?.[keyIndex];
-      if (scanRow && (isLlmHttpError(error) || isSoftQuotaOrRateLimit(msg) || isAbortOrTimeoutError(error))) {
-        await recordLlmApiKeyHttpFailure(scanRow, error, {
-          provider: "groq",
-          keyIndex,
-          symbol,
-        });
+      const { action, outcome: releaseOutcome } = await applyRotationCircuitAfterHttpFailure({
+        budget: rotBudget,
+        keyId: scanKeyId,
+        dbRowId: scanRow,
+        rowErrorCount: scanMeta.errorCount,
+        error,
+        context: { provider: "groq", keyIndex, symbol },
+      });
+      if (action === "stop_miss") {
+        return { ai: null, groqQuotaExhausted: true };
       }
-      if (isSoftQuotaOrRateLimit(msg)) groqQuotaExhausted = true;
+      const msg = error instanceof Error ? error.message : String(error);
+      if (releaseOutcome === "rate_limit" || isSoftQuotaOrRateLimit(msg)) groqQuotaExhausted = true;
       const backoffMs = resolveGroqKeyFailureCooldownMs(msg);
       if (backoffMs != null) {
         await logGroqKeyLimit(keyIndex, groqScanKeys.length);
@@ -781,10 +1126,25 @@ async function tryGroqFlow(
           `[AI DEBUG] Groq key #${keyIndex + 1} moved to cooldown (${msg.slice(0, 120)})`,
         );
         if (isSoftQuotaOrRateLimit(msg)) {
-          console.warn(
-            `[AI DEBUG] Groq scan quota circuit for ${symbol} — stop key rotation this invocation`,
+          const laneKeysLeft = countLanePoolKeysEligible(
+            rotationOrder,
+            (i) => groqScanPoolKeyId(i),
+            (i) => {
+              const assigned = usePreemptive && i === preferredScanIdx;
+              return Number(mergedCooldowns[groqScanKeys[i] ?? ""] ?? 0) > Date.now() && !assigned;
+            },
+            keyIndex,
           );
-          break;
+          if (laneKeysLeft <= 0) {
+            console.warn(
+              `[AI DEBUG] Groq scan lane ${symbol} — no alternate keys after 429 (key pool)`,
+            );
+            break;
+          }
+          console.warn(
+            `[AI DEBUG] Groq 429 on key #${keyIndex + 1} — lane ${symbol} tries next (${laneKeysLeft} left)`,
+          );
+          continue;
         }
         continue;
       }

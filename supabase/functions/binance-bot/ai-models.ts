@@ -6,6 +6,7 @@ import {
   readGroqScanMinimalSystemEnabled,
 } from "./ai-groq-scan-prompt.ts";
 import { enforceGroqRequestSpacing } from "./groq-request-spacing.ts";
+import { pooledFetch } from "./pooled-http-client.ts";
 import { LlmHttpError } from "./llm-http-error.ts";
 import { normalizeAiResponse } from "./ai-normalize-model-response.ts";
 export { normalizeAiResponse };
@@ -14,28 +15,19 @@ import {
   emitGroqTelemetry,
 } from "./ai-llm-telemetry.ts";
 
-export const AI_SYSTEM_REST_API = [
-  "IMPORTANT: You are a REST API.",
-  "You must return ONLY a raw JSON object — the response body is exactly one JSON object, nothing before or after it.",
-  "Do NOT output a final confidence field; the server computes a weighted score from your sub-scores.",
-  "Required keys:",
-  '  "trend_score" (0-100): 1h vs short-term alignment. "momentum_score" (0-100): RSI/MACD quality vs history.',
-  '  "volume_score" (0-100): surge vs baseline. "order_book_score" (0-100): imbalance_ratio vs tape.',
-  '  "trend_alignment": <boolean> — short-term agrees with higher timeframe trend.',
-  '  "action": "BUY" | "SELL" | "HOLD"',
-  '  "pro_tip": string — EXACTLY one 15-word actionable tip for the UI explaining entry risk (e.g. "Entry safe, but 1h RSI is approaching overbought—tighten Stop Loss"). No extra sentences.',
-  "Do not include markdown, code fences, URLs, or text outside the JSON.",
-  "Use DATA OHLCV tuples + marketRegime/adx14; RANGING still allows volume thrust vs avgVolume1m; imbalance_ratio>2.5 can lift order_book_score.",
-  "Meme symbols: liquidity-aware volume_score/pro_tip. Momentum: spikes/micro-bounces; WEAK_BULLISH in pro_tip if edge 60–72%. sandbox_mode may +20 conf if recovering tape.",
-  "Respect trend_htf.mtf_effective_ok (false → HOLD on MTF conflict). Use candles1h/candles4h tuples for HTF direction.",
-].join(" ");
+export {
+  AI_SYSTEM_REST_API,
+  GEMINI_SCAN_SYSTEM_MINIFIED,
+  buildGeminiScanSystemForCache,
+} from "./gemini-prompt-config.ts";
+import { buildGeminiScanSystemForCache } from "./gemini-prompt-config.ts";
+import { extractGeminiText, geminiGenerateContent } from "./gemini-http.ts";
+import { stringifyGeminiUserData } from "./gemini-user-payload.ts";
 
+/** Groq/OpenAI user prefix (Gemini uses `stringifyGeminiUserData` → `D:{...}`). */
 export const AI_USER_DATA_PREFIX =
   "Analyze the following DATA and respond with the JSON object only:\n";
 
-const GEMINI_MODEL = "gemini-2.5-flash-lite";
-const GEMINI_BASE_URL =
-  "https://generativelanguage.googleapis.com/v1beta/models/";
 const RATE_LIMIT_RETRY_MS = 2000;
 
 /** Merge cycle `AbortSignal` with a hard cap so hung LLM HTTP never blocks the bot for minutes. */
@@ -53,6 +45,25 @@ export function envLlmTimeoutMs(envKey: string, defaultMs: number): number {
   const n = Number(Deno.env.get(envKey) ?? "");
   if (!Number.isFinite(n) || n < 2000) return defaultMs;
   return Math.min(n, 120_000);
+}
+
+/** Matrix-primary Gemini scan ceiling (`GEMINI_PRIMARY_MATRIX_TIMEOUT_MS`, default 6s). */
+export function readGeminiPrimaryMatrixTimeoutMs(): number {
+  const n = Number(Deno.env.get("GEMINI_PRIMARY_MATRIX_TIMEOUT_MS") ?? "6000");
+  if (!Number.isFinite(n) || n < 3000) return 6000;
+  return Math.min(10_000, Math.floor(n));
+}
+
+export function resolveGeminiRequestCapMs(
+  opts?: LlmPerKeyTimeoutOpts & { primaryMatrixTimeoutMs?: number },
+): number {
+  const envCap = envLlmTimeoutMs("GEMINI_REQUEST_TIMEOUT_MS", 12_000);
+  let capMs = envCap;
+  if (opts?.dbHardTimeoutMs != null) capMs = Math.min(capMs, opts.dbHardTimeoutMs);
+  if (opts?.primaryMatrixTimeoutMs != null) {
+    capMs = Math.min(capMs, opts.primaryMatrixTimeoutMs);
+  }
+  return capMs;
 }
 
 function redactGeminiErrorText(text: string): string {
@@ -75,7 +86,18 @@ function resolveTelemetrySymbol(data: unknown, explicit?: string): string {
   return "UNKNOWN";
 }
 
-export type LlmPerKeyTimeoutOpts = { dbHardTimeoutMs?: number };
+export type LlmPerKeyTimeoutOpts = {
+  dbHardTimeoutMs?: number;
+  /** Provider-matrix primary scan — hard cap before Groq rescue (see `readGeminiPrimaryMatrixTimeoutMs`). */
+  primaryMatrixTimeoutMs?: number;
+  /** Override system prompt (3-tier cascade scanner). */
+  systemInstruction?: string;
+  /** Override response normalizer (cascade JSON schema). */
+  normalizeResponse?: (text: string) => AiAnalysis;
+  userTextPrefix?: string;
+  /** Explicit context cache profile (`scan` default, `cascade` for tier-2). */
+  cacheProfile?: import("./gemini-context-cache.ts").GeminiCacheProfile;
+};
 
 export async function geminiAnalyze(
   geminiKey: string,
@@ -84,12 +106,21 @@ export async function geminiAnalyze(
   telemetrySymbol?: string,
   opts?: LlmPerKeyTimeoutOpts,
 ): Promise<AiAnalysis> {
-  const url = `${GEMINI_BASE_URL}${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(geminiKey)}`;
-  const userText = `${AI_USER_DATA_PREFIX}${JSON.stringify(data)}`;
-  const envCap = envLlmTimeoutMs("GEMINI_REQUEST_TIMEOUT_MS", 12_000);
-  const capMs = opts?.dbHardTimeoutMs != null ? Math.min(envCap, opts.dbHardTimeoutMs) : envCap;
+  const userText = opts?.userTextPrefix
+    ? `${opts.userTextPrefix}${JSON.stringify(data)}`
+    : stringifyGeminiUserData(data);
+  const capMs = resolveGeminiRequestCapMs(opts);
   const reqSignal = mergeLlmAbortSignal(signal, capMs);
-  const response = await fetchGemini(url, userText, reqSignal);
+  const system = opts?.systemInstruction ?? buildGeminiScanSystemForCache();
+  const normalize = opts?.normalizeResponse ?? normalizeAiResponse;
+  const cacheProfile = opts?.cacheProfile ?? "scan";
+  const response = await geminiGenerateContent({
+    apiKey: geminiKey,
+    userText,
+    systemInstruction: system,
+    cacheProfile,
+    signal: reqSignal,
+  });
   if (!response.ok) {
     const text = await response.text();
     const safe = redactGeminiErrorText(text);
@@ -97,42 +128,9 @@ export async function geminiAnalyze(
     throw new LlmHttpError(`Gemini status ${response.status}: ${safe}`, response.status, safe);
   }
   const json = await response.json();
-  const text = (json?.candidates ?? [])
-    .flatMap((candidate: any) => candidate?.content?.parts ?? [])
-    .map((part: any) => part?.text ?? "")
-    .join("");
+  const text = extractGeminiText(json);
   emitGeminiTelemetry(resolveTelemetrySymbol(data, telemetrySymbol), "gemini", json);
-  return normalizeAiResponse(text);
-}
-
-async function fetchGemini(
-  url: string,
-  userText: string,
-  signal?: AbortSignal,
-) {
-  const response = await fetch(url, {
-    signal,
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: userText }] }],
-      systemInstruction: { parts: [{ text: AI_SYSTEM_REST_API }] },
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 512,
-        responseMimeType: "application/json",
-      },
-    }),
-  });
-  if (response.status === 429) {
-    const t = await response.text().catch(() => "");
-    throw new LlmHttpError(
-      "QUOTA_EXHAUSTED: Gemini returned 429 (immediate fallback enabled)",
-      429,
-      t,
-    );
-  }
-  return response;
+  return normalize(text);
 }
 
 export async function openAiAnalyze(
@@ -238,11 +236,11 @@ async function fetchWithOne429Retry(
   init: RequestInit,
   signal?: AbortSignal,
 ): Promise<Response> {
-  let res = await fetch(url, { ...init, signal });
+  let res = await pooledFetch(url, { ...init, signal });
   if (res.status === 429) {
     await delay(RATE_LIMIT_RETRY_MS);
     if (signal?.aborted) throw new Error("CYCLE_ABORTED:openai");
-    res = await fetch(url, { ...init, signal });
+    res = await pooledFetch(url, { ...init, signal });
   }
   return res;
 }
@@ -255,12 +253,12 @@ export async function fetchWithExponentialBackoff(
 ): Promise<Response> {
   if (signal?.aborted) throw new Error("CYCLE_ABORTED:llm");
   let attempt = 0;
-  let response = await fetch(url, { ...init, signal });
+  let response = await pooledFetch(url, { ...init, signal });
   while (attempt < retries && response.status === 429) {
     const waitMs = 2 ** attempt * 1000 + Math.floor(Math.random() * 500);
     await delay(waitMs);
     if (signal?.aborted) throw new Error("CYCLE_ABORTED:llm");
-    response = await fetch(url, { ...init, signal });
+    response = await pooledFetch(url, { ...init, signal });
     attempt += 1;
   }
   return response;

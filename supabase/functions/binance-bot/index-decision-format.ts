@@ -58,6 +58,21 @@ export function formatCycleReason(
   if (reason === "oversold_dip_buy_confidence_override") {
     return `Dip-buy override: RSI < ${strategyBuyRsiThreshold}, technical score > 8, confidence >= ${minAiConfidence}`;
   }
+  if (reason === "oversold_bounce_confirmed_buy") {
+    return "Oversold bounce: strategy entry confirmed (AI BUY aligned)";
+  }
+  if (
+    typeof reason === "string" &&
+    reason.startsWith("oversold_bounce_confirmed_buy|bounce_override_ai_soft_sell")
+  ) {
+    return `Oversold bounce: rubber-band entry despite AI SELL (confidence ${ai.ai_confidence}% < soft cap; Groq not REJECT)`;
+  }
+  if (
+    typeof reason === "string" &&
+    reason.startsWith("oversold_bounce_confirmed_buy|bounce_override_ai_soft_hold")
+  ) {
+    return `Oversold bounce: rubber-band entry despite AI HOLD (confidence ${ai.ai_confidence}% < soft cap; Groq not REJECT)`;
+  }
   if (reason === "tie_breaker_quality_buy" || reason === "tie_breaker_tech8_ai40") {
     return `Tie-break BUY: technical score >= 7 and AI confidence near floor (${minAiConfidence})`;
   }

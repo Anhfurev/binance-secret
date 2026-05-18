@@ -6,6 +6,7 @@ import type { createClient } from "npm:@supabase/supabase-js@2";
 import { decideHybridMatrix } from "./index-decision.ts";
 import type { AiAnalysis, IndicatorSnapshot, SignalDecision } from "./types.ts";
 import { allowsEma200HybridBypass } from "./strategy-hybrid-gates.ts";
+import { isOversoldBounceStrategyReason } from "./strategy-oversold-bounce.ts";
 import type { RegimeGatePolicy } from "./dynamic-regime-switcher.ts";
 import {
   passesRegimeEma200Gate,
@@ -96,6 +97,7 @@ export function collectPreflightVetoChecks(input: PreflightGateInput): {
     aiConfidence,
     gatePolicy,
   });
+  const oversoldBounceEntry = isOversoldBounceStrategyReason(strategyReason);
   const regimeEmaOk = gatePolicy
     ? passesRegimeEma200Gate({
       policy: gatePolicy,
@@ -105,7 +107,11 @@ export function collectPreflightVetoChecks(input: PreflightGateInput): {
       hybridMomentumBypass: hybridEma200,
     })
     : false;
-  const ema200_ok = ema200RecoveryOk || scalpTapeBypass || hybridEma200 || regimeEmaOk;
+  const ema200_ok = oversoldBounceEntry ||
+    ema200RecoveryOk ||
+    scalpTapeBypass ||
+    hybridEma200 ||
+    regimeEmaOk;
   const rsiBounds = gatePolicy
     ? passesRegimePreflightRsi({
       policy: gatePolicy,

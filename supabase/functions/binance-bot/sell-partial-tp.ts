@@ -5,6 +5,7 @@ import { resolveSpotRoundTripTakerFeePct } from "./constants.ts";
 import { createOrder } from "./binance.ts";
 import { formatAmount, normalizePriceForSymbol } from "./exchange-client.ts";
 import { resolveExchangeSkipped, resolveGhostMode, resolveTestMode } from "./bot-shared.ts";
+import { isPaperTradingEnvForced } from "./paper-trade-interceptor.ts";
 import { resolveSellFillFinancials } from "./sell-financials.ts";
 import { handlePartialSellAndKeepOpen } from "./sell-partial.ts";
 import { loadOpenTrade } from "./trade-store.ts";
@@ -148,7 +149,7 @@ export async function tryPartialTakeProfitIfDue(params: {
     amount: sellBase,
     referencePrice: currentPrice,
     marketRegime,
-    isTestMode: ghostMode ? true : exchangeSkipped,
+    isTestMode: ghostMode ? true : (exchangeSkipped || isPaperTradingEnvForced()),
     signal,
     executionMode: "market",
   });
@@ -164,6 +165,7 @@ export async function tryPartialTakeProfitIfDue(params: {
     pnl,
     pnlPercent,
     nextBalance,
+    feeUsdSell,
   } = await resolveSellFillFinancials({
     supabase,
     userId,

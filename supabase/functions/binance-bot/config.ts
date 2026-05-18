@@ -73,7 +73,7 @@ export const GLOBAL_BOT_CONFIG = {
 
   get GEMINI_MAX_KEY_ATTEMPTS_PER_CALL(): number {
     if (IS_TEST_MODE) return 2;
-    return finiteEnvInt("GEMINI_MAX_KEY_ATTEMPTS_PER_CALL", 2, 1, 20);
+    return finiteEnvInt("GEMINI_MAX_KEY_ATTEMPTS_PER_CALL", 3, 1, 3);
   },
 
   get AI_BUY_CONVICTION_THRESHOLD(): number {

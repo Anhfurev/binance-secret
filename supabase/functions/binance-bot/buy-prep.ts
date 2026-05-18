@@ -8,9 +8,13 @@ import {
 } from "./constants.ts";
 import { clamp, toNumber, toStringValue } from "./utils.ts";
 import { resolveExchangeSkipped, resolveTestMode } from "./bot-shared.ts";
-import { resolvePaperWalletUsdt } from "./paper-balance.ts";
+import { resolvePaperSimulationLiquidityUsdt, resolvePaperWalletUsdt } from "./paper-balance.ts";
+import { isPaperTradingEnvForced } from "./paper-trade-interceptor.ts";
 import { botDebug, botWarn } from "./bot-debug.ts";
-import { volatilityAdjustedDistanceDown, takeProfitDistanceUp } from "./buy-helpers.ts";
+import { volatilityAdjustedDistanceDown } from "./buy-helpers.ts";
+import { computeAtrExitLevels } from "./atr-exit-targets.ts";
+import { detectDynamicTradingRegime } from "./dynamic-regime-switcher.ts";
+import type { IndicatorSnapshot } from "./types.ts";
 import { resolveStopLossPctFraction, resolveTakeProfitPctPoints } from "./trade-stop-risk.ts";
 import { safeInsertLog } from "./buy-logging.ts";
 import {
@@ -52,6 +56,7 @@ export async function prepareBuyExecution(params: {
   marketRegime: MarketRegime;
   snapshotPrice: number;
   atr14: number;
+  adx14?: number;
   trailingStopPct: number;
   volBurstWidenMult?: number;
   volBurstMeta?: Record<string, unknown>;
@@ -63,11 +68,13 @@ export async function prepareBuyExecution(params: {
   ghostMode: boolean;
   /** Profile cash for paper/ghost; live callers pass exchange free USDT. */
   walletUsdt: number;
+  /** Verified CCXT free USDT — skips DB wallet check for oversold bounce dispatch. */
+  oversoldBounceExchangeFree?: number | null;
   /** Sideways grinder: tight TP override (% points, e.g. 1.0 = 1%). */
   takeProfitPctOverride?: number | null;
 }) {
   const {
-    supabase, row, userId, symbol, ai, marketRegime, snapshotPrice, atr14,
+    supabase, row, userId, symbol, ai, marketRegime, snapshotPrice, atr14, adx14 = 0,
     trailingStopPct, volBurstWidenMult = 1, volBurstMeta,
     effectiveConfidence, rawWeighted, bearish1hCap, mtf, ghostMode, walletUsdt,
     takeProfitPctOverride = null,
@@ -76,8 +83,8 @@ export async function prepareBuyExecution(params: {
   const isTestMode = resolveTestMode(row);
   const exchangeSkipped = resolveExchangeSkipped(row);
   const isLiveMode = !exchangeSkipped;
-  const usdtBalance = exchangeSkipped
-    ? resolvePaperWalletUsdt(walletUsdt)
+  const usdtBalance = exchangeSkipped || isPaperTradingEnvForced()
+    ? resolvePaperSimulationLiquidityUsdt(walletUsdt)
     : walletUsdt;
   const profileEquity = exchangeSkipped
     ? await loadProfileDemoBalance(supabase, userId)
@@ -131,22 +138,31 @@ export async function prepareBuyExecution(params: {
   const vbRaw = Number(volBurstWidenMult);
   const vb = Number.isFinite(vbRaw) && vbRaw >= 1 ? Math.min(vbRaw, VB_MAX) : 1;
   const atrTrailEffective = Number((ATR_STOP_TRAIL_MULTIPLIER * vb).toFixed(6));
-  const slDistance = Math.max(
-    volatilityAdjustedDistanceDown(
-      entryPriceFull,
-      atr14,
-      stopLossPctFraction,
-      atrTrailEffective,
-    ),
-    entryPriceFull * stopLossPctFraction,
-  );
-  const stopLossRaw = entryPriceFull - slDistance;
-  let stopLossPrice = Number(
-    Math.min(entryPriceFull * (1 - 1e-8), Math.max(stopLossRaw, entryPriceFull * 1e-8)).toFixed(8),
-  );
+  const dynRegime = detectDynamicTradingRegime({
+    symbol,
+    latestPrice: entryPriceFull,
+    marketRegime,
+    adx14: toNumber(adx14, 0),
+    atr14,
+  } as IndicatorSnapshot).regime;
+  const atrExit = computeAtrExitLevels(entryPriceFull, atr14, {
+    regime: dynRegime,
+    stopLossPctFraction,
+    takeProfitPctFraction: takeProfitPct / 100,
+  });
+  const slDistance = atrExit.slDistance;
+  let stopLossPrice = atrExit.stopLoss;
   if (!(stopLossPrice < entryPriceFull)) {
     stopLossPrice = Number((entryPriceFull * (1 - stopLossPctFraction)).toFixed(8));
   }
+  botDebug("buyFlow", "atr_exit_targets_prep", {
+    symbol,
+    basis: atrExit.basis,
+    slAtrMult: atrExit.slAtrMult,
+    tpAtrMult: atrExit.tpAtrMult,
+    rewardRiskRatio: atrExit.rewardRiskRatio,
+    atrPct: atrExit.atrPct,
+  });
   const sized = await calculateQuantityFromRiskToStop({
     symbol,
     totalEquity,
@@ -175,7 +191,10 @@ export async function prepareBuyExecution(params: {
     notional_after_symbol_floor_usd: Number(tradeUsd.toFixed(8)),
     notional_size_usd: Number(tradeUsd.toFixed(8)),
   };
-  if (usdtBalance < tradeUsd) {
+  const bounceExchangeFree = Number(params.oversoldBounceExchangeFree ?? NaN);
+  const bounceExchangeOk = Number.isFinite(bounceExchangeFree) &&
+    bounceExchangeFree >= tradeUsd - 1e-6;
+  if (!bounceExchangeOk && usdtBalance < tradeUsd) {
     const shortBy = Number((tradeUsd - usdtBalance).toFixed(2));
     return {
       skipDetail: isLiveMode
@@ -190,13 +209,8 @@ export async function prepareBuyExecution(params: {
       usdtBalance,
     };
   }
-  const tpDistance = takeProfitDistanceUp(
-    entryPriceFull,
-    atr14,
-    takeProfitPct / 100,
-    slDistance,
-  );
-  const takeProfitPrice = Number((entryPriceFull + tpDistance).toFixed(8));
+  const tpDistance = atrExit.tpDistance;
+  const takeProfitPrice = atrExit.takeProfit;
   const trailDistance = volatilityAdjustedDistanceDown(
     entryPriceFull,
     atr14,
@@ -271,6 +285,7 @@ export async function prepareBuyExecution(params: {
     vb,
     slDistance,
     takeProfitPrice,
+    atrExit,
     trailDistance,
     stopLossPrice,
     initialTrailingStopPrice,

@@ -1,6 +1,8 @@
 // @ts-nocheck
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { pooledFetch } from "./pooled-http-client.ts";
 import { SERVICE_ROLE_KEY, SUPABASE_URL } from "./constants.ts";
+import { SUPABASE_CLIENT_OPTIONS } from "./supabase-client-options.ts";
 import { formatTelegramCycleFooter } from "./bot-shared.ts";
 import { describeThrownValue } from "./utils.ts";
 import { postTelegramSendMessage } from "./telegram-post-message.ts";
@@ -55,9 +57,7 @@ async function logTelegramFailureToDb(params: {
 }) {
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) return;
   try {
-    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
+    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, SUPABASE_CLIENT_OPTIONS);
     await supabase.from("logs").insert([{
       level: "warn",
       source: "telegram",
@@ -195,7 +195,7 @@ export async function getLatestTelegramCommandUpdate(commands: string[]) {
 
   const url = `https://api.telegram.org/bot${token}/getUpdates?limit=10&timeout=0`;
   try {
-    const response = await fetch(url, { method: "GET" });
+    const response = await pooledFetch(url, { method: "GET" });
     if (!response.ok) return null;
     const payload = await response.json() as {
       ok?: boolean;

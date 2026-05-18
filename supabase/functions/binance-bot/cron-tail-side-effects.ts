@@ -10,7 +10,7 @@ import {
   resolveAnyLiveAutopilot,
 } from "./cron-runner-telemetry.ts";
 import { maybeRunScheduledDebugger } from "./debugger-auto-run.ts";
-import { safeExecuteBackground } from "./safe-execute.ts";
+import { fireAndForgetSideEffect } from "./edge-runtime.ts";
 import { maybeHandleTelegramWalletStatusCommand } from "./telegram-wallet-status.ts";
 import {
   readSuperDetailedTraceTelegramEnabled,
@@ -38,50 +38,39 @@ export function detachCronTailSideEffects(params: {
     functionHealth,
   } = params;
 
-  safeExecuteBackground(
-    "emit_latency_telemetry",
-    async () => {
-      emitLatencyTelemetry({ batchId, totalExecutionMs });
-    },
-    undefined,
-  );
-  safeExecuteBackground(
-    "flush_cycle_logs",
-    () => flushCycleLogs(supabase),
-    undefined,
-  );
-  safeExecuteBackground(
+  emitLatencyTelemetry({ batchId, totalExecutionMs });
+
+  fireAndForgetSideEffect("flush_cycle_logs", () => flushCycleLogs(supabase));
+  fireAndForgetSideEffect(
     "telegram_wallet_status_side_effects",
     () => maybeHandleTelegramWalletStatusCommand(supabase),
-    undefined,
   );
-  safeExecuteBackground(
+  fireAndForgetSideEffect(
     "cron_digest_telegram",
-    () => maybeSendCronDigestTelegram({ supabase, batchId, totalScanned, totalExecutionMs, allActions }),
-    undefined,
+    () =>
+      maybeSendCronDigestTelegram({
+        supabase,
+        batchId,
+        totalScanned,
+        totalExecutionMs,
+        allActions,
+      }),
   );
-  safeExecuteBackground(
-    "four_hour_ops_heartbeat",
-    async () => {
-      const live = hasLiveTrading ?? await resolveAnyLiveAutopilot(supabase);
-      await maybeSendFourHourOpsHeartbeat(supabase, { hasLiveTrading: live });
-    },
-    undefined,
-  );
-  safeExecuteBackground(
+  fireAndForgetSideEffect("four_hour_ops_heartbeat", async () => {
+    const live = hasLiveTrading ?? await resolveAnyLiveAutopilot(supabase);
+    await maybeSendFourHourOpsHeartbeat(supabase, { hasLiveTrading: live });
+  });
+  fireAndForgetSideEffect(
     "scheduled_debugger",
     () => maybeRunScheduledDebugger(supabase, batchId),
-    null,
   );
 
-  if (!readSuperDetailedTraceTelegramEnabled() || !readTelegramNotifyErrorsAllowsSend()) return;
+  if (!readSuperDetailedTraceTelegramEnabled() || !readTelegramNotifyErrorsAllowsSend()) {
+    return;
+  }
   const fh = (functionHealth ?? {}) as Record<string, unknown>;
-  safeExecuteBackground(
-    "super_detailed_trace_batch",
-    () =>
-      Promise.allSettled(
-        allActions.map((action) => sendSuperDetailedTraceTelegram(action, fh, batchId)),
-      ),
-    undefined,
-  );
+  fireAndForgetSideEffect("super_detailed_trace_batch", () =>
+    Promise.allSettled(
+      allActions.map((action) => sendSuperDetailedTraceTelegram(action, fh, batchId)),
+    ));
 }

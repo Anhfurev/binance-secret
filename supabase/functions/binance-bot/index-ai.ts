@@ -25,7 +25,7 @@ import { safeExecute } from "./safe-execute.ts";
 import { applyStaleSignalBuyVeto } from "./ai-veto-helpers.ts";
 import { withLlmConcurrency } from "./ai-llm-concurrency.ts";
 import { isGeminiTerminalAuthError } from "./llm-key-backoff.ts";
-import { clearCronBatchLlmKeyPools } from "./llm-key-preemptive-route.ts";
+import { buildTechnicalIndicatorFallback } from "./ai-technical-fallback.ts";
 import { GLOBAL_BOT_CONFIG, IS_TEST_MODE } from "./config.ts";
 
 // Only invoke Gemini when the price has moved at least this much since the
@@ -36,8 +36,9 @@ export function readAiPriceMoveThresholdPercent(): number {
   return GLOBAL_BOT_CONFIG.AI_PRICE_MOVE_THRESHOLD_PCT;
 }
 
+/** Per-cycle AI guard reset — must not tear down the LLM key pool (hydrated after this). */
 export function resetAiCycleGuards() {
-  clearCronBatchLlmKeyPools();
+  // Pool lifecycle is batch-scoped in cron-runner finally + clearCronBatchLlmKeyPools(batchId).
 }
 
 export function shouldRunAiCheck(
@@ -79,6 +80,14 @@ export function resolveConfidenceTierRiskPercent(
   return null;
 }
 
+/** Instant read after `prefetchMarketIntoCache` — no network on cache hit. */
+export function lookupMarketSnapshotSync(
+  cache: Map<string, IndicatorSnapshot>,
+  symbol: string,
+): IndicatorSnapshot | undefined {
+  return cache.get(String(symbol ?? "").trim().toUpperCase());
+}
+
 export async function getCachedSnapshot(
   cache: Map<string, IndicatorSnapshot>,
   symbol: string,
@@ -88,11 +97,11 @@ export async function getCachedSnapshot(
   if (signal?.aborted) {
     throw new Error(`CYCLE_ABORTED:${symbol}`);
   }
-  let snapshot = cache.get(symbol);
-  if (!snapshot) {
-    snapshot = await fetchIndicatorSnapshot(symbol, signal);
-    cache.set(symbol, snapshot);
-  }
+  const sym = String(symbol ?? "").trim().toUpperCase();
+  const cached = cache.get(sym);
+  if (cached) return cached;
+  const snapshot = await fetchIndicatorSnapshot(sym, signal);
+  cache.set(sym, snapshot);
   return snapshot;
 }
 
@@ -109,6 +118,12 @@ export async function getAiVerdict(params: {
   paperScenarioLiveAi?: boolean;
   /** Cron symbol index for multi-provider matrix routing. */
   symbolMatrixIndex?: number;
+  /** Phases 1–2 gate from cycle-decider — blocks getAiAnalysis when short-circuited. */
+  llmGatekeeper?: import("./llm-gatekeeper-prefilter.ts").LlmGatekeeperPrefilterResult;
+  /** Cycle `minAiConfidence` — must match buy weighted floor (e.g. 55%). */
+  llmDispatchConvictionFloor?: number;
+  /** Flat-book strategy/preflight hard fail — no Gemini/Groq dispatch. */
+  buyPreflightBlocked?: boolean;
 }): Promise<{ ai: AiAnalysis; aiQuotaFallback: boolean }> {
   const { shouldInvokeAi, snapshot, symbol, row, supabase, safetyAi, userId, signal } = params;
   const paperScenarioLiveAi = Boolean(params.paperScenarioLiveAi);
@@ -117,11 +132,17 @@ export async function getAiVerdict(params: {
   const shouldBypassCache = shouldBypassAiCacheFromSettings(row);
   const scoreWeights = getResolvedScoreWeightsPack(row as Record<string, unknown>);
 
-  if (!shouldInvokeAi && !shouldBypassCache && !paperScenarioLiveAi) {
-    const recentCached = await getRecentAiCacheForSymbol(symbol);
-    if (recentCached) {
-      const refreshed = applyStaleSignalBuyVeto(snapshot, recentCached);
-      ai = await applySentimentVibeCheck(refreshed, snapshot, scoreWeights);
+  if (params.buyPreflightBlocked) {
+    return { ai: safetyAi, aiQuotaFallback: false };
+  }
+
+  if (!shouldInvokeAi) {
+    if (!shouldBypassCache && !paperScenarioLiveAi) {
+      const recentCached = await getRecentAiCacheForSymbol(symbol);
+      if (recentCached) {
+        const refreshed = applyStaleSignalBuyVeto(snapshot, recentCached);
+        ai = await applySentimentVibeCheck(refreshed, snapshot, scoreWeights);
+      }
     }
     return { ai, aiQuotaFallback };
   }
@@ -136,6 +157,9 @@ export async function getAiVerdict(params: {
         botSettingsRow: row as Record<string, unknown>,
         signal,
         symbolMatrixIndex: params.symbolMatrixIndex,
+        llmGatekeeper: params.llmGatekeeper,
+        llmDispatchConvictionFloor: params.llmDispatchConvictionFloor,
+        buyPreflightBlocked: params.buyPreflightBlocked,
       })
     );
     await patchAiQuotaState({ consecutive_gemini_failures: 0, last_failure_at: null });
@@ -173,9 +197,10 @@ export async function getAiVerdict(params: {
       });
       console.warn(`QUOTA_EXHAUSTED — safety AI for ${userId} ${symbol}: ${aiDetail}`);
       aiQuotaFallback = true;
+      const technicalAi = buildTechnicalIndicatorFallback(snapshot);
       return {
         ai: await applySentimentVibeCheck(
-          withAiDebugTrace(safetyAi, "fallback", "quota_exhausted", shouldBypassCache),
+          withAiDebugTrace(technicalAi, "fallback", "technical_rsi_volume_quota_exhausted", shouldBypassCache),
           snapshot,
           scoreWeights,
         ),

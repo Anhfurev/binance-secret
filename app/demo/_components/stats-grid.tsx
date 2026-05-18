@@ -13,6 +13,8 @@ import {
 
 interface StatsGridProps {
   currentBalance: number | null;
+  /** Free USDT cash (excludes open position mark-to-market). */
+  availableUsdt?: number | null;
   startingBalance: number;
   totalPnl: number;
   totalPnlPercent: number;
@@ -28,6 +30,7 @@ interface StatsGridProps {
 
 export function StatsGrid({
   currentBalance,
+  availableUsdt = null,
   startingBalance,
   totalPnl,
   totalPnlPercent,
@@ -52,13 +55,23 @@ export function StatsGrid({
         <CardContent className="pt-6">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-muted-foreground">Balance</p>
+              <p className="text-sm text-muted-foreground">Net Value (NAV)</p>
               <p className="mt-1 text-2xl font-bold text-foreground">
                 {shouldShowBalanceSyncing
                   ? "Syncing..."
-                  : `$${currentBalance.toLocaleString()}`}
+                  : `$${Number(currentBalance).toLocaleString(undefined, {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}`}
               </p>
               <p className="mt-1 text-xs text-muted-foreground">
+                {Number.isFinite(availableUsdt ?? NaN)
+                  ? `Cash: $${Number(availableUsdt).toLocaleString(undefined, {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}`
+                  : null}
+                {Number.isFinite(availableUsdt ?? NaN) ? " · " : ""}
                 Started: ${startingBalance.toLocaleString()}
               </p>
             </div>

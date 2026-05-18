@@ -25,6 +25,8 @@ import {
   validateIndicatorsOrThrow,
 } from "./market-data-helpers.ts";
 import { withBoundedPublicExchangeTimeout } from "./market-data-timeout.ts";
+import { computeDailySupportResistance } from "./daily-support-resistance.ts";
+import { formatOrderBookLevels } from "./ai-cascade-orderbook.ts";
 
 let sharedPublicBinance: InstanceType<typeof ccxt.binance> | null = null;
 
@@ -57,11 +59,14 @@ export async function fetchIndicatorSnapshotFromMarket(
   const ccxtSymbol = toCcxtSymbol(symbol);
   const ohlcv1mLimit = readOhlcv1mFetchLimit();
   const ohlcv15mLimit = Math.min(72, Math.max(40, Math.floor(ohlcv1mLimit / 3)));
+  // Cascade feeds (5m, 1d, depth-10) share one parallel batch — no serial OHLCV waterfall.
   const [
     ohlcv1m,
     ohlcv15m,
     ohlcv1h,
     ohlcv4h,
+    ohlcv5m,
+    ohlcv1d,
     orderBook,
     ticker,
   ] = await withBoundedPublicExchangeTimeout(exchange, signal, () =>
@@ -90,7 +95,9 @@ export async function fetchIndicatorSnapshotFromMarket(
         undefined,
         32,
       ),
-      exchange.fetchOrderBook(ccxtSymbol, 5),
+      exchange.fetchOHLCV(ccxtSymbol, "5m", undefined, 18),
+      exchange.fetchOHLCV(ccxtSymbol, "1d", undefined, 35),
+      exchange.fetchOrderBook(ccxtSymbol, 10),
       exchange.fetchTicker(ccxtSymbol),
     ]));
   if (signal?.aborted) throw new Error(`CYCLE_ABORTED:${symbol}`);
@@ -103,6 +110,12 @@ export async function fetchIndicatorSnapshotFromMarket(
   );
   const candles1h = sanitizeOhlcvCandles(ohlcv1h as Array<Array<number | string | null | undefined>>);
   const candles4h = sanitizeOhlcvCandles(ohlcv4h as Array<Array<number | string | null | undefined>>);
+  const candles5m = sanitizeOhlcvCandles(
+    ohlcv5m as Array<Array<number | string | null | undefined>>,
+  );
+  const candles1d = sanitizeOhlcvCandles(
+    ohlcv1d as Array<Array<number | string | null | undefined>>,
+  );
 
   const closes = candles.map((c) => c.close).filter((p) => p > 0);
   const closes15m = candles15m.map((c) => c.close).filter((p) => p > 0);
@@ -198,12 +211,16 @@ export async function fetchIndicatorSnapshotFromMarket(
   const spreadBps = spreadMid > 0 && bestAsk >= bestBid
     ? Number((((bestAsk - bestBid) / spreadMid) * 10_000).toFixed(4))
     : null;
-  const totalBidVolume = (orderBook?.bids ?? [])
-    .slice(0, 5)
-    .reduce((sum, level) => sum + Math.max(0, toNumber(level?.[1], 0)), 0);
-  const totalAskVolume = (orderBook?.asks ?? [])
-    .slice(0, 5)
-    .reduce((sum, level) => sum + Math.max(0, toNumber(level?.[1], 0)), 0);
+  const bookBids = formatOrderBookLevels(
+    orderBook?.bids as Array<[number, number]> | undefined,
+    10,
+  );
+  const bookAsks = formatOrderBookLevels(
+    orderBook?.asks as Array<[number, number]> | undefined,
+    10,
+  );
+  const totalBidVolume = bookBids.reduce((sum, level) => sum + level.volume, 0);
+  const totalAskVolume = bookAsks.reduce((sum, level) => sum + level.volume, 0);
   const imbalance_ratio = totalAskVolume > 0
     ? Number((totalBidVolume / totalAskVolume).toFixed(6))
     : totalBidVolume > 0
@@ -211,6 +228,8 @@ export async function fetchIndicatorSnapshotFromMarket(
     : 1;
 
   const burst = computeVolatilityBurstGuard(candles);
+  const candles5mTail = candles5m.slice(-15);
+  const daily_support_resistance = computeDailySupportResistance(candles1d);
 
   return {
     symbol,
@@ -220,6 +239,10 @@ export async function fetchIndicatorSnapshotFromMarket(
     candles15,
     candles15m: candles15mTail,
     candles1h: candles1hTail,
+    candles5m: candles5mTail,
+    candles1d,
+    daily_support_resistance,
+    order_book_top10: { bids: bookBids, asks: bookAsks },
     candles4h: candles4hTail,
     trend_htf: {
       trend_1h: trend1h,

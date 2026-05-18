@@ -4,6 +4,8 @@
  * Used to haircut BUY conviction when the tape disagrees with social fear / major incident news.
  */
 
+import { pooledFetch } from "./pooled-http-client.ts";
+
 const FETCH_TIMEOUT_MS = 2800;
 const FEAR_GREED_EXTREME_MAX = 24;
 const HACK_KEYWORD_RE =
@@ -30,7 +32,7 @@ async function fetchJsonWithTimeout(
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
+    const res = await pooledFetch(url, {
       signal: ctrl.signal,
       headers: { Accept: "application/json" },
     });

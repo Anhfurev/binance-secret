@@ -17,6 +17,13 @@ export type GroqKeyPlan = {
   /** Parallel to `scanKeys` / `vetoKeys` when `source === "db"` (same length). */
   scanDbIds: (string | undefined)[];
   vetoDbIds: (string | undefined)[];
+  /** Parallel to scan/veto DB ids — `llm_api_keys.error_count` at pool load. */
+  scanDbErrorCounts: (number | undefined)[];
+  vetoDbErrorCounts: (number | undefined)[];
+  scanDbStatuses: (LlmApiKeyRow["status"] | undefined)[];
+  vetoDbStatuses: (LlmApiKeyRow["status"] | undefined)[];
+  scanDbCooldownUntils: (string | null | undefined)[];
+  vetoDbCooldownUntils: (string | null | undefined)[];
   source: "db" | "env";
   /** When true, `groqAnalyze` / veto use a hard per-attempt timeout cap. */
   useDbHardTimeout: boolean;

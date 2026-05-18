@@ -2,6 +2,7 @@
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { formatUnknownError, jsonResponse, safeReadJsonBody, toStringValue } from "./utils.ts";
 import { botDebug, emitSentryBootProbe } from "./bot-debug.ts";
+import { safeExecuteDetached } from "./safe-execute.ts";
 import { handleAuthenticatedCron } from "./cron-runner.ts";
 import { sendTelegramAlert } from "./notifier.ts";
 import { parsePaperScenarioRequest, runPaperScenario } from "./paper-scenario-runner.ts";
@@ -19,6 +20,9 @@ import { isTradingViewWebhookRequest, parseSymbolsFromBody, resolveTradingViewAu
 import { runPostBatchBalanceSync } from "./run-symbol-batch.ts";
 import { runFunctionVitalityCheck } from "./function-health.ts";
 import { readReconciliationEnabled, runReconciliationJob } from "./reconciler.ts";
+import { releaseEdgeCycleLease, tryClaimEdgeCycleLease } from "./edge-cycle-lease.ts";
+import { attachServerBackgroundLifeline } from "./server-lifecycle.ts";
+import { handleHourlyMacroSync } from "./cron-hourly-sync.ts";
 
 async function handleHealthCheckOnly(supabase: ReturnType<typeof createClient>): Promise<Response> {
   const startedAtMs = Date.now();
@@ -60,11 +64,9 @@ export async function routeRequest(params: {
   req: Request;
   sharedSupabase: ReturnType<typeof createClient>;
   lastAiPriceBySymbol: Map<string, number>;
-  inFlightCycleStartedAt: number | null;
-  setInFlightCycleStartedAt: (value: number | null) => void;
   EDGE_GLOBAL_TIMEOUT_MS: number;
 }): Promise<Response> {
-  const { req, sharedSupabase, lastAiPriceBySymbol, inFlightCycleStartedAt, setInFlightCycleStartedAt, EDGE_GLOBAL_TIMEOUT_MS } = params;
+  const { req, sharedSupabase, lastAiPriceBySymbol, EDGE_GLOBAL_TIMEOUT_MS } = params;
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-binance-bot-secret" } });
   }
@@ -82,6 +84,7 @@ export async function routeRequest(params: {
   const symbols = parseSymbolsFromBody(parsedBody, requestUrl.searchParams);
   const probeSymbol = symbols[0] ?? "unknown";
   const healthCheckOnly = Boolean((parsedBody as any)?.health_check_only);
+  const hourlySyncOnly = Boolean((parsedBody as any)?.hourly_sync_only);
   const maintenanceOnly = Boolean((parsedBody as any)?.maintenance_only);
   const reconcileOnly = Boolean((parsedBody as any)?.reconcile_only);
   const debuggerHealthOnly = Boolean((parsedBody as any)?.debugger_health_only);
@@ -89,7 +92,11 @@ export async function routeRequest(params: {
   const debuggerIncludeRetention = Boolean((parsedBody as any)?.debugger_include_retention);
   const functionHealthRequested = wantsFunctionHealth(parsedBody, requestUrl.searchParams);
   botDebug("index", "function_started", { method: req.method, sym: probeSymbol, n_symbols: symbols.length, health_check_only: healthCheckOnly, maintenance_only: maintenanceOnly, debugger_health_only: debuggerHealthOnly, debugger_apply_fixes: debuggerApplyFixes, debugger_include_retention: debuggerIncludeRetention, function_health: functionHealthRequested });
-  void emitSentryBootProbe({ method: req.method, symbol: probeSymbol });
+  safeExecuteDetached(
+    "sentry_boot_probe",
+    () => emitSentryBootProbe({ method: req.method, symbol: probeSymbol }),
+    undefined,
+  );
   const botSecret = (Deno.env.get("BOT_SECRET") ?? "").trim();
   const providedSecret = (req.headers.get("x-binance-bot-secret") ?? "").trim();
   const tvWant = isTradingViewWebhookRequest(parsedBody, requestUrl);
@@ -127,6 +134,16 @@ export async function routeRequest(params: {
   if (healthCheckOnly) {
     if (!botAuthed) return jsonResponse({ ok: false, error: "Unauthorized", detail: "health_check_only requires x-binance-bot-secret matching BOT_SECRET." }, 401);
     return await handleHealthCheckOnly(sharedSupabase);
+  }
+  if (hourlySyncOnly) {
+    if (!botAuthed) {
+      return jsonResponse({
+        ok: false,
+        error: "Unauthorized",
+        detail: "hourly_sync_only requires x-binance-bot-secret matching BOT_SECRET.",
+      }, 401);
+    }
+    return await handleHourlyMacroSync(sharedSupabase);
   }
   if (maintenanceOnly) {
     if (!botAuthed) return jsonResponse({ ok: false, error: "Unauthorized", detail: "maintenance_only requires x-binance-bot-secret matching BOT_SECRET." }, 401);
@@ -175,24 +192,46 @@ export async function routeRequest(params: {
     );
   }
   if (!symbols.length) return jsonResponse({ ok: true, skipped: true, reason: "Missing symbol or symbols in request body", ...(tvWant ? { hint: "For TradingView, add symbol or ticker in JSON or ?symbol= / ?ticker= on the URL." } : {}) });
+  attachServerBackgroundLifeline(symbols);
   const wakeTrigger = toStringValue((parsedBody as any)?.trigger);
   const streamWake = wakeTrigger === "stream_wick";
-  if (inFlightCycleStartedAt !== null && !streamWake) {
-    const ageMs = Date.now() - inFlightCycleStartedAt;
-    if (ageMs < EDGE_GLOBAL_TIMEOUT_MS) return jsonResponse({ ok: true, skipped: true, reason: "previous_cycle_in_flight", age_ms: ageMs });
-    setInFlightCycleStartedAt(null);
+  let edgeLeaseClaimed = false;
+  if (!streamWake) {
+    const leaseTtlSec = Math.max(
+      120,
+      Math.ceil(EDGE_GLOBAL_TIMEOUT_MS / 1000) + 30,
+    );
+    edgeLeaseClaimed = await tryClaimEdgeCycleLease(leaseTtlSec);
+    if (!edgeLeaseClaimed) {
+      return jsonResponse({ ok: true, skipped: true, reason: "edge_cycle_lease_held" });
+    }
   }
-  setInFlightCycleStartedAt(Date.now());
+  const cycleAbort = new AbortController();
   let edgeGlobalTimeoutId: ReturnType<typeof setTimeout> | undefined;
+  let leaseReleased = false;
+  const releaseLeaseOnce = async () => {
+    if (!edgeLeaseClaimed || leaseReleased) return;
+    leaseReleased = true;
+    await releaseEdgeCycleLease();
+  };
   const cronWork = handleAuthenticatedCron(sharedSupabase, symbols, {
     liteCycle: tvAuthed,
     trigger: wakeTrigger ?? (tvAuthed ? "tradingview_webhook" : "cron"),
-  }, lastAiPriceBySymbol).finally(() => {
-    setInFlightCycleStartedAt(null);
+    signal: cycleAbort.signal,
+  }, lastAiPriceBySymbol).finally(async () => {
     if (edgeGlobalTimeoutId !== undefined) clearTimeout(edgeGlobalTimeoutId);
+    await releaseLeaseOnce();
   });
   const timeoutPromise = new Promise<Response>((resolve) => {
-    edgeGlobalTimeoutId = setTimeout(() => resolve(jsonResponse({ ok: true, skipped: true, reason: "edge_global_timeout_guard", timeout_ms: EDGE_GLOBAL_TIMEOUT_MS })), EDGE_GLOBAL_TIMEOUT_MS);
+    edgeGlobalTimeoutId = setTimeout(() => {
+      cycleAbort.abort("edge_global_timeout_guard");
+      resolve(jsonResponse({
+        ok: true,
+        skipped: true,
+        reason: "edge_global_timeout_guard",
+        timeout_ms: EDGE_GLOBAL_TIMEOUT_MS,
+      }));
+    }, EDGE_GLOBAL_TIMEOUT_MS);
   });
   return await Promise.race([cronWork, timeoutPromise]);
 }

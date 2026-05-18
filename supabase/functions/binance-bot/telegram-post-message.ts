@@ -1,5 +1,7 @@
 // @ts-nocheck
 /** Isolated Telegram `sendMessage` POST so `notifier.ts` stays under the line budget. */
+import { readTelegramFetchTimeoutMs } from "./edge-runtime.ts";
+import { pooledFetch } from "./pooled-http-client.ts";
 import { describeThrownValue } from "./utils.ts";
 import { readTelegramNotificationsEnabled } from "./telegram-notify-policy.ts";
 
@@ -32,10 +34,11 @@ export async function postTelegramSendMessage(params: {
   };
   if (parseMode) payload.parse_mode = parseMode;
   try {
-    return await fetch(url, {
+    return await pooledFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(readTelegramFetchTimeoutMs()),
     });
   } catch (err) {
     throw new Error(`telegram_fetch_failed:${describeThrownValue(err)}`);

@@ -5,7 +5,9 @@
  */
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { SERVICE_ROLE_KEY, SUPABASE_URL } from "./constants.ts";
+import { SUPABASE_CLIENT_OPTIONS } from "./supabase-client-options.ts";
 import { describeThrownValue, formatUnknownError, normalizeGatewayOrHtmlError } from "./utils.ts";
+import { edgeWaitUntil } from "./edge-runtime.ts";
 import { readTelegramNotifyErrorsAllowsSend } from "./telegram-super-detailed-trace.ts";
 
 function errorMessage(error: unknown): string {
@@ -13,9 +15,7 @@ function errorMessage(error: unknown): string {
 }
 
 const safeExecuteLogClient = SUPABASE_URL && SERVICE_ROLE_KEY
-  ? createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  })
+  ? createClient(SUPABASE_URL, SERVICE_ROLE_KEY, SUPABASE_CLIENT_OPTIONS)
   : null;
 
 async function persistSafeExecuteError(taskName: string, error: unknown) {
@@ -83,28 +83,20 @@ export async function safeExecute<T>(
  * Fire-and-forget `safeExecute` with a terminal `.catch()` so null/primitive rejections
  * or post-catch bugs never become unhandled promise rejections on the Deno event loop.
  */
-type EdgeRuntimeGlobal = {
-  EdgeRuntime?: { waitUntil?: (promise: Promise<unknown>) => void };
-};
-
 /** Non-blocking side work: `EdgeRuntime.waitUntil` when present, else fire-and-forget. */
 export function safeExecuteBackground(
   name: string,
   fn: () => Promise<unknown>,
   fallback: unknown = undefined,
 ): void {
-  const task = safeExecute(name, fn, fallback);
-  const waitUntil = (globalThis as EdgeRuntimeGlobal).EdgeRuntime?.waitUntil;
-  if (typeof waitUntil === "function") {
-    waitUntil(task);
-    return;
-  }
-  void task.catch((err) => {
-    console.error(
-      `[safe-execute] background_surprise_rejection name=${name}:`,
-      describeThrownValue(err),
-    );
-  });
+  edgeWaitUntil(
+    safeExecute(name, fn, fallback).catch((err) => {
+      console.error(
+        `[safe-execute] background_surprise_rejection name=${name}:`,
+        describeThrownValue(err),
+      );
+    }),
+  );
 }
 
 export function safeExecuteDetached(
@@ -112,35 +104,18 @@ export function safeExecuteDetached(
   fn: () => Promise<unknown>,
   fallback: unknown,
 ): void {
-  const task = safeExecute(name, fn, fallback);
-  const waitUntil = (globalThis as EdgeRuntimeGlobal).EdgeRuntime?.waitUntil;
-  if (typeof waitUntil === "function") {
-    waitUntil(
-      task.catch((err) => {
-        if (name.startsWith("super_detailed_trace_") && !readTelegramNotifyErrorsAllowsSend()) {
-          console.log(
-            `[TELEGRAM MUTE] Skipped super trace error log for ${name} (TELEGRAM_NOTIFY_ERRORS is false)`,
-          );
-          return;
-        }
-        console.error(
-          `[safe-execute] detached_surprise_rejection name=${name}:`,
-          describeThrownValue(err),
+  edgeWaitUntil(
+    safeExecute(name, fn, fallback).catch((err) => {
+      if (name.startsWith("super_detailed_trace_") && !readTelegramNotifyErrorsAllowsSend()) {
+        console.log(
+          `[TELEGRAM MUTE] Skipped super trace error log for ${name} (TELEGRAM_NOTIFY_ERRORS is false)`,
         );
-      }),
-    );
-    return;
-  }
-  void task.catch((err) => {
-    if (name.startsWith("super_detailed_trace_") && !readTelegramNotifyErrorsAllowsSend()) {
-      console.log(
-        `[TELEGRAM MUTE] Skipped super trace error log for ${name} (TELEGRAM_NOTIFY_ERRORS is false)`,
+        return;
+      }
+      console.error(
+        `[safe-execute] detached_surprise_rejection name=${name}:`,
+        describeThrownValue(err),
       );
-      return;
-    }
-    console.error(
-      `[safe-execute] detached_surprise_rejection name=${name}:`,
-      describeThrownValue(err),
-    );
-  });
+    }),
+  );
 }

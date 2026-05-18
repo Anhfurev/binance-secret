@@ -10,7 +10,7 @@ import type {
   IndicatorSnapshot,
   OpenTradeRow,
 } from "./types.ts";
-import { canFireDbStopLoss } from "./strategy-stop-hold.ts";
+import { canFireDbStopLoss, canFireSoftSignalExit } from "./strategy-stop-hold.ts";
 import { gtWithTolerance } from "./strategy-numeric-tolerance.ts";
 import { clamp, toNumber } from "./utils.ts";
 
@@ -150,7 +150,7 @@ export function checkExitConditions(
   }
 
   if (snapshot.rsi > 70) {
-    if (canFireDbStopLoss(openTrade)) {
+    if (canFireSoftSignalExit(openTrade, snapshot.symbol)) {
       return { shouldExit: true, exit_reason: "rsi_overbought" };
     }
     return { shouldExit: false, exit_reason: "hold" };

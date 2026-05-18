@@ -6,12 +6,15 @@
 #
 # The CLI only adds --no-verify-jwt to force-disable JWT; default deploy applies config.toml.
 
-.PHONY: deploy deploy-bot deploy-sunday deploy-all
+.PHONY: deploy deploy-bot deploy-sunday deploy-test-sol deploy-all
 
-deploy deploy-all: deploy-bot deploy-sunday
+deploy deploy-all: deploy-bot deploy-sunday deploy-test-sol
 
 deploy-bot:
 	supabase functions deploy binance-bot
 
 deploy-sunday:
 	supabase functions deploy sunday-summary
+
+deploy-test-sol:
+	supabase functions deploy test-sol-loop

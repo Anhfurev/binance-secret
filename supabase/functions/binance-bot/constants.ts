@@ -20,6 +20,8 @@ export const BINANCE_BASE_URL = "https://api.binance.com";
 
 export const DEFAULT_SYMBOL = "BTCUSDT";
 export const SUPPORTED_SYMBOLS = ["BTCUSDT", "PEPEUSDT", "SOLUSDT"] as const;
+/** pg_cron heartbeat order — provider matrix index follows this, not SUPPORTED_SYMBOLS sort. */
+export const CRON_SYMBOL_MATRIX_ORDER = ["BTCUSDT", "SOLUSDT", "PEPEUSDT"] as const;
 export const KLINE_INTERVAL = "1m";
 export const KLINE_LIMIT = 120;
 

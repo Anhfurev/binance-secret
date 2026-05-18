@@ -1,8 +1,10 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
+  dedupeGeminiKeySlotsByValue,
   getGeminiKeySlotsFromEnv,
   getGroqKeysFromEnv,
   getGroqScanKeysFromEnv,
+  normalizeLlmApiKeySecret,
 } from "../ai-keys.ts";
 
 Deno.test("getGroqScanKeysFromEnv collects GROQ_API_KEY_SCANn in order", () => {
@@ -21,6 +23,27 @@ Deno.test("getGroqScanKeysFromEnv collects GROQ_API_KEY_SCANn in order", () => {
       if (v === undefined) Deno.env.delete(k);
       else Deno.env.set(k, v);
     }
+  }
+});
+
+Deno.test("normalizeLlmApiKeySecret strips quotes and whitespace", () => {
+  assertEquals(normalizeLlmApiKeySecret('  "gsk_test123"  '), "gsk_test123");
+});
+
+Deno.test("getGroqKeysFromEnv reads GROQ_KEYS_POOL comma list", () => {
+  const saved: Record<string, string> = {};
+  for (const [key, value] of Object.entries(Deno.env.toObject())) {
+    if (/^GROQ_/.test(key)) {
+      saved[key] = value;
+      Deno.env.delete(key);
+    }
+  }
+  Deno.env.set("GROQ_KEYS_POOL", "alpha,beta");
+  try {
+    assertEquals(getGroqKeysFromEnv(), ["alpha", "beta"]);
+  } finally {
+    for (const key of Object.keys(saved)) Deno.env.set(key, saved[key]);
+    Deno.env.delete("GROQ_KEYS_POOL");
   }
 });
 
@@ -114,6 +137,19 @@ Deno.test("getGeminiKeySlotsFromEnv pool-only supplies keys", () => {
     }
     Deno.env.delete("GEMINI_KEYS_POOL");
   }
+});
+
+Deno.test("dedupeGeminiKeySlotsByValue collapses db+env duplicate secrets", () => {
+  const slots = dedupeGeminiKeySlotsByValue([
+    { value: "alpha", label: "llm_api_keys:1", llmDbKeyId: "id-1" },
+    { value: "alpha", label: "GEMINI_API_KEY" },
+    { value: "beta", label: "GEMINI_KEYS_POOL[0]" },
+    { value: "beta", label: "llm_api_keys:2", llmDbKeyId: "id-2" },
+  ]);
+  assertEquals(slots.length, 2);
+  assertEquals(slots.map((s) => s.value), ["alpha", "beta"]);
+  assertEquals(slots[0]?.llmDbKeyId, "id-1");
+  assertEquals(slots[1]?.llmDbKeyId, "id-2");
 });
 
 Deno.test("getGeminiKeySlotsFromEnv pool splits on single comma; accidental ,, yields separate keys", () => {

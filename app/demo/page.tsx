@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { EquityCurve } from "./_components/equity-curve";
 import { StatsGrid } from "./_components/stats-grid";
 import { OpenPositionsTable } from "./_components/open-positions-table";
+import { OpenPositionTrackers } from "./_components/open-position-trackers";
 import { TradeHistoryTable } from "./_components/trade-history-table";
 import { PageHeader } from "./_components/page-header";
 import { AITradingMasterControl } from "./_components/ai-master-control";
@@ -28,6 +29,7 @@ import { useAiStore } from "@/lib/store/ai-store";
 import { filterActionableSignals } from "@/lib/crypto-utils";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import { toAiReasoningSummary } from "@/lib/ai-reasoning";
+import { computePortfolioNavUsd } from "@/lib/portfolio/nav";
 
 type RecentActivityItem = {
   id: string;
@@ -283,6 +285,19 @@ export default function DemoPage() {
     () => Number((realizedClosedPnl + unrealizedOpenPnl).toFixed(6)),
     [realizedClosedPnl, unrealizedOpenPnl],
   );
+  const portfolioNav = useMemo(() => {
+    const availableUsdt = Number.isFinite(realBalance) ? realBalance : 0;
+    return computePortfolioNavUsd({
+      availableUsdt,
+      openPositions: normalizedOpenPositions.map((trade: any) => ({
+        symbol: trade.symbol,
+        amount: trade.amount,
+        livePrice: trade.currentPrice,
+        entryPrice: trade.entryPrice,
+      })),
+      priceBySymbol: symbolToLivePrice,
+    }).navUsd;
+  }, [normalizedOpenPositions, realBalance, symbolToLivePrice]);
   const openPositionsSignature = useMemo(
     () =>
       normalizedOpenPositions
@@ -301,7 +316,9 @@ export default function DemoPage() {
         .join("|"),
     [normalizedTradeHistory],
   );
-  const isBalanceSyncing = Number(account?.currentBalance ?? 0) === 0;
+  const isBalanceSyncing =
+    !isBalanceResolved ||
+    (Number(account?.currentBalance ?? 0) === 0 && normalizedOpenPositions.length === 0);
   const latestStatusLabel = String(latestStatusData?.status ?? "UNKNOWN").replaceAll("_", " ").toUpperCase();
   const latestStatusReason = latestStatusData?.reason?.trim() ||
     latestStatusData?.error?.trim() ||
@@ -458,7 +475,10 @@ export default function DemoPage() {
   useEffect(() => {
     if (!isHydrated || !account) return;
 
-    const nextCurrentBalance = Number.isFinite(realBalance) ? realBalance : 0;
+    const nextAvailableUsdt = Number.isFinite(realBalance) ? realBalance : 0;
+    const nextCurrentBalance = Number.isFinite(portfolioNav) && portfolioNav > 0
+      ? portfolioNav
+      : nextAvailableUsdt;
     const nextStartingBalance = Number.isFinite(realStartingBalance) &&
         realStartingBalance > 0
       ? realStartingBalance
@@ -520,6 +540,7 @@ export default function DemoPage() {
     combinedTradePnl,
     isHydrated,
     performanceSummary,
+    portfolioNav,
     realBalance,
     realStartingBalance,
   ]);
@@ -804,6 +825,7 @@ export default function DemoPage() {
           <div className="min-w-0 space-y-6">
             <StatsGrid
               currentBalance={account.currentBalance}
+              availableUsdt={realBalance}
               startingBalance={account.startingBalance}
               totalPnl={account.totalPnl || 0}
               totalPnlPercent={account.totalPnlPercent || 0}
@@ -886,8 +908,13 @@ export default function DemoPage() {
 
           <TabsContent
             value="open"
-            className="mt-4 animate-in fade-in slide-in-from-bottom-2"
+            className="mt-4 animate-in fade-in slide-in-from-bottom-2 space-y-4"
           >
+            <OpenPositionTrackers
+              positions={account.openPositions}
+              priceBySymbol={symbolToLivePrice}
+              isLoading={isTradesValidating && account.openPositions.length > 0}
+            />
             <OpenPositionsTable
               positions={account.openPositions}
               onClose={handleCloseTrade}

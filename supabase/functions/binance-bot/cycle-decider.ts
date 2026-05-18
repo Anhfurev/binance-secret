@@ -2,7 +2,9 @@
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { decideTechnicalSignal } from "./indicators.ts";
 import { loadOpenTrade } from "./trade-store.ts";
+import { isHardCapitalExitReason } from "./asset-risk-profile.ts";
 import { calculateTechnicalScore, checkEntryConditions, checkExitConditions } from "./strategy.ts";
+import { canFireSoftSignalExit } from "./strategy-stop-hold.ts";
 import {
   isOversoldBounceContext,
   resolveMinTechForOversoldBounce,
@@ -17,7 +19,8 @@ import { blockedByBuyReentryGuards } from "./stop-reentry-cooldown.ts";
 import { readMinAdxForNonTrendingBuy } from "./buy-helpers.ts";
 import { evaluateChopBuyBlock } from "./chop-entry-guard.ts";
 import { resolveSessionAwareMinAiConfidence, resolveVolumeSpikeMultiplier } from "./decision-tuning.ts";
-import { getAiVerdict, shouldRunAiCheck } from "./index-ai.ts";
+import { getAiVerdict } from "./index-ai.ts";
+import { evaluateLlmGatekeeperPrefilter } from "./llm-gatekeeper-prefilter.ts";
 import { resolveGhostMode, resolveTestMode } from "./bot-shared.ts";
 import { safeExecute } from "./safe-execute.ts";
 import { formatUnknownError, resolveMinAiConfidenceForRegime, resolveMinTechScore, resolveMinVolume24hQuote, toNumber, toStringValue } from "./utils.ts";
@@ -55,10 +58,31 @@ import {
   aiBiasSupportsSidewaysGrinder,
   appendRegimeTelemetry,
   detectDynamicTradingRegime,
+  capMinAiConfidenceForTrendingRegime,
   evaluateTrendingDefensiveGates,
+  tuneConfidencePolicyForRegimeGate,
   resolveGrinderTakeProfitPct,
   resolveRegimeGatePolicy,
 } from "./dynamic-regime-switcher.ts";
+import {
+  buildOpenPositionSupervisorEntry,
+  collectExitSupervisorPreflight,
+  evaluateBuyLlmPreflightBlock,
+  resolveHasOpenPositionFromOpenTrade,
+  resolvePositionSupervisorExitHint,
+  resolvePositionSupervisorStrategySignal,
+  resolveSupervisorOpenTrade,
+  shouldUsePrefetchedBuyAiVerdict,
+} from "./cycle-decider-pipeline.ts";
+import type { BotGlobalSettingsRow } from "./bot-global-settings.ts";
+import {
+  isHighRiskCrashRegime,
+  readFastBounceFuturesLaneEnabled,
+} from "./bot-global-settings.ts";
+import {
+  buildFastLaneAiStub,
+  evaluateFastMathBounceEntry,
+} from "./fast-math-entry.ts";
 
 export async function decideSymbolCycleOutcome(params: {
   row: any;
@@ -74,6 +98,7 @@ export async function decideSymbolCycleOutcome(params: {
   /** Tests / drills: skip LLM and use this verdict (production callers omit). */
   prefetchedAiVerdict?: { ai: import("./types.ts").AiAnalysis; aiQuotaFallback: boolean } | null;
   symbolMatrixIndex?: number;
+  globalSettings?: BotGlobalSettingsRow | null;
 }) {
   const {
     row,
@@ -87,15 +112,23 @@ export async function decideSymbolCycleOutcome(params: {
     paperScenario,
     btcOverbought,
     prefetchedAiVerdict,
+    globalSettings = null,
   } = params;
   const tradeRegime = resolveTradeRegime(symbol, snapshot.latestPrice, snapshot.atr14);
-  let walletBalanceUsd: number | null = null;
-  if (userId !== "unknown") {
-    try {
-      walletBalanceUsd = await loadProfileDemoBalance(supabase, userId);
-    } catch {
-      walletBalanceUsd = null;
-    }
+  const dbLoadOpenTradeStarted = performance.now();
+  const [walletBalanceUsd, openTrade] = await Promise.all([
+    userId !== "unknown"
+      ? loadProfileDemoBalance(supabase, userId).catch(() => null)
+      : Promise.resolve(null),
+    safeExecute(
+      `db_load_open_trade_${symbol}`,
+      () => loadOpenTrade(supabase, row.user_id, symbol, toStringValue(row.id) ?? undefined),
+      null,
+    ),
+  ]);
+  const dbLoadOpenTradeMs = Math.round(performance.now() - dbLoadOpenTradeStarted);
+  if (dbLoadOpenTradeMs > 500) {
+    console.warn(`[PERF] db_load_open_trade slow ${dbLoadOpenTradeMs}ms symbol=${symbol} user=${userId}`);
   }
   const tradingPolicyConfidenceGate = getRequiredConfidence(walletBalanceUsd, tradeRegime);
   let minAiConfidence = resolveMinAiConfidenceForRegime(row as Record<string, unknown>, String(snapshot.marketRegime ?? "NEUTRAL"));
@@ -104,47 +137,50 @@ export async function decideSymbolCycleOutcome(params: {
   const isSandboxMode = isTestMode || isGhostExecution;
   const isPaperTrading = isSandboxMode && !Boolean((row as any)?.is_live_trading_enabled);
   const liveStylePractice = paperLiveStylePracticeEnabled(isPaperTrading);
-  const strategyEntry = checkEntryConditions(snapshot, {
-    paperExploration: isPaperTrading && !liveStylePractice,
-    botSettings: row,
-  });
+  const hasOpenPosition = resolveHasOpenPositionFromOpenTrade(openTrade);
+  const supervisorOpenTrade = resolveSupervisorOpenTrade(openTrade);
   const dynRegimeDiag = detectDynamicTradingRegime(snapshot);
   const regimeGatePolicy = resolveRegimeGatePolicy(dynRegimeDiag.regime);
-  const dbLoadOpenTradeStarted = performance.now();
-  const openTrade = await safeExecute(`db_load_open_trade_${symbol}`, () => loadOpenTrade(supabase, row.user_id, symbol, toStringValue(row.id) ?? undefined), null);
-  const dbLoadOpenTradeMs = Math.round(performance.now() - dbLoadOpenTradeStarted);
-  if (dbLoadOpenTradeMs > 500) console.warn(`[PERF] db_load_open_trade slow ${dbLoadOpenTradeMs}ms symbol=${symbol} user=${userId}`);
-  const strategyExit = checkExitConditions(openTrade, snapshot, toNumber(row.take_profit_pct, NaN));
+  const strategyExit = checkExitConditions(
+    supervisorOpenTrade,
+    snapshot,
+    toNumber(row.take_profit_pct, NaN),
+  );
   let effectiveStrategyExit = isTestMode && strategyExit.exit_reason === "rsi_overbought" ? { shouldExit: false, exit_reason: "hold" as const } : strategyExit;
-  const mm = evaluateMoneyMachineExits({ openTrade, price: snapshot.latestPrice });
+  if (
+    supervisorOpenTrade &&
+    effectiveStrategyExit.shouldExit &&
+    !isHardCapitalExitReason(effectiveStrategyExit.exit_reason) &&
+    !canFireSoftSignalExit(supervisorOpenTrade, symbol)
+  ) {
+    effectiveStrategyExit = { shouldExit: false, exit_reason: "hold" };
+  }
+  const mm = evaluateMoneyMachineExits({ openTrade: supervisorOpenTrade, price: snapshot.latestPrice });
   if (mm.forceExit) effectiveStrategyExit = { shouldExit: true, exit_reason: mm.reason === "money_machine_trailing_lock" ? "money_machine_trailing_lock" : mm.reason === "money_machine_hard_stop" ? "money_machine_hard_stop" : "stoploss_hit" };
   if (mm.reason) console.log("[MONEY_MACHINE]", { symbol, ...mm });
+  if (hasOpenPosition) {
+    console.log(`[PIPELINE] ${symbol} open_position=yes route=exit_supervisor exit_hint=${resolvePositionSupervisorExitHint(supervisorOpenTrade, Number(snapshot.latestPrice))} remaining_base=${Number(supervisorOpenTrade?.amount ?? 0)}`);
+  }
   const technical = decideTechnicalSignal(snapshot.rsi, snapshot.emaFast, snapshot.emaSlow, snapshot.latestPrice, row, snapshot.candles5);
   const technicalScore = calculateTechnicalScore(snapshot);
   let aggressiveModeEnabled = Boolean((row as any).is_aggressive_mode);
   let minTech = resolveMinTechScore(row as Record<string, unknown>);
   const minVolume24hQuote = resolveMinVolume24hQuote(row as Record<string, unknown>);
-  let shouldInvokeAi =
-    (aggressiveModeEnabled || technicalScore >= 3) &&
-    (aggressiveModeEnabled || shouldRunAiCheck(snapshot, lastAiPriceBySymbol));
-  if (mm.skipAi) shouldInvokeAi = false;
   const bbRange = snapshot.bbUpper - snapshot.bbLower;
   const bbPosition = Number.isFinite(bbRange) && bbRange > 0 ? (snapshot.latestPrice - snapshot.bbLower) / bbRange : 0;
   const lastCandle = snapshot.candles5?.at(-1);
   const smartNoise = evaluateSmartNoiseFilter({
     snapshot,
     lastCandleVolume: Number(lastCandle?.volume ?? 0),
-    hasOpenTrade: Boolean(openTrade),
+    hasOpenTrade: hasOpenPosition,
     isGhostExecution,
     paperRelaxed: isPaperTrading && !liveStylePractice,
+    minVolume24hQuoteFromDb: minVolume24hQuote,
   });
+  const paperLiveAiDrill = Boolean(paperScenario?.name && readPaperScenarioUseLiveAi());
   if (smartNoise.sleepAi && !aggressiveModeEnabled && !isSandboxMode) {
-    shouldInvokeAi = false;
     console.log("[SMART_FILTER]", { symbol, userId, sleep_ai: 1, volume_1m: smartNoise.volume1m, avg_1m_from_24h: smartNoise.avgVolume1mFrom24h });
   }
-  if (!openTrade && strategyEntry.signal === "BUY") shouldInvokeAi = true;
-  const paperLiveAiDrill = Boolean(paperScenario?.name && readPaperScenarioUseLiveAi());
-  if (paperLiveAiDrill) shouldInvokeAi = true;
   const volumeSpikeMultiplier = resolveVolumeSpikeMultiplier(symbol);
   const volumeSpike = Boolean(Number(snapshot.avgVolume1m) > 0 && Number(lastCandle?.volume ?? 0) >= Number(snapshot.avgVolume1m) * volumeSpikeMultiplier);
   const sessionAware = resolveSessionAwareMinAiConfidence({ baseMinAiConfidence: minAiConfidence, avgVolume1m: Number(snapshot.avgVolume1m), lastCandleVolume: Number(lastCandle?.volume ?? 0) });
@@ -153,15 +189,30 @@ export async function decideSymbolCycleOutcome(params: {
     const baseMin = toNumber(row.min_ai_confidence, minAiConfidence);
     minAiConfidence = Math.min(minAiConfidence, baseMin);
   }
-  const noTradeFallback = await resolveNoTradeFallback({
-    supabase,
-    userId,
-    symbol,
-    hasOpenTrade: Boolean(openTrade),
-    minAiConfidence,
-    minTechScore: minTech,
-    paperOnly: isPaperTrading && !liveStylePractice,
-  });
+  const needsPaperLossLesson = isPaperTrading && !hasOpenPosition && userId !== "unknown";
+  const [noTradeFallback, paperLossLessonResult] = await Promise.all([
+    resolveNoTradeFallback({
+      supabase,
+      userId,
+      symbol,
+      hasOpenTrade: hasOpenPosition,
+      minAiConfidence,
+      minTechScore: minTech,
+      paperOnly: isPaperTrading && !liveStylePractice,
+    }),
+    needsPaperLossLesson
+      ? resolvePaperLossLesson({
+        supabase,
+        userId,
+        symbol,
+        regime: String(snapshot.marketRegime ?? "NEUTRAL"),
+        rsi: Number(snapshot.rsi),
+        latestPrice: Number(snapshot.latestPrice),
+        bbLower: Number(snapshot.bbLower),
+      })
+      : Promise.resolve(null),
+  ]);
+  let paperLossLesson = paperLossLessonResult;
   if (noTradeFallback.active) {
     minAiConfidence = noTradeFallback.adjustedMinAiConfidence;
     minTech = noTradeFallback.adjustedMinTechScore;
@@ -188,8 +239,38 @@ export async function decideSymbolCycleOutcome(params: {
   });
   minAiConfidence = practicedFloors.minAiConfidence;
   minTech = practicedFloors.minTechScore;
+  let strategyEntry;
+  let strategySignal;
+  let strategyFailDetail;
+  if (hasOpenPosition) {
+    strategyEntry = buildOpenPositionSupervisorEntry(supervisorOpenTrade);
+    strategySignal = resolvePositionSupervisorStrategySignal(effectiveStrategyExit);
+    strategyFailDetail = null;
+  } else {
+    strategyEntry = checkEntryConditions(snapshot, {
+      paperExploration: isPaperTrading && !liveStylePractice,
+      botSettings: row,
+    });
+    strategySignal = strategyEntry.signal === "SELL" ? "HOLD" : strategyEntry.signal;
+    strategyFailDetail = strategyEntry.signal === "BUY"
+      ? null
+      : `FAIL_STRATEGY:${String(strategyEntry.strategy_fail_detail ?? "NO_BUY")}`;
+  }
   const strategyReasonEarly = strategyEntry.strategy_reason ?? null;
-  if (isOversoldBounceContext(snapshot, strategyReasonEarly)) {
+  let fastBounceLane = false;
+  if (
+    globalSettings &&
+    !hasOpenPosition &&
+    readFastBounceFuturesLaneEnabled() &&
+    !isHighRiskCrashRegime(globalSettings.market_regime)
+  ) {
+    const mathHit = evaluateFastMathBounceEntry(snapshot, row as BotSettingsRow);
+    if (mathHit?.strategy_reason === "strategy_oversold_bounce_entry") {
+      fastBounceLane = true;
+      console.log(`[FAST_MATH] ${symbol} bounce_lane=1 skip_inline_llm=1`);
+    }
+  }
+  if (!hasOpenPosition && isOversoldBounceContext(snapshot, strategyReasonEarly)) {
     const relaxedTech = resolveMinTechForOversoldBounce(minTech, snapshot, strategyReasonEarly);
     if (relaxedTech < minTech) {
       console.log("[OVERSOLD_BOUNCE]", {
@@ -208,17 +289,8 @@ export async function decideSymbolCycleOutcome(params: {
     GLOBAL_BOT_CONFIG.AI_BUY_CONVICTION_THRESHOLD,
     regimeGatePolicy.minAiConfidenceFloor,
   );
-  let paperLossLesson: Awaited<ReturnType<typeof resolvePaperLossLesson>> | null = null;
-  if (isPaperTrading && !openTrade && userId !== "unknown") {
-    paperLossLesson = await resolvePaperLossLesson({
-      supabase,
-      userId,
-      symbol,
-      regime: String(snapshot.marketRegime ?? "NEUTRAL"),
-      rsi: Number(snapshot.rsi),
-      latestPrice: Number(snapshot.latestPrice),
-      bbLower: Number(snapshot.bbLower),
-    });
+  minAiConfidence = capMinAiConfidenceForTrendingRegime(minAiConfidence, regimeGatePolicy);
+  if (paperLossLesson) {
     if (paperLossLesson.confidenceBump > 0) {
       minAiConfidence = Math.min(95, minAiConfidence + paperLossLesson.confidenceBump);
     }
@@ -226,35 +298,81 @@ export async function decideSymbolCycleOutcome(params: {
       console.log("[PAPER_LOSS_LESSON]", { symbol, userId, ...paperLossLesson });
     }
   }
-  let strategySignal = !openTrade && strategyEntry.signal === "SELL" ? "HOLD" : strategyEntry.signal;
-  const strategyFailDetail = strategyEntry.signal === "BUY" ? null : `FAIL_STRATEGY:${String(strategyEntry.strategy_fail_detail ?? "NO_BUY")}`;
-  const preflight = collectPreflightVetoChecks({
-    snapshot,
-    technicalScore,
-    aggressiveModeEnabled,
-    strategySignal,
-    minTechnicalScore: minTech,
-    minVolume24hQuote,
-    isSandboxMode,
-    isGhostExecution,
-    strategyReason: strategyEntry.strategy_reason,
-    buyRsiMax: resolveStrategyBuyRsiMax(row),
-    gatePolicy: regimeGatePolicy,
-  });
+  let preflight;
+  if (hasOpenPosition) {
+    preflight = collectExitSupervisorPreflight();
+  } else {
+    preflight = collectPreflightVetoChecks({
+      snapshot,
+      technicalScore,
+      aggressiveModeEnabled,
+      strategySignal,
+      minTechnicalScore: minTech,
+      minVolume24hQuote,
+      isSandboxMode,
+      isGhostExecution,
+      strategyReason: strategyEntry.strategy_reason,
+      buyRsiMax: resolveStrategyBuyRsiMax(row),
+      gatePolicy: regimeGatePolicy,
+    });
+  }
   if (noTradeFallback.active) preflight.veto_reasons.push(`NO_TRADE_FALLBACK_ACTIVE:${String(noTradeFallback.reason ?? "active")}`);
   if (smartNoise.vetoReasons.length) preflight.veto_reasons.push(...smartNoise.vetoReasons);
+  const buyPreflightBlock = evaluateBuyLlmPreflightBlock({
+    symbol,
+    hasOpenPosition,
+    strategyEntry,
+    strategyFailDetail,
+    preflightVetoReasons: preflight.veto_reasons,
+  });
+  if (buyPreflightBlock.log) console.log(buyPreflightBlock.log);
   const safetyAi = { ai_confidence: 0, trend: "neutral" as const, trend_alignment: false, action: "HOLD" as const, groq_verdict: undefined, groq_reason: undefined };
+  const llmGatekeeper = evaluateLlmGatekeeperPrefilter({
+    symbol,
+    snapshot,
+    openTrade: hasOpenPosition,
+    strategyEntry,
+    strategyExitTriggered: effectiveStrategyExit.shouldExit,
+    technicalScore,
+    minTechScore: minTech,
+    aggressiveModeEnabled,
+    paperScenarioLiveAi: paperLiveAiDrill,
+    moneyMachineSkipAi: mm.skipAi,
+    isSandboxMode,
+    isGhostExecution,
+    isPaperTrading,
+    paperRelaxed: isPaperTrading && !liveStylePractice,
+    botSettingsRow: row,
+    tradeRegime,
+    llmDispatchConvictionFloor: minAiConfidence,
+  });
+  const shouldInvokeAi = !buyPreflightBlock.blocked &&
+    llmGatekeeper.allowLlm &&
+    !llmGatekeeper.shortCircuit;
+  if (llmGatekeeper.log) {
+    console.log(llmGatekeeper.log);
+  }
+  if (llmGatekeeper.shortCircuit && llmGatekeeper.phase != null) {
+    console.log(
+      `[PRE-FILTER] ${symbol} phase=${llmGatekeeper.phase} short_circuit=true detail=${llmGatekeeper.detail}`,
+    );
+  }
   let aiVerdictMs = 0;
   let aiVerdictErrorDetail: string | null = null;
   let aiVerdict: { ai: import("./types.ts").AiAnalysis; aiQuotaFallback: boolean };
-  if (prefetchedAiVerdict) {
-    aiVerdict = prefetchedAiVerdict;
+  if (fastBounceLane) {
+    aiVerdict = { ai: buildFastLaneAiStub(), aiQuotaFallback: false };
+    aiVerdictMs = 0;
+  } else if (shouldUsePrefetchedBuyAiVerdict(prefetchedAiVerdict, hasOpenPosition, buyPreflightBlock)) {
+    aiVerdict = prefetchedAiVerdict!;
+  } else if (!shouldInvokeAi) {
+    aiVerdict = { ai: safetyAi, aiQuotaFallback: false };
   } else {
     const aiVerdictStarted = performance.now();
     aiVerdict = await safeExecute(`ai_verdict_${symbol}`, async () => {
       try {
         return await getAiVerdict({
-          shouldInvokeAi,
+          shouldInvokeAi: llmGatekeeper.allowLlm,
           snapshot,
           symbol,
           row,
@@ -264,6 +382,9 @@ export async function decideSymbolCycleOutcome(params: {
           signal,
           paperScenarioLiveAi: paperLiveAiDrill,
           symbolMatrixIndex: params.symbolMatrixIndex,
+          llmGatekeeper,
+          llmDispatchConvictionFloor: minAiConfidence,
+          buyPreflightBlocked: buyPreflightBlock.blocked,
         });
       } catch (e) {
         aiVerdictErrorDetail = formatUnknownError(e);
@@ -290,7 +411,7 @@ export async function decideSymbolCycleOutcome(params: {
   if (
     regimeGatePolicy.regime === "REGIME_SIDEWAYS" &&
     strategySignal !== "BUY" &&
-    !openTrade &&
+    !hasOpenPosition &&
     aiBiasSupportsSidewaysGrinder(ai) &&
     Number.isFinite(aiConfidence) &&
     aiConfidence >= regimeGatePolicy.minAiConfidenceFloor &&
@@ -326,15 +447,17 @@ export async function decideSymbolCycleOutcome(params: {
     const n = Number(Deno.env.get("ORDER_BOOK_IMBALANCE_MIN_HOLD_MS") ?? "");
     return Number.isFinite(n) && n >= 0 && n <= 30 * 60 * 1000 ? n : 120_000;
   })();
-  const orderBookImbalanceExitWeakStreak = openTrade ? Math.max(0, Math.floor(toNumber((openTrade as any)?.extra?.ob_imbalance_weak_streak, 0))) : 0;
+  const orderBookImbalanceExitWeakStreak = supervisorOpenTrade
+    ? Math.max(0, Math.floor(toNumber((supervisorOpenTrade as any)?.extra?.ob_imbalance_weak_streak, 0)))
+    : 0;
   const matrixTechnical = paperScenario?.name && strategySignal === "BUY" && technical === "HOLD" ? "BUY" : technical;
   const strategyBuyRsiThreshold = resolveStrategyBuyRsiMax(row);
   let { decision, reason, orderBookImbalanceWeakStreak: nextObWeakStreak } = decideHybridMatrix({
-    strategySignal, hasOpenTrade: !!openTrade, strategyExitTriggered: effectiveStrategyExit.shouldExit, aggressiveModeEnabled, technical: matrixTechnical,
+    strategySignal, hasOpenTrade: hasOpenPosition, strategyExitTriggered: effectiveStrategyExit.shouldExit, aggressiveModeEnabled, technical: matrixTechnical,
     technicalScore, rsi: snapshot.rsi, imbalanceRatio: snapshot.imbalance_ratio, marketRegime: snapshot.marketRegime, latestPrice: snapshot.latestPrice,
     bbLower: snapshot.bbLower, isBreakout: snapshot.latestPrice > snapshot.bbUpper, isBelowEma200: ema200GateBlocks, ai, minAiConfidence,
     minTechnicalScore: minTech, symbol, volumeSpike, memeSentimentSupport, orderBookImbalanceExitDisabledUntilMs, orderBookImbalanceExitBelow,
-    orderBookImbalanceMinHoldMs, orderBookImbalanceExitWeakStreak, openTradeOpenedAt: openTrade?.opened_at ? String((openTrade as any).opened_at) : null,
+    orderBookImbalanceMinHoldMs, orderBookImbalanceExitWeakStreak, openTradeOpenedAt: supervisorOpenTrade?.opened_at ? String((supervisorOpenTrade as any).opened_at) : null,
     noTradeScoutActive: noTradeFallback.active,
     paperExploration: isPaperTrading && !liveStylePractice,
     strategyBuyRsiThreshold,
@@ -342,16 +465,16 @@ export async function decideSymbolCycleOutcome(params: {
     oversoldBounceActive: isOversoldBounceContext(snapshot, strategyEntry.strategy_reason),
     gatePolicy: regimeGatePolicy,
   });
-  if (openTrade && typeof nextObWeakStreak === "number" && Number.isFinite(nextObWeakStreak)) {
-    const openId = toStringValue((openTrade as any)?.id);
+  if (supervisorOpenTrade && typeof nextObWeakStreak === "number" && Number.isFinite(nextObWeakStreak)) {
+    const openId = toStringValue((supervisorOpenTrade as any)?.id);
     if (openId) {
-      const extra = ((openTrade as any)?.extra as Record<string, unknown> | undefined) ?? {};
+      const extra = ((supervisorOpenTrade as any)?.extra as Record<string, unknown> | undefined) ?? {};
       await safeExecute("ob_imbalance_weak_streak_persist", () => supabase.from("trades").update({ extra: { ...extra, ob_imbalance_weak_streak: nextObWeakStreak } }).eq("id", openId).ilike("status", "open"), undefined);
     }
   }
   let buyReentryBlocked = false;
   let buyReentryReason: string | undefined;
-  if (!openTrade && userId !== "unknown" && !paperScenario) {
+  if (!hasOpenPosition && userId !== "unknown" && !paperScenario) {
     const guard = await blockedByBuyReentryGuards({ supabase, userId, symbol, paperOnly: isPaperTrading });
     buyReentryBlocked = guard.blocked;
     buyReentryReason = guard.reason;
@@ -393,7 +516,7 @@ export async function decideSymbolCycleOutcome(params: {
   let executionUsdScale: number | undefined;
   if (groqVerdictUpper !== "REJECT") {
     const mtfHalf = tryMtfOnlyHighConfidenceHalfBuy({
-      matrix: { strategySignal, hasOpenTrade: !!openTrade, strategyExitTriggered: effectiveStrategyExit.shouldExit, aggressiveModeEnabled, technical, technicalScore, rsi: snapshot.rsi, imbalanceRatio: snapshot.imbalance_ratio, marketRegime: snapshot.marketRegime, latestPrice: snapshot.latestPrice, bbLower: snapshot.bbLower, isBreakout: snapshot.latestPrice > snapshot.bbUpper, isBelowEma200: ema200GateBlocks, ai, minAiConfidence, minTechnicalScore: minTech, symbol, volumeSpike, memeSentimentSupport, orderBookImbalanceExitDisabledUntilMs },
+      matrix: { strategySignal, hasOpenTrade: hasOpenPosition, strategyExitTriggered: effectiveStrategyExit.shouldExit, aggressiveModeEnabled, technical, technicalScore, rsi: snapshot.rsi, imbalanceRatio: snapshot.imbalance_ratio, marketRegime: snapshot.marketRegime, latestPrice: snapshot.latestPrice, bbLower: snapshot.bbLower, isBreakout: snapshot.latestPrice > snapshot.bbUpper, isBelowEma200: ema200GateBlocks, ai, minAiConfidence, minTechnicalScore: minTech, symbol, volumeSpike, memeSentimentSupport, orderBookImbalanceExitDisabledUntilMs },
       snapshot, decision, reason, ai,
     });
     if (mtfHalf.apply) {
@@ -402,7 +525,7 @@ export async function decideSymbolCycleOutcome(params: {
       executionUsdScale = mtfHalf.executionUsdScale;
     }
   }
-  if (smartNoise.blockBuy && decision === "BUY" && !openTrade && !isSandboxMode) {
+  if (smartNoise.blockBuy && decision === "BUY" && !hasOpenPosition && !isSandboxMode) {
     decision = "HOLD";
     reason = smartNoise.blockReason ?? "hold_smart_filter_wide_spread";
     executionUsdScale = undefined;
@@ -412,11 +535,15 @@ export async function decideSymbolCycleOutcome(params: {
       policy: regimeGatePolicy,
       snapshot,
       strategySignal,
+      aiConfidence: Number(ai?.ai_confidence ?? 0),
+      strategyReason: strategyEntry.strategy_reason,
     });
     if (!trendDef.ok) {
       decision = "HOLD";
       reason = `hold_trending_defensive:${trendDef.failCodes.join(",")}`;
       executionUsdScale = undefined;
+    } else if (trendDef.aiOverrideApplied) {
+      reason = `${reason ?? "buy"}|trending_defensive_ai_override`;
     }
   }
   const maxOpenTradesRaw = toNumber((row as any).max_open_trades, 0);
@@ -436,7 +563,7 @@ export async function decideSymbolCycleOutcome(params: {
     }
   }
   let demoProbeBuyFlag = false;
-  const paperProbe = await resolveDemoPaperProbeBuy({ supabase, userId, symbol, row, hasOpenTrade: Boolean(openTrade) });
+  const paperProbe = await resolveDemoPaperProbeBuy({ supabase, userId, symbol, row, hasOpenTrade: hasOpenPosition });
   const probeQualityOk = passesDemoPaperProbeQualityGate({
     strategySignal,
     technicalScore,
@@ -452,7 +579,7 @@ export async function decideSymbolCycleOutcome(params: {
   } else if (paperProbe.apply && decision === "HOLD" && !probeQualityOk) {
     reason = `${reason ?? "hold"}|demo_probe_blocked_quality_gate`;
   }
-  if (decision === "BUY" && !openTrade && isPaperTrading && liveStylePractice && !demoProbeBuyFlag) {
+  if (decision === "BUY" && !hasOpenPosition && isPaperTrading && liveStylePractice && !demoProbeBuyFlag) {
     const chopBlock = evaluateChopBuyBlock({
       snapshot,
       paperLiveStyle: liveStylePractice,
@@ -464,10 +591,11 @@ export async function decideSymbolCycleOutcome(params: {
       executionUsdScale = undefined;
     }
   }
-  const confidencePolicy = resolveConfidencePolicy(row as Record<string, unknown>, {
+  let confidencePolicy = resolveConfidencePolicy(row as Record<string, unknown>, {
     marketRegime: String(snapshot.marketRegime ?? "NEUTRAL"),
     tradeRegime,
   });
+  confidencePolicy = tuneConfidencePolicyForRegimeGate(confidencePolicy, regimeGatePolicy);
   const blockedTradingPolicyRules: string[] = [];
   const reasonStr = typeof reason === "string" ? reason : "";
   if (decision === "HOLD") {
@@ -528,9 +656,18 @@ export async function decideSymbolCycleOutcome(params: {
       executionUsdScale = undefined;
     }
   }
-  if (decision === "BUY" && userId !== "unknown" && !openTrade && !paperScenario && buyReentryBlocked) {
+  if (decision === "BUY" && userId !== "unknown" && !hasOpenPosition && !paperScenario && buyReentryBlocked) {
     decision = "HOLD";
     reason = buyReentryReason ?? "hold_buy_reentry_guard";
+    executionUsdScale = undefined;
+    demoProbeBuyFlag = false;
+  }
+  if (fastBounceLane && !hasOpenPosition) {
+    decision = "BUY";
+    reason = "fast_math_bounce_futures_lane";
+    strategySignal = "BUY";
+    strategyEntry.signal = "BUY";
+    strategyEntry.strategy_reason = "strategy_oversold_bounce_entry";
     executionUsdScale = undefined;
     demoProbeBuyFlag = false;
   }
@@ -561,6 +698,8 @@ export async function decideSymbolCycleOutcome(params: {
     vetoDetailsPayload,
     minVolume24hQuote,
     grinderTakeProfitPct,
+    fastBounceLane,
+    globalSettings,
     dynRegimeDiag,
     regimeGatePolicy,
     rawAiExcerpt: (() => {

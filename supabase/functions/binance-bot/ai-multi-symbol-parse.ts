@@ -4,12 +4,11 @@ import { normalizeAiResponse } from "./ai-normalize-model-response.ts";
 import { normalizeSymbol, safeJsonParseFromText } from "./utils.ts";
 
 export const MULTI_SYMBOL_BATCH_INSTRUCTION = [
-  "MULTI_SYMBOL_BATCH: You are evaluating an array of multiple crypto assets at once.",
-  "The user JSON has shape { symbols: [ { symbol, DATA }, ... ] } where each DATA is the usual single-symbol payload (tuples, RSI, trend_htf, etc.).",
-  "Analyze each asset independently. Return ONE JSON object: top-level keys MUST be exactly each symbol string (e.g. BTCUSDT, SOLUSDT, PEPEUSDT).",
-  "Each value MUST include: trend_score, momentum_score, volume_score, order_book_score, trend_alignment, action, pro_tip (≤12 words, JSON only).",
-  "When action is BUY for a symbol, also set risk_review_verdict to APPROVE or REJECT and risk_review_reason (short) so trap review can stay inline.",
-  "Do not wrap per-symbol results inside a generic key like \"response\" or \"data\" unless that object is the only top-level key and its children are the symbols.",
+  "MULTI_SYMBOL_BATCH: user JSON is {symbols:[{s,d},...]} — analyze each d independently.",
+  "Return one raw minified JSON object: top-level keys = exact symbol strings (BTCUSDT).",
+  "No markdown, fences, newlines, or spaces outside JSON string values.",
+  "Per-symbol value keys only: a,al,ts,ms,vs,os,p (same as single-scan). Example value: {\"a\":\"BUY\",\"al\":1,\"ts\":70,\"ms\":65,\"vs\":60,\"os\":55,\"p\":\"tip\"}.",
+  "BUY may add gv=APPROVE|REJECT, gr=short reason. No wrapper keys like results/data.",
 ].join(" ");
 
 export function extractBraceJson(raw: string): string {

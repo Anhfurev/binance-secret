@@ -7,6 +7,7 @@ import { createOrder } from "./binance.ts";
 import { handlePartialSellAndKeepOpen } from "./sell-partial.ts";
 import { closeTradeRowAfterSell } from "./sell-close.ts";
 import { resolveExchangeSkipped, resolveGhostMode, resolveTestMode } from "./bot-shared.ts";
+import { isPaperTradingEnvForced } from "./paper-trade-interceptor.ts";
 import { resolveSellFillFinancials } from "./sell-financials.ts";
 import { resolveFillVwap } from "./fill-fees.ts";
 import { insertSellFillQualityLog } from "./sell-fill-quality.ts";
@@ -110,7 +111,9 @@ export async function executeSellFlow(params: {
       "Invariant: ghostMode requires resolveExchangeSkipped — refusing createOrder (SELL) to protect live funds",
     );
   }
-  const createOrderTestShortCircuit = ghostMode ? true : exchangeSkipped;
+  const createOrderTestShortCircuit = ghostMode
+    ? true
+    : (exchangeSkipped || isPaperTradingEnvForced());
 
   const sellOrder = await createOrder({
     supabase,

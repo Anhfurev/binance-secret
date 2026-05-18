@@ -3,6 +3,7 @@ import type { createClient } from "npm:@supabase/supabase-js@2";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BotSettingsRow, OpenTradeRow } from "./types.ts";
 import { ATR_STOP_TRAIL_MULTIPLIER } from "./constants.ts";
+import { resolveAssetTrailingStopPct } from "./asset-risk-profile.ts";
 import { widenTrailingStopBelowHigh } from "./buy-helpers.ts";
 import { clamp, toNumber } from "./utils.ts";
 
@@ -136,6 +137,10 @@ export function resolveTrailingStopPct(value: unknown) {
   const raw = toNumber(value, DEFAULT_TRAILING_STOP_PCT);
   const normalized = raw > 1 ? raw / 100 : raw;
   return clamp(normalized, 0.001, 0.2);
+}
+
+export function resolveTrailingStopPctForSymbol(symbol: string, value: unknown) {
+  return clamp(resolveAssetTrailingStopPct(symbol, value), 0.001, 0.2);
 }
 
 export function buildTrailingStopState(

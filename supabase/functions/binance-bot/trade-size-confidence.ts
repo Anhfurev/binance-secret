@@ -85,8 +85,13 @@ export function scaleTradeUsdByGovernanceConfidence(params: {
   effectiveConfidence: number;
   minTradeUsd: number;
   currentBalance: number;
+  /** Rubber-band bounce: War Room floor already relaxed — do not shrink notional again. */
+  preserveNotional?: boolean;
 }): number {
   const tradeUsd = Math.max(0, params.tradeUsd);
+  if (params.preserveNotional) {
+    return Math.min(params.currentBalance, Math.max(params.minTradeUsd, tradeUsd));
+  }
   const effective = Math.max(0, params.effectiveConfidence);
   const execution = Math.max(0, params.executionConfidence);
   if (!(effective > 0) || !(execution > 0)) {

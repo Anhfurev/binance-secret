@@ -16,6 +16,42 @@ export function isOversoldBounceStrategyReason(reason: string | undefined | null
   return String(reason ?? "") === "strategy_oversold_bounce_entry";
 }
 
+/** Max AI confidence for bounce entries when model action is HOLD/SELL (not hard bearish). */
+export const DEFAULT_OVERSOLD_BOUNCE_AI_SOFT_CONFIDENCE_MAX = 65;
+
+export function readOversoldBounceAiSoftConfidenceMax(): number {
+  const raw = Number(Deno.env.get("OVERSOLD_BOUNCE_AI_SOFT_CONFIDENCE_MAX") ?? "");
+  if (!Number.isFinite(raw) || raw <= 0) {
+    return DEFAULT_OVERSOLD_BOUNCE_AI_SOFT_CONFIDENCE_MAX;
+  }
+  return Math.min(80, Math.max(40, Math.floor(raw)));
+}
+
+export function isOversoldBounceEntry(
+  strategyReason: string | null | undefined,
+  oversoldBounceActive?: boolean,
+): boolean {
+  return isOversoldBounceStrategyReason(strategyReason) || Boolean(oversoldBounceActive);
+}
+
+/** Rubber-band bounce: allow matrix BUY despite soft AI HOLD/SELL when conviction is moderate-low. */
+export function qualifiesOversoldBounceAiSoftOverride(
+  ai: {
+    action?: string;
+    ai_confidence?: number;
+    groq_verdict?: string;
+  },
+  strategyReason: string | null | undefined,
+  oversoldBounceActive?: boolean,
+): boolean {
+  if (!isOversoldBounceEntry(strategyReason, oversoldBounceActive)) return false;
+  if (String(ai.action ?? "").toUpperCase() === "BUY") return false;
+  if (ai.groq_verdict === "REJECT") return false;
+  const conf = Number(ai.ai_confidence);
+  if (!Number.isFinite(conf) || conf <= 0) return false;
+  return conf < readOversoldBounceAiSoftConfidenceMax();
+}
+
 /** Active when deep RSI or strategy tagged a bounce entry this cycle. */
 export function isOversoldBounceContext(
   snapshot: Pick<IndicatorSnapshot, "rsi">,

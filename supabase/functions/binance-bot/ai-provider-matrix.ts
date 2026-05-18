@@ -1,11 +1,13 @@
 // @ts-nocheck
 /** Per-symbol LLM load balancing: even index → Groq primary, odd → Gemini primary. */
 
+import { readAiCascadePipelineEnabled } from "./ai-cascade-config.ts";
 import { readPreemptiveLlmKeyRoutingEnabled } from "./llm-key-preemptive-route.ts";
 
 export type MatrixLlmProvider = "groq" | "gemini";
 
 export function readAiProviderMatrixEnabled(): boolean {
+  if (readAiCascadePipelineEnabled()) return false;
   const raw = String(Deno.env.get("AI_PROVIDER_MATRIX") ?? "1").trim().toLowerCase();
   return raw !== "0" && raw !== "false" && raw !== "no" && raw !== "off";
 }
@@ -22,10 +24,10 @@ export function resolveMatrixFallbackProvider(symbolIndex: number): MatrixLlmPro
 
 function readSymbolGapBounds(): { defaultMs: number; minMs: number } {
   if (readAiProviderMatrixEnabled() && readPreemptiveLlmKeyRoutingEnabled()) {
-    return { defaultMs: 400, minMs: 200 };
+    return { defaultMs: 2000, minMs: 500 };
   }
   if (readAiProviderMatrixEnabled()) {
-    return { defaultMs: 500, minMs: 200 };
+    return { defaultMs: 2000, minMs: 500 };
   }
   return { defaultMs: 2500, minMs: 2500 };
 }
@@ -42,7 +44,14 @@ export function readSymbolMatrixGapMs(): number {
   return Math.min(30_000, Math.max(minMs, Math.floor(raw)));
 }
 
+/** Opt-in legacy stagger between cron symbols (default off). */
+export function readCronSerialSymbolStaggerEnabled(): boolean {
+  const raw = String(Deno.env.get("CRON_SERIAL_SYMBOL_STAGGER") ?? "0").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
 export function readCronSerialSymbolCyclesEnabled(): boolean {
+  if (!readCronSerialSymbolStaggerEnabled()) return false;
   return readAiProviderMatrixEnabled() || readLegacySerialForGeminiQuota();
 }
 

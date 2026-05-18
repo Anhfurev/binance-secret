@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { SERVICE_ROLE_KEY, SUPABASE_URL } from "./constants.ts";
+import { SUPABASE_CLIENT_OPTIONS } from "./supabase-client-options.ts";
 import type { AiAnalysis } from "./types.ts";
 import { toNumber } from "./utils.ts";
 import { computeWeightedConfidence } from "./ai-scoring.ts";
@@ -11,9 +12,7 @@ import {
 
 export function getAiCacheClient() {
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) return null;
-  return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
+  return createClient(SUPABASE_URL, SERVICE_ROLE_KEY, SUPABASE_CLIENT_OPTIONS);
 }
 
 function clamp01to100(value: number) {
@@ -133,6 +132,7 @@ export type AiQuotaState = {
   groq_key_cooldowns: Record<string, number>;
   updated_at?: string | null;
   last_failure_at?: string | null;
+  edge_cycle_lease_until?: string | null;
 };
 
 const DEFAULT_AI_QUOTA_SCOPE = "global";
@@ -270,6 +270,7 @@ export async function patchAiQuotaState(
   const buildNewPayload = (
     includeLastFailureAt: boolean,
     includeGroqScanKeyIndex: boolean,
+    includeEdgeCycleLease: boolean,
   ) => {
     const payload: Record<string, unknown> = {
       id: scope,
@@ -290,14 +291,18 @@ export async function patchAiQuotaState(
     if (includeLastFailureAt && patch.last_failure_at !== undefined) {
       payload.last_failure_at = patch.last_failure_at;
     }
+    if (includeEdgeCycleLease && patch.edge_cycle_lease_until !== undefined) {
+      payload.edge_cycle_lease_until = patch.edge_cycle_lease_until;
+    }
     return payload;
   };
 
   let includeScan = true;
   let includeLastFailureAt = true;
+  let includeEdgeCycleLease = true;
   let preferred = await supabase
     .from("ai_quota_state")
-    .upsert(buildNewPayload(includeLastFailureAt, includeScan), { onConflict: "id" });
+    .upsert(buildNewPayload(includeLastFailureAt, includeScan, includeEdgeCycleLease), { onConflict: "id" });
 
   while (preferred.error && isMissingColumnError(preferred.error.message)) {
     const msg = String(preferred.error.message ?? "").toLowerCase();
@@ -308,11 +313,14 @@ export async function patchAiQuotaState(
     } else if (includeLastFailureAt && msg.includes("last_failure")) {
       includeLastFailureAt = false;
       progressed = true;
+    } else if (includeEdgeCycleLease && msg.includes("edge_cycle_lease")) {
+      includeEdgeCycleLease = false;
+      progressed = true;
     }
     if (!progressed) break;
     preferred = await supabase
       .from("ai_quota_state")
-      .upsert(buildNewPayload(includeLastFailureAt, includeScan), { onConflict: "id" });
+      .upsert(buildNewPayload(includeLastFailureAt, includeScan, includeEdgeCycleLease), { onConflict: "id" });
   }
 
   if (!preferred.error) return;
@@ -332,6 +340,9 @@ export async function patchAiQuotaState(
     if (patch.gemini_key_cooldowns != null) lp.gemini_key_cooldowns = patch.gemini_key_cooldowns;
     if (patch.groq_key_cooldowns != null) lp.groq_key_cooldowns = patch.groq_key_cooldowns;
     if (patch.last_failure_at !== undefined) lp.last_failure_at = patch.last_failure_at;
+    if (patch.edge_cycle_lease_until !== undefined) {
+      lp.edge_cycle_lease_until = patch.edge_cycle_lease_until;
+    }
     return lp;
   };
 

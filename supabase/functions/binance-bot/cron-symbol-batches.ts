@@ -1,9 +1,9 @@
 // @ts-nocheck
-/** Staggered parallel cron symbol batches (provider matrix / serial quota mode). */
+/** Parallel cron symbol batches — all symbols run concurrently (no index×gap stagger). */
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { DEFAULT_SYMBOL } from "./constants.ts";
 import type { BotActionResult } from "./types.ts";
-import { normalizeSymbol, sleepMs } from "./utils.ts";
+import { normalizeSymbol } from "./utils.ts";
 import { botDebug } from "./bot-debug.ts";
 import { withTelegramCycleScope } from "./bot-shared.ts";
 import { enqueueCycleLog } from "./cycle-log-buffer.ts";
@@ -28,17 +28,17 @@ export type CronSymbolBatchAccum = {
   perSymbol: Array<{ symbol: string; ok: boolean; detail?: string; scanned?: number }>;
 };
 
-export async function runCronSymbolBatchesStaggeredParallel(params: {
+export async function runCronSymbolBatchesParallel(params: {
   supabase: ReturnType<typeof createClient>;
   symbols: string[];
   lastAiPriceBySymbol: Map<string, number>;
   marketCache: Map<string, import("./types.ts").IndicatorSnapshot>;
   btcOverbought: boolean;
   batchId: string;
-  interSymbolGapMs: number;
   matrixRouting: boolean;
   groqPoolN: number;
   gemPoolN: number;
+  signal?: AbortSignal;
 }): Promise<CronSymbolBatchAccum> {
   const {
     supabase,
@@ -47,10 +47,10 @@ export async function runCronSymbolBatchesStaggeredParallel(params: {
     marketCache,
     btcOverbought,
     batchId,
-    interSymbolGapMs,
     matrixRouting,
     groqPoolN,
     gemPoolN,
+    signal,
   } = params;
 
   const accum: CronSymbolBatchAccum = {
@@ -64,20 +64,19 @@ export async function runCronSymbolBatchesStaggeredParallel(params: {
 
   botDebug(
     "cron",
-    matrixRouting ? "parallel_symbol_cycles_provider_matrix" : "parallel_symbol_cycles_gemini_quota",
+    matrixRouting ? "parallel_symbol_cycles_provider_matrix" : "parallel_symbol_cycles",
     {
-      gap_ms: interSymbolGapMs,
       n_symbols: symbols.length,
       batch_id: batchId,
       matrix_routing: matrixRouting ? 1 : 0,
-      stagger: "index_times_gap_before_spawn",
+      stagger: "none",
     },
   );
 
   const settled = await Promise.allSettled(
     symbols.map(async (symbolFilter, symbolMatrixIndex) => {
-      if (symbolMatrixIndex > 0 && interSymbolGapMs > 0) {
-        await sleepMs(symbolMatrixIndex * interSymbolGapMs);
+      if (signal?.aborted) {
+        throw new DOMException("Edge cycle aborted", "AbortError");
       }
       const sym = normalizeSymbol(symbolFilter ?? DEFAULT_SYMBOL, DEFAULT_SYMBOL);
       if (matrixRouting) {
@@ -100,6 +99,7 @@ export async function runCronSymbolBatchesStaggeredParallel(params: {
           marketCache,
           symbolMatrixIndex,
           btcOverbought,
+          signal,
         }),
       );
       return { sym, symbolFilter, batchResult };
@@ -110,13 +110,18 @@ export async function runCronSymbolBatchesStaggeredParallel(params: {
     const sym = normalizeSymbol(symbols[i] ?? DEFAULT_SYMBOL, DEFAULT_SYMBOL);
     const entry = settled[i];
     if (entry.status !== "fulfilled") {
-      accum.perSymbol.push({ symbol: sym, ok: false, detail: String(entry.reason) });
+      const reason = String(entry.reason ?? "");
+      if (signal?.aborted || reason.includes("AbortError") || reason.includes("aborted")) {
+        accum.perSymbol.push({ symbol: sym, ok: false, detail: "edge_cycle_aborted" });
+        continue;
+      }
+      accum.perSymbol.push({ symbol: sym, ok: false, detail: reason });
       enqueueCycleLog({
         level: "error",
         source: "symbol-cycle",
         symbol: sym,
         message: "symbol_cycle_failed",
-        meta: { event: "symbol_cycle_failed", detail: String(entry.reason), batch_id: batchId },
+        meta: { event: "symbol_cycle_failed", detail: reason, batch_id: batchId },
       });
       continue;
     }
@@ -131,3 +136,6 @@ export async function runCronSymbolBatchesStaggeredParallel(params: {
 
   return accum;
 }
+
+/** @deprecated Use runCronSymbolBatchesParallel — stagger removed. */
+export const runCronSymbolBatchesStaggeredParallel = runCronSymbolBatchesParallel;

@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { edgeWaitUntil } from "./edge-runtime.ts";
 import { isTransientPostgrestError } from "./postgrest-errors.ts";
 
 type DebugMeta = Record<string, unknown>;
@@ -99,9 +100,9 @@ export function botDebug(scope: string, event: string, meta: DebugMeta = {}) {
   console.log(`[BOT DEBUG] ${scope}.${event} ${safeJson(meta)}`);
   if (SENTRY_DEBUG_EVENTS.has(event)) {
     if (WAR_ROOM_SENTRY_EVENTS.has(event)) {
-      void emitWarRoomSentryEvent(scope, event, meta);
+      edgeWaitUntil(emitWarRoomSentryEvent(scope, event, meta));
     } else {
-      void addSentryBreadcrumb(scope, event, meta);
+      edgeWaitUntil(addSentryBreadcrumb(scope, event, meta));
     }
   }
 }

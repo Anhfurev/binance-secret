@@ -373,6 +373,9 @@ verify_jwt = false
 [functions.sunday-summary]
 verify_jwt = false
 
+[functions.test-sol-loop]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

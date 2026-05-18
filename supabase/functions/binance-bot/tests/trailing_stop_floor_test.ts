@@ -4,9 +4,9 @@ import {
   widenTrailingStopBelowHigh,
 } from "../buy-helpers.ts";
 
-Deno.test("meme trailing floor defaults to 1.5% for PEPE", () => {
+Deno.test("meme trailing floor defaults to 6% for PEPE", () => {
   Deno.env.delete("MEME_MIN_TRAILING_PCT");
-  assertEquals(readMemeTrailingPctFloor("PEPEUSDT"), 0.015);
+  assertEquals(readMemeTrailingPctFloor("PEPEUSDT"), 0.06);
 });
 
 Deno.test("widenTrailingStopBelowHigh widens tight ATR trails on memes", () => {

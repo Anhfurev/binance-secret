@@ -1,6 +1,25 @@
 // @ts-nocheck
 /** One Gemini credential: secret value + env var name (for logs; not the API key string). */
-export type GeminiKeySlot = { value: string; label: string; llmDbKeyId?: string };
+export type GeminiKeySlot = {
+  value: string;
+  label: string;
+  llmDbKeyId?: string;
+  llmDbErrorCount?: number;
+  llmDbStatus?: "active" | "cooldown" | "blocked";
+  llmDbCooldownUntil?: string | null;
+};
+
+/** Trim vault/env cruft (quotes, whitespace) without logging the secret. */
+export function normalizeLlmApiKeySecret(raw: unknown): string {
+  let s = String(raw ?? "").trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
 
 /**
  * Gemini keys from Edge env (order preserved, deduped by value):
@@ -21,18 +40,18 @@ export function getGeminiKeySlotsFromEnv(): GeminiKeySlot[] {
       const bNum = Number(b.match(/\d+$/)?.[0] ?? 0);
       return aNum - bNum;
     })
-    .map(([key, value]) => ({ value: String(value).trim(), label: key }));
+    .map(([key, value]) => ({ value: normalizeLlmApiKeySecret(value), label: key }));
 
   const slots: GeminiKeySlot[] = [];
   const seen = new Set<string>();
   const push = (value: string, label: string) => {
-    const v = value.trim();
+    const v = normalizeLlmApiKeySecret(value);
     if (!v || seen.has(v)) return;
     seen.add(v);
     slots.push({ value: v, label });
   };
 
-  const fallbackPrimary = (env.GEMINI_API_KEY ?? "").trim();
+  const fallbackPrimary = normalizeLlmApiKeySecret(env.GEMINI_API_KEY ?? "");
   if (fallbackPrimary) push(fallbackPrimary, "GEMINI_API_KEY");
   for (const row of numbered) push(row.value, row.label);
 
@@ -43,7 +62,26 @@ export function getGeminiKeySlotsFromEnv(): GeminiKeySlot[] {
     parts.forEach((value, i) => push(value, `GEMINI_KEYS_POOL[${i}]`));
   }
 
-  return slots;
+  return dedupeGeminiKeySlotsByValue(slots);
+}
+
+/** One slot per normalized API secret — prefers DB-backed metadata when duplicates exist. */
+export function dedupeGeminiKeySlotsByValue(slots: GeminiKeySlot[]): GeminiKeySlot[] {
+  const byValue = new Map<string, GeminiKeySlot>();
+  for (const slot of slots) {
+    const v = normalizeLlmApiKeySecret(slot.value);
+    if (!v) continue;
+    const normalized: GeminiKeySlot = { ...slot, value: v };
+    const prev = byValue.get(v);
+    if (!prev) {
+      byValue.set(v, normalized);
+      continue;
+    }
+    if (!prev.llmDbKeyId && normalized.llmDbKeyId) {
+      byValue.set(v, normalized);
+    }
+  }
+  return [...byValue.values()];
 }
 
 export function getGeminiKeysFromEnv(): string[] {
@@ -52,17 +90,33 @@ export function getGeminiKeysFromEnv(): string[] {
 
 export function getGroqKeysFromEnv(): string[] {
   const env = Deno.env.toObject();
+  const slots: string[] = [];
+  const seen = new Set<string>();
+  const push = (value: unknown) => {
+    const v = normalizeLlmApiKeySecret(value);
+    if (!v || seen.has(v)) return;
+    seen.add(v);
+    slots.push(v);
+  };
+
+  push(env.GROQ_API_KEY ?? env.GROQ_API_KEY1 ?? "");
+
+  const poolRaw = String(env.GROQ_KEYS_POOL ?? "").trim();
+  if (poolRaw.length) {
+    poolRaw.split(",").map((s) => s.trim()).filter(Boolean).forEach(push);
+  }
+
   const numberedKeys = Object.entries(env)
-    .filter(([key, value]) => /^GROQ_API_KEY\d+$/.test(key) && value?.trim())
+    .filter(([key, value]) => /^GROQ_API_KEY\d+$/.test(key) && normalizeLlmApiKeySecret(value))
     .sort(([a], [b]) => {
       const aNum = Number(a.match(/\d+$/)?.[0] ?? 0);
       const bNum = Number(b.match(/\d+$/)?.[0] ?? 0);
       return aNum - bNum;
     })
-    .map(([, value]) => String(value).trim());
-  const primary = (env.GROQ_API_KEY ?? "").trim();
-  const merged = primary ? [primary, ...numberedKeys] : numberedKeys;
-  return [...new Set(merged)];
+    .map(([, value]) => normalizeLlmApiKeySecret(value));
+  for (const k of numberedKeys) push(k);
+
+  return slots;
 }
 
 /**
@@ -72,12 +126,12 @@ export function getGroqKeysFromEnv(): string[] {
 export function getGroqScanKeysFromEnv(): string[] {
   const env = Deno.env.toObject();
   const scanKeys = Object.entries(env)
-    .filter(([key, value]) => /^GROQ_API_KEY_SCAN\d+$/.test(key) && value?.trim())
+    .filter(([key, value]) => /^GROQ_API_KEY_SCAN\d+$/.test(key) && normalizeLlmApiKeySecret(value))
     .sort(([a], [b]) => {
       const aNum = Number(a.match(/\d+$/)?.[0] ?? 0);
       const bNum = Number(b.match(/\d+$/)?.[0] ?? 0);
       return aNum - bNum;
     })
-    .map(([, value]) => String(value).trim());
+    .map(([, value]) => normalizeLlmApiKeySecret(value));
   return [...new Set(scanKeys)];
 }

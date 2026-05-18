@@ -67,7 +67,10 @@ export function calculateAdx(candles: Candle[], period: number): number {
     dxValues.push(dx);
   }
   if (dxValues.length === 0) return 0;
-  const adx = dxValues.reduce((sum, value) => sum + value, 0) / dxValues.length;
+  let adx = dxValues[0] ?? 0;
+  for (let i = 1; i < dxValues.length; i += 1) {
+    adx = (adx * (period - 1) + dxValues[i]) / period;
+  }
   return Number(adx.toFixed(2));
 }
 

@@ -11,11 +11,11 @@ import {
   summarizeBatchActions,
 } from "../run-symbol-batch.ts";
 
-Deno.test("readBotParallelSymbolCyclesEnabled defaults off and respects on", () => {
+Deno.test("readBotParallelSymbolCyclesEnabled defaults on and respects off", () => {
   Deno.env.delete("BOT_PARALLEL_SYMBOL_CYCLES");
-  assertEquals(readBotParallelSymbolCyclesEnabled(), false);
-  Deno.env.set("BOT_PARALLEL_SYMBOL_CYCLES", "1");
   assertEquals(readBotParallelSymbolCyclesEnabled(), true);
+  Deno.env.set("BOT_PARALLEL_SYMBOL_CYCLES", "0");
+  assertEquals(readBotParallelSymbolCyclesEnabled(), false);
   Deno.env.delete("BOT_PARALLEL_SYMBOL_CYCLES");
 });
 
@@ -56,14 +56,18 @@ Deno.test("readPostBatchBalanceSyncEnabled defaults on", () => {
   Deno.env.delete("POST_BATCH_BALANCE_SYNC");
 });
 
-Deno.test("readSerialSymbolCyclesForGeminiQuota follows matrix and AI_SKIP_GEMINI", () => {
+Deno.test("readSerialSymbolCyclesForGeminiQuota off unless CRON_SERIAL_SYMBOL_STAGGER", () => {
   const prevSkip = Deno.env.get("AI_SKIP_GEMINI");
   const prevDis = Deno.env.get("GEMINI_DISABLED");
   const prevMatrix = Deno.env.get("AI_PROVIDER_MATRIX");
+  const prevStagger = Deno.env.get("CRON_SERIAL_SYMBOL_STAGGER");
   try {
     Deno.env.delete("AI_SKIP_GEMINI");
     Deno.env.delete("GEMINI_DISABLED");
     Deno.env.delete("AI_PROVIDER_MATRIX");
+    Deno.env.delete("CRON_SERIAL_SYMBOL_STAGGER");
+    assertEquals(readSerialSymbolCyclesForGeminiQuota(), false);
+    Deno.env.set("CRON_SERIAL_SYMBOL_STAGGER", "1");
     assertEquals(readSerialSymbolCyclesForGeminiQuota(), true);
     Deno.env.set("AI_PROVIDER_MATRIX", "0");
     Deno.env.set("AI_SKIP_GEMINI", "1");
@@ -78,23 +82,31 @@ Deno.test("readSerialSymbolCyclesForGeminiQuota follows matrix and AI_SKIP_GEMIN
     else Deno.env.set("GEMINI_DISABLED", prevDis);
     if (prevMatrix === undefined) Deno.env.delete("AI_PROVIDER_MATRIX");
     else Deno.env.set("AI_PROVIDER_MATRIX", prevMatrix);
+    if (prevStagger === undefined) Deno.env.delete("CRON_SERIAL_SYMBOL_STAGGER");
+    else Deno.env.set("CRON_SERIAL_SYMBOL_STAGGER", prevStagger);
   }
 });
 
-Deno.test("readGeminiCronSymbolGapMs 400 default with matrix, 0 when Gemini skipped", () => {
+Deno.test("readGeminiCronSymbolGapMs 0 unless serial stagger enabled", () => {
   const prevSkip = Deno.env.get("AI_SKIP_GEMINI");
   const prevGap = Deno.env.get("GEMINI_CRON_SYMBOL_GAP_MS");
   const prevMatrix = Deno.env.get("AI_PROVIDER_MATRIX");
   const prevPreempt = Deno.env.get("LLM_PREEMPTIVE_KEY_ROUTING");
+  const prevStagger = Deno.env.get("CRON_SERIAL_SYMBOL_STAGGER");
+  const prevCascade = Deno.env.get("AI_CASCADE_PIPELINE");
   try {
     Deno.env.delete("AI_SKIP_GEMINI");
     Deno.env.delete("GEMINI_CRON_SYMBOL_GAP_MS");
     Deno.env.delete("SYMBOL_MATRIX_GAP_MS");
+    Deno.env.delete("CRON_SERIAL_SYMBOL_STAGGER");
+    Deno.env.set("AI_CASCADE_PIPELINE", "0");
     Deno.env.set("AI_PROVIDER_MATRIX", "1");
     Deno.env.set("LLM_PREEMPTIVE_KEY_ROUTING", "1");
-    assertEquals(readGeminiCronSymbolGapMs(), 400);
+    assertEquals(readGeminiCronSymbolGapMs(), 0);
+    Deno.env.set("CRON_SERIAL_SYMBOL_STAGGER", "1");
+    assertEquals(readGeminiCronSymbolGapMs(), 2000);
     Deno.env.set("GEMINI_CRON_SYMBOL_GAP_MS", "300");
-    assertEquals(readGeminiCronSymbolGapMs(), 300);
+    assertEquals(readGeminiCronSymbolGapMs(), 500);
     Deno.env.set("GEMINI_CRON_SYMBOL_GAP_MS", "5000");
     assertEquals(readGeminiCronSymbolGapMs(), 5000);
     Deno.env.set("AI_PROVIDER_MATRIX", "0");
@@ -109,5 +121,9 @@ Deno.test("readGeminiCronSymbolGapMs 400 default with matrix, 0 when Gemini skip
     else Deno.env.set("AI_PROVIDER_MATRIX", prevMatrix);
     if (prevPreempt === undefined) Deno.env.delete("LLM_PREEMPTIVE_KEY_ROUTING");
     else Deno.env.set("LLM_PREEMPTIVE_KEY_ROUTING", prevPreempt);
+    if (prevStagger === undefined) Deno.env.delete("CRON_SERIAL_SYMBOL_STAGGER");
+    else Deno.env.set("CRON_SERIAL_SYMBOL_STAGGER", prevStagger);
+    if (prevCascade === undefined) Deno.env.delete("AI_CASCADE_PIPELINE");
+    else Deno.env.set("AI_CASCADE_PIPELINE", prevCascade);
   }
 });

@@ -52,7 +52,15 @@ function readGrinderEnvFloor(): number {
 function readTradeRegimeWeightedFloor(tradeRegime: TradeRegime): number {
   const base = resolveRegimeScalingFloors(tradeRegime).minAiConfidence;
   const envKey = `TRADE_REGIME_${tradeRegime}_WEIGHTED_FLOOR`;
-  const raw = String(Deno.env.get(envKey) ?? "").trim();
+  const aliasKey = tradeRegime === "VOLATILE"
+    ? "REGIME_VOLATILE_WEIGHTED_FLOOR"
+    : tradeRegime === "CHAOS"
+      ? "REGIME_CHAOS_WEIGHTED_FLOOR"
+      : tradeRegime === "STABLE"
+        ? "REGIME_STABLE_WEIGHTED_FLOOR"
+        : "";
+  const raw = String(Deno.env.get(envKey) ?? "").trim()
+    || (aliasKey ? String(Deno.env.get(aliasKey) ?? "").trim() : "");
   const override = raw.length ? Number(raw) : NaN;
   const floor = Number.isFinite(override) ? override : base;
   return clampPct(floor - readAggressionDelta());

@@ -11,6 +11,13 @@ import {
   trySidewaysGrinderEntry,
 } from "./dynamic-regime-switcher.ts";
 
+function readGrinderMomentumRsiMax(): number {
+  const raw = String(Deno.env.get("GRINDER_MOMENTUM_RSI_MAX") ?? "").trim();
+  const n = raw.length ? Number(raw) : 65;
+  if (!Number.isFinite(n)) return 65;
+  return Math.min(72, Math.max(48, Math.floor(n)));
+}
+
 // Freqtrade BbandRsi populate_entry_trend:
 // (rsi < STRATEGY_BUY_RSI_THRESHOLD) AND (close < bb_lowerband) => enter_long
 export function checkEntryConditions(
@@ -167,6 +174,19 @@ export function checkEntryConditions(
     (volumeSoft || volumeConfirmed);
   if (hybridBreakout) {
     return { signal: "BUY", strategy_reason: "strategy_hybrid_breakout_entry" };
+  }
+
+  /** Grinder: strong tape (RSI 48–65) without waiting for deep oversold — SOL/PEPE momentum days. */
+  const momentumRsiMax = Math.max(buyRsiMax, readGrinderMomentumRsiMax());
+  const grinderMomentumTape =
+    (snapshot.marketRegime === "TRENDING" || Number(snapshot.adx14) >= 20) &&
+    snapshot.rsi >= 48 &&
+    snapshot.rsi <= momentumRsiMax &&
+    gtWithTolerance(snapshot.emaFast, snapshot.emaSlow * 0.998) &&
+    gteWithTolerance(snapshot.latestPrice, snapshot.ema50 * 0.985) &&
+    (volumeSoft || volumeConfirmed);
+  if (grinderMomentumTape) {
+    return { signal: "BUY", strategy_reason: "strategy_grinder_momentum_entry" };
   }
 
   const paperBuy = applyPaperExplorationToEntry(snapshot, opts);

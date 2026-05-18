@@ -59,6 +59,12 @@ export async function runSymbolBatch(params: {
   paperScenario?: { name: import("./paper-scenario-snapshot.ts").PaperScenarioName; execute: boolean } | null;
   symbolMatrixIndex?: number;
   btcOverbought?: boolean;
+  /** Staging / single-symbol runs: skip BTC anchor snapshot and treat alts as not BTC-gated. */
+  skipBtcMarketAnchor?: boolean;
+  skipFrictionSpreadRefresh?: boolean;
+  /** Cap bots processed per batch (staging: 1 avoids N×stagger wall time). */
+  maxActiveBots?: number;
+  signal?: AbortSignal;
 }): Promise<SymbolBatchResult> {
   const {
     supabase,
@@ -68,12 +74,30 @@ export async function runSymbolBatch(params: {
     paperScenario,
     symbolMatrixIndex,
     btcOverbought: btcOverboughtHint,
+    skipBtcMarketAnchor,
+    skipFrictionSpreadRefresh,
+    maxActiveBots,
+    signal,
   } = params;
+  if (signal?.aborted) {
+    return {
+      symbolFilter,
+      actions: [],
+      balanceSyncTargets: new Map(),
+      cycleEmergencyAbort: false,
+      cycleId: crypto.randomUUID(),
+      allSettledElapsedMs: 0,
+      scanned: 0,
+      batchTimeouts: 0,
+      batchErrors: 0,
+    };
+  }
   const validated = await validateSymbolBatchInput({
     supabase,
     symbolFilter,
     marketCache,
     btcOverbought: btcOverboughtHint,
+    skipBtcMarketAnchor,
   });
   if (validated.empty) return validated.result;
   const { activeBots, symbolCache, cycleId, btcOverbought, botCycleTimeoutMs, balanceSyncTargets } = validated;
@@ -91,6 +115,9 @@ export async function runSymbolBatch(params: {
       btcOverbought,
       botCycleTimeoutMs,
       symbolMatrixIndex,
+      cycleSignal: signal,
+      skipFrictionSpreadRefresh,
+      maxActiveBots,
     });
     const { batchTimeouts, batchErrors } = summarizeBatchActions(orchestrated.actions);
     return {

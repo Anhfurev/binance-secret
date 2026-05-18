@@ -7,6 +7,7 @@ import {
   formatTelegramPrice,
 } from "./bot-shared.ts";
 import { persistRunTelemetry } from "./bot-telemetry.ts";
+import { syncProfilePortfolioHoldings } from "./portfolio-holdings-sync.ts";
 import { botDebug } from "./bot-debug.ts";
 
 export async function notifyFullSellClose(params: {
@@ -49,6 +50,12 @@ export async function notifyFullSellClose(params: {
     action: "sell",
     detail: `SELL ${soldBase} @ ${exitPx.toFixed(8)} | pnl ${pnl.toFixed(2)}`,
     balance: nextBalance,
+  });
+  await syncProfilePortfolioHoldings({
+    supabase,
+    userId,
+    availableUsdt: nextBalance,
+    priceByBase: { [symbol.replace(/USDT$/, "")]: exitPx },
   });
   const trailNote = trailingStopTriggered
     ? `\n<b>Exit driver:</b> trailing / stop (${pnlPercent.toFixed(2)}% vs entry)`

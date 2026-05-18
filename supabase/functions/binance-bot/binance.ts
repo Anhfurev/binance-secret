@@ -19,7 +19,10 @@ import { readSmartLimitMaxSlippagePct } from "./smart-limit-chase-config.ts";
 import { logCcxtOrderError, logTradeAction } from "./trading-logger.ts";
 import { preflightCreateOrderIdempotencyAndLock } from "./binance-create-preflight.ts";
 import { runPaperCreateOrder } from "./binance-paper-order.ts";
+import { isPaperTradingEnvForced } from "./paper-trade-interceptor.ts";
 import { releaseTradeExecutionLock } from "./trade-execution-lock.ts";
+import { runExchangeDispatchWithRetry } from "./exchange-order-retry.ts";
+import { readCronSerialSymbolStaggerEnabled } from "./ai-provider-matrix.ts";
 
 export { getUsdtBalance };
 export { getTotalAccountBalanceUsdt };
@@ -27,20 +30,20 @@ export { getTotalAccountBalanceUsdt };
 const BINANCE_JITTER_MIN_MS = 100;
 const BINANCE_JITTER_MAX_MS = 500;
 const MAX_RETRY_AFTER_SECONDS = 5;
-const DEFAULT_TIME_SYNC_TTL_MS = 5 * 60 * 1000;
-let lastTimeSyncAtMs = 0;
-let lastTimeSyncResult: { serverTime: number; driftMs: number } | null = null;
-
-function readTimeSyncTtlMs(): number {
-  const raw = String(Deno.env.get("BINANCE_TIME_SYNC_INTERVAL_MS") ?? "").trim();
-  const n = raw.length ? Number(raw) : NaN;
-  if (!Number.isFinite(n)) return DEFAULT_TIME_SYNC_TTL_MS;
-  return Math.min(30 * 60 * 1000, Math.max(60_000, Math.floor(n)));
-}
+export {
+  binanceTimeSyncCheck,
+  getBinanceServerTimeMs,
+  getCachedTimeOffset,
+  initBinanceTimeSyncForCron,
+  isBinanceTimeCacheValid,
+  isBinanceTimeCacheWarm,
+  requiresSignedBinanceRequests,
+} from "./binance-time-cache.ts";
 
 function isCycleJitterDisabled(): boolean {
   const flag = String(Deno.env.get("BOT_DISABLE_CYCLE_JITTER") ?? "").trim().toLowerCase();
-  return flag === "1" || flag === "true" || flag === "yes";
+  if (flag === "1" || flag === "true" || flag === "yes") return true;
+  return !readCronSerialSymbolStaggerEnabled();
 }
 
 async function applyBinanceJitter() {
@@ -116,35 +119,6 @@ async function delayFromRetryAfterHeader(retryAfterHeader: string | null) {
   await new Promise<void>((resolve) => setTimeout(resolve, retryAfterSeconds * 1000));
 }
 
-export async function binanceTimeSyncCheck() {
-  const now = Date.now();
-  const ttlMs = readTimeSyncTtlMs();
-  if (lastTimeSyncResult && now - lastTimeSyncAtMs < ttlMs) {
-    return lastTimeSyncResult;
-  }
-
-  const url = new URL(`${resolveBinanceRestBaseUrl()}/api/v3/time`);
-  const response = await binanceFetch(url, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`Binance time check failed: ${response.status} ${detail}`);
-  }
-
-  const data = (await response.json()) as { serverTime?: number };
-  const serverTime = typeof data.serverTime === "number" ? data.serverTime : 0;
-  if (!serverTime) throw new Error("Binance time check missing serverTime");
-
-  const driftMs = Math.abs(Date.now() - serverTime);
-  lastTimeSyncAtMs = now;
-  lastTimeSyncResult = { serverTime, driftMs };
-  return lastTimeSyncResult;
-}
-
 export async function fetchIndicatorSnapshot(
   symbol: string,
   signal?: AbortSignal,
@@ -211,6 +185,22 @@ export async function createOrder(params: {
     return { ...preflight.payload, side };
   }
 
+  if (isPaperTradingEnvForced()) {
+    return await runPaperCreateOrder({
+      supabase,
+      userId,
+      symbol,
+      side,
+      amount,
+      marketRegime: String(marketRegime ?? "NEUTRAL"),
+      signalPx: Number(referencePrice),
+      signal,
+      botId,
+      cycleId,
+      sideType,
+    });
+  }
+
   if (isTestMode) {
     return await runPaperCreateOrder({
       supabase,
@@ -239,22 +229,30 @@ export async function createOrder(params: {
       );
     }
     const normalizedSignalPrice = await normalizePriceForSymbol(symbol, signalPx);
-    const order = executionMode === "market"
-      ? await executeMarketOrder(symbol, side, Number(precisionAmount), {
-        referencePrice: Number.isFinite(normalizedSignalPrice) && normalizedSignalPrice > 0
-          ? normalizedSignalPrice
-          : signalPx,
-      })
-      : await executeSmartLimitChaser({
-        symbol,
-        side,
-        amount: Number(precisionAmount),
-        signalPrice: Number.isFinite(normalizedSignalPrice) && normalizedSignalPrice > 0
-          ? normalizedSignalPrice
-          : signalPx,
-        maxSlippagePct: maxSlippagePct ?? readSmartLimitMaxSlippagePct(symbol),
-        marketRegime: String(marketRegime ?? "NEUTRAL"),
-      });
+    if (isPaperTradingEnvForced()) {
+      throw new Error("invariant: IS_PAPER_TRADING env must not reach live createOrder dispatch");
+    }
+    const dispatchMeta = { symbol, side, cycleId };
+    const order = await runExchangeDispatchWithRetry(
+      executionMode === "market" ? "create_market_order" : "create_smart_limit_chase",
+      () => executionMode === "market"
+        ? executeMarketOrder(symbol, side, Number(precisionAmount), {
+          referencePrice: Number.isFinite(normalizedSignalPrice) && normalizedSignalPrice > 0
+            ? normalizedSignalPrice
+            : signalPx,
+        })
+        : executeSmartLimitChaser({
+          symbol,
+          side,
+          amount: Number(precisionAmount),
+          signalPrice: Number.isFinite(normalizedSignalPrice) && normalizedSignalPrice > 0
+            ? normalizedSignalPrice
+            : signalPx,
+          maxSlippagePct: maxSlippagePct ?? readSmartLimitMaxSlippagePct(symbol),
+          marketRegime: String(marketRegime ?? "NEUTRAL"),
+        }),
+      dispatchMeta,
+    );
     await logTradeAction({
       supabase,
       action: executionMode === "market"
@@ -309,7 +307,23 @@ export async function createOrder(params: {
       });
     }
     await logCcxtOrderError({ supabase, userId, symbol, side, amount, error });
-    throw error;
+    if (
+      msg.includes("slippage_limit_exceeded")
+      || msg.includes("smart_limit_max_chase_exceeded")
+      || msg.includes("smart_limit_no_fill_non_trending")
+    ) {
+      throw error;
+    }
+    return {
+      exchange_order_id: null,
+      status: "failed",
+      symbol,
+      side,
+      idempotent: false,
+      amount: 0,
+      error: msg,
+      critical_exchange_error: true,
+    };
   } finally {
     if (lockHeld && !orderFilled && botId && cycleId) {
       await releaseTradeExecutionLock({

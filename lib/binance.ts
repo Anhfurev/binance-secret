@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { pooledFetch } from "@/lib/pooled-fetch";
 
 const BINANCE_SPOT_BASE = "https://api.binance.com";
 const BINANCE_FUTURES_BASE = "https://fapi.binance.com";
@@ -140,7 +141,7 @@ async function binanceSpotPublicGet<T>(
   const query = toQuery(params);
   const url = `${resolveBinanceSpotBaseUrl()}${path}${query ? `?${query}` : ""}`;
 
-  const res = await fetch(url, {
+  const res = await pooledFetch(url, {
     cache: "no-store",
     headers: {
       Accept: "application/json",
@@ -176,7 +177,7 @@ async function binanceSignedSpotRequest<T>(
   const signature = signQuery(query, apiSecret);
   const url = `${resolveBinanceSpotBaseUrl()}${path}?${query}&signature=${signature}`;
 
-  const res = await fetch(url, {
+  const res = await pooledFetch(url, {
     method,
     headers: {
       Accept: "application/json",
@@ -226,7 +227,7 @@ export async function binanceFuturesPublicGet<T>(
   const query = toQuery(params);
   const url = `${BINANCE_FUTURES_BASE}${path}${query ? `?${query}` : ""}`;
 
-  const res = await fetch(url, {
+  const res = await pooledFetch(url, {
     cache: "no-store",
     headers: { Accept: "application/json" },
   });

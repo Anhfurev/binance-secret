@@ -1,12 +1,16 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { processBot } from "./bot.ts";
-import { logCycleSummary, logDecisionTrace, logExecutionOutcome } from "./index-logging.ts";
+import { logDecisionTrace, logExecutionOutcome } from "./index-logging.ts";
 import { maybeSendDecisionTraceTelegram } from "./telegram-decision-trace.ts";
-import { safeExecute } from "./safe-execute.ts";
+import { safeExecute, safeExecuteDetached } from "./safe-execute.ts";
 import { toStringValue } from "./utils.ts";
-import { insertWarRoomAudit } from "./veto-transparency.ts";
-import { captureTraceReasonOnly, persistDebugTrace } from "./symbol-cycle-trace.ts";
+import { captureTraceReasonOnly } from "./symbol-cycle-trace.ts";
+import {
+  persistPostExecutionCycleLogs,
+  persistPreExecutionCycleTelemetry,
+} from "./cycle-telemetry-persist.ts";
+import { indicatorFieldsForLogMeta } from "./indicator-precision.ts";
 
 export async function executeSymbolCycleActions(params: {
   row: any;
@@ -22,10 +26,8 @@ export async function executeSymbolCycleActions(params: {
   const { row, supabase, userId, symbol, cycleId, snapshot, paperScenario, outcome, signal } = params;
   const {
     ai,
-    bbPosition,
     decision,
     reason,
-    strategyFailDetail,
     technicalScore,
     strategySignal,
     technical,
@@ -35,58 +37,20 @@ export async function executeSymbolCycleActions(params: {
     executionUsdScale,
     demoProbeBuyFlag,
     strategyEntry,
-    forceBuyReason,
     openTrade,
-    dbLoadOpenTradeMs,
-    aiVerdictMs,
-    vetoDetailsPayload,
     preflight,
     aiQuotaFallback,
     aiVerdictErrorDetail,
     grinderTakeProfitPct,
-  } = outcome;
-  await insertWarRoomAudit({
-    supabase,
-    user_id: userId !== "unknown" ? userId : null,
-    symbol,
-    bot_id: toStringValue((row as any).id) ?? null,
-    cycle_id: cycleId,
-    veto_details: vetoDetailsPayload,
-    final_decision: decision,
-    technical_score: technicalScore,
-    ai_confidence: Number.isFinite(Number(ai.ai_confidence)) ? Number(ai.ai_confidence) : null,
-  });
-  await persistDebugTrace({
-    supabase,
-    userId: userId !== "unknown" ? userId : null,
-    botId: toStringValue((row as any)?.id) ?? null,
-    cycleId,
-    symbol,
-    decision,
-    techScore: technicalScore,
-    rsi: snapshot.rsi,
+    strategyFailDetail,
+    forceBuyReason,
     bbPosition,
-    latestPrice: snapshot.latestPrice,
-    reason: strategyFailDetail ?? reason ?? null,
-    debugNote: forceBuyReason ?? reason,
-    perfMetadata: { perf_db_load_open_trade_ms: dbLoadOpenTradeMs, perf_ai_verdict_ms: aiVerdictMs, is_timeout: false },
-    ai,
-  });
-  await logDecisionTrace({
-    supabase,
-    row,
-    symbol,
-    snapshot,
-    technicalScore,
-    strategySignal,
-    technicalSignal: technical,
-    ai,
-    hasOpenTrade: !!openTrade,
-    finalDecision: decision,
-    reason,
-    minAiConfidence,
-  });
-  void maybeSendDecisionTraceTelegram({
+    dbLoadOpenTradeMs,
+    aiVerdictMs,
+    vetoDetailsPayload,
+  } = outcome;
+
+  const telegramTraceBase = {
     row,
     symbol,
     cycleId,
@@ -98,7 +62,6 @@ export async function executeSymbolCycleActions(params: {
     snapshotFull: snapshot,
     ai,
     finalDecision: decision,
-    reason: reason ?? null,
     technicalScore,
     strategySignal,
     technicalSignal: technical,
@@ -115,72 +78,91 @@ export async function executeSymbolCycleActions(params: {
     },
     aiQuotaFallback,
     aiVerdictErrorDetail: aiVerdictErrorDetail ?? null,
-  });
-  if (paperScenario && !paperScenario.execute) {
-    await logDecisionTrace({
-      supabase,
-      row,
-      symbol,
-      snapshot,
-      technicalScore,
-      strategySignal,
-      technicalSignal: technical,
+  };
+
+  await persistPreExecutionCycleTelemetry({
+    supabase,
+    row,
+    userId,
+    symbol,
+    cycleId,
+    snapshot,
+    outcome: {
       ai,
-      hasOpenTrade: !!openTrade,
-      finalDecision: decision,
-      reason: `${reason ?? "n/a"}|paper_scenario_dry_run`,
-      minAiConfidence,
-    });
-    void maybeSendDecisionTraceTelegram({
-      row,
-      symbol,
-      cycleId,
-      snapshot: {
-        marketRegime: snapshot.marketRegime,
-        rsi: snapshot.rsi,
-        latestPrice: snapshot.latestPrice,
-      },
-      snapshotFull: snapshot,
-      ai,
-      finalDecision: decision,
-      reason: `${reason ?? "n/a"}|paper_scenario_dry_run`,
-      technicalScore,
-      strategySignal,
-      technicalSignal: technical,
-      hasOpenTrade: !!openTrade,
-      minAiConfidence,
-      strategyEntry,
+      bbPosition,
+      decision,
+      reason,
       strategyFailDetail,
-      combinedStrategyReason,
-      preflight: {
-        scorecard: preflight.scorecard,
-        veto_reasons: preflight.veto_reasons,
-        passedCount: preflight.passedCount,
-        totalGates: preflight.totalGates,
-      },
-      aiQuotaFallback,
-      aiVerdictErrorDetail: aiVerdictErrorDetail ?? null,
-      force: true,
-    });
-    await logExecutionOutcome({
-      supabase,
-      row,
-      symbol,
-      intendedDecision: decision,
-      reason: `${reason ?? "n/a"}|paper_scenario_dry_run`,
-      resultAction: "hold",
-      resultDetail: "paper_scenario_dry_run_no_execute",
-      exitReason: undefined,
-    });
+      technicalScore,
+      strategySignal,
+      technical,
+      minAiConfidence,
+      openTrade,
+      dbLoadOpenTradeMs,
+      aiVerdictMs,
+      vetoDetailsPayload,
+      forceBuyReason,
+    },
+  });
+  safeExecuteDetached(
+    "decision_trace_telegram_pre",
+    () => maybeSendDecisionTraceTelegram({
+      ...telegramTraceBase,
+      reason: reason ?? null,
+    }),
+    undefined,
+  );
+
+  if (paperScenario && !paperScenario.execute) {
+    const dryReason = `${reason ?? "n/a"}|paper_scenario_dry_run`;
+    await Promise.all([
+      logDecisionTrace({
+        supabase,
+        row,
+        symbol,
+        snapshot,
+        technicalScore,
+        strategySignal,
+        technicalSignal: technical,
+        ai,
+        hasOpenTrade: !!openTrade,
+        finalDecision: decision,
+        reason: dryReason,
+        minAiConfidence,
+      }),
+      logExecutionOutcome({
+        supabase,
+        row,
+        symbol,
+        intendedDecision: decision,
+        reason: dryReason,
+        resultAction: "hold",
+        resultDetail: "paper_scenario_dry_run_no_execute",
+        exitReason: undefined,
+      }),
+    ]);
+    safeExecuteDetached(
+      "decision_trace_telegram_dry_run",
+      () => maybeSendDecisionTraceTelegram({ ...telegramTraceBase, reason: dryReason, force: true }),
+      undefined,
+    );
     return {
       tag: "ok" as const,
-      result: { userId, symbol, decision, action: "hold", detail: `paper_scenario_dry_run ${paperScenario.name} decision=${decision}`, reason: reason ?? null },
+      result: {
+        userId,
+        symbol,
+        decision,
+        action: "hold",
+        detail: `paper_scenario_dry_run ${paperScenario.name} decision=${decision}`,
+        reason: reason ?? null,
+      },
       symbol,
       lastPrice: snapshot.latestPrice,
     };
   }
+
   if (demoProbeBuyFlag && decision === "BUY") {
-    await safeExecute("demo_paper_probe_activated_log", () => supabase.from("logs").insert([{
+    void safeExecute("demo_paper_probe_activated_log", () => supabase.from("logs").insert([{
       user_id: userId,
       symbol,
       level: "info",
@@ -190,6 +172,7 @@ export async function executeSymbolCycleActions(params: {
       created_at: new Date().toISOString(),
     }]), undefined);
   }
+
   const result = await processBot({
     supabase,
     row,
@@ -204,18 +187,12 @@ export async function executeSymbolCycleActions(params: {
     signal,
     demoProbeBuy: demoProbeBuyFlag,
     takeProfitPctOverride: grinderTakeProfitPct ?? null,
+    matrixBuyReason: decision === "BUY" ? (reason ?? null) : null,
+    fastBounceLane: Boolean((outcome as { fastBounceLane?: boolean }).fastBounceLane),
+    globalSettings: (outcome as { globalSettings?: import("./bot-global-settings.ts").BotGlobalSettingsRow | null }).globalSettings ?? null,
   });
-  await logExecutionOutcome({
-    supabase,
-    row,
-    symbol,
-    intendedDecision: decision,
-    reason,
-    resultAction: (result as any)?.action,
-    resultDetail: (result as any)?.detail,
-    exitReason: (result as any)?.exit_reason,
-  });
-  await logCycleSummary({
+
+  await persistPostExecutionCycleLogs({
     supabase,
     row,
     symbol,
@@ -223,10 +200,14 @@ export async function executeSymbolCycleActions(params: {
     strategySignal: strategyEntry.signal,
     ai,
     reason,
-    finalDecision: decision,
+    decision,
     minAiConfidence,
-    marketRegime: snapshot.marketRegime,
+    marketRegime: String(snapshot.marketRegime ?? "NEUTRAL"),
+    resultAction: (result as any)?.action,
+    resultDetail: (result as any)?.detail,
+    exitReason: (result as any)?.exit_reason,
   });
+
   return { tag: "ok" as const, result, symbol, lastPrice: snapshot.latestPrice };
 }
 
@@ -240,16 +221,45 @@ export async function handleCriticalSnapshotError(params: {
 }) {
   const { supabase, row, cycleId, symbol, reason, snapshot } = params;
   const userId = toStringValue((row as any)?.user_id) ?? null;
-  await captureTraceReasonOnly({ supabase, userId, botId: toStringValue((row as any)?.id) ?? null, cycleId, symbol, decision: "HOLD", reason, perfMetadata: { is_timeout: false } });
-  await supabase.from("logs").insert([{
-    user_id: userId,
-    symbol,
-    level: "error",
-    source: "market-data",
-    message: reason === "CRITICAL_PRICE_ZERO" ? "critical_price_zero" : "critical_indicator_invalid",
-    meta: reason === "CRITICAL_PRICE_ZERO"
-      ? { event: "critical_price_zero", symbol, latest_price: snapshot.latestPrice, action: "execution_stopped" }
-      : { event: "critical_indicator_invalid", symbol, emaFast: snapshot.emaFast, emaSlow: snapshot.emaSlow, ema200: snapshot.ema200, action: "execution_stopped" },
-    created_at: new Date().toISOString(),
-  }]);
+  const indicatorMeta = indicatorFieldsForLogMeta(snapshot, [
+    "latestPrice",
+    "emaFast",
+    "emaSlow",
+    "ema200",
+  ]);
+  await Promise.all([
+    captureTraceReasonOnly({
+      supabase,
+      userId,
+      botId: toStringValue((row as any)?.id) ?? null,
+      cycleId,
+      symbol,
+      decision: "HOLD",
+      reason,
+      perfMetadata: { is_timeout: false },
+    }),
+    supabase.from("logs").insert([{
+      user_id: userId,
+      symbol,
+      level: "error",
+      source: "market-data",
+      message: reason === "CRITICAL_PRICE_ZERO" ? "critical_price_zero" : "critical_indicator_invalid",
+      meta: reason === "CRITICAL_PRICE_ZERO"
+        ? {
+          event: "critical_price_zero",
+          symbol,
+          latest_price: indicatorMeta.latestPrice,
+          action: "execution_stopped",
+        }
+        : {
+          event: "critical_indicator_invalid",
+          symbol,
+          emaFast: indicatorMeta.emaFast,
+          emaSlow: indicatorMeta.emaSlow,
+          ema200: indicatorMeta.ema200,
+          action: "execution_stopped",
+        },
+      created_at: new Date().toISOString(),
+    }]),
+  ]);
 }

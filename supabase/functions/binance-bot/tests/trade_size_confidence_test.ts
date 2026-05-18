@@ -48,3 +48,15 @@ Deno.test("scaleTradeUsdByGovernanceConfidence shrinks when War Room lowers conf
   });
   assertEquals(sized, 875);
 });
+
+Deno.test("scaleTradeUsdByGovernanceConfidence preserveNotional skips shrink for bounce", () => {
+  const sized = scaleTradeUsdByGovernanceConfidence({
+    tradeUsd: 12,
+    executionConfidence: 42,
+    effectiveConfidence: 56,
+    minTradeUsd: 10,
+    currentBalance: 30,
+    preserveNotional: true,
+  });
+  assertEquals(sized, 12);
+});

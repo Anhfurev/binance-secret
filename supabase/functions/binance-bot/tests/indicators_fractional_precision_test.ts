@@ -43,6 +43,14 @@ Deno.test("formatIndicatorForLog uses 8 decimals under 0.01", () => {
   assertEquals(ema, (px * 1.01).toFixed(8));
 });
 
+Deno.test("formatIndicatorForLog uses exponential for sub-bps MACD deltas", () => {
+  const px = 0.00000374;
+  const hist = 8e-11;
+  const out = formatIndicatorForLog(hist, px);
+  assertEquals(out.includes("e"), true);
+  assertEquals(out, hist.toExponential(6));
+});
+
 Deno.test("market anchor accepts micro-cap BTC snapshot in cache", () => {
   const cache = new Map<string, IndicatorSnapshot>();
   cache.set("BTCUSDT", {

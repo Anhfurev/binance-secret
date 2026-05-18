@@ -12,12 +12,19 @@ import { computeWeightedConfidenceForRegime, getResolvedScoreWeightsPack } from 
 import { passesMeanReversionBuyGate } from "./regime-detection.ts";
 import { resolveBuyFlowMtfContext } from "./buy-mtf.ts";
 import {
+  isAggressiveMatrixBuyReason,
   ONE_H_BEARISH_MAX_CONFIDENCE,
   readMinAdxForBuyContextGate,
   readPaperWeightedFloorRelaxPoints,
 } from "./buy-helpers.ts";
 import { resolveConfidencePolicy } from "./confidence-policy.ts";
+import {
+  detectDynamicTradingRegime,
+  resolveRegimeGatePolicy,
+  tuneConfidencePolicyForRegimeGate,
+} from "./dynamic-regime-switcher.ts";
 import { paperLiveStylePracticeEnabled } from "./live-style-practice.ts";
+import { resolveAssetMaxNotionalUsd } from "./asset-risk-profile.ts";
 import { applySymbolTradeUsdFloor } from "./trade-size-floor.ts";
 import { resolveGhostMode, resolveTestMode } from "./bot-shared.ts";
 import {
@@ -28,6 +35,30 @@ import {
   TRADING_POLICY,
 } from "./config/trading-policy.ts";
 import { blockedByStoplossStreakBlacklist } from "./stop-reentry-cooldown.ts";
+import { validateBuyIndicatorFootprint } from "./indicator-buy-validation.ts";
+import {
+  applyLiveWalletSizingConstraints,
+  isLegacyDbLiveBalanceSkip,
+  normalizeLiveWalletSizingResult,
+  readOversoldBounceRigidFloorUsd,
+  salvageTradeUsdBeforeExecution,
+} from "./buy-live-wallet-sizing.ts";
+import {
+  qualifiesOversoldBounceRelaxedPath,
+  readOversoldBounceSymbolExecutionCap,
+  resolveOversoldBounceMinAiConfidenceBuy,
+} from "./buy-bounce-floor.ts";
+import {
+  isConfirmedForceBuyOverrideStamp,
+  readTechScoreFromOverrideStamp,
+  relaxConfidencePolicyForForceBuyOverride,
+  relaxMinWeightedEntryForForceBuyOverride,
+  resolveForceBuyOverrideMinAiConfidenceBuy,
+} from "./buy-override-floor.ts";
+import { calculateTechnicalScore } from "./strategy.ts";
+import { isPaperTradingEnvForced } from "./paper-trade-interceptor.ts";
+import { resolvePaperSimulationLiquidityUsdt } from "./paper-balance.ts";
+import type { IndicatorSnapshot } from "./types.ts";
 
 export async function resolveBuyContextAndSizing(params: {
   supabase: ReturnType<typeof createClient>;
@@ -48,12 +79,22 @@ export async function resolveBuyContextAndSizing(params: {
   executionUsdScale?: number;
   demoProbeBuy?: boolean;
   signal?: AbortSignal;
+  indicatorSnapshot?: IndicatorSnapshot;
+  /** Hybrid matrix reason when decision engine cleared an aggressive BUY path. */
+  matrixBuyReason?: string | null;
+  /** Combined strategy trace (`strategy|matrix|telemetry`) from cycle executor. */
+  combinedStrategyTrace?: string | null;
 }) {
   const {
     supabase, row, userId, symbol, ai, marketRegime, snapshotPrice, snapshotEma200,
     snapshotRsi, snapshotBbLower, adx14, atr14, currentBalance, resolvedStartingBalance,
     maxDrawdownLimitPct, executionUsdScale, demoProbeBuy = false, signal,
+    indicatorSnapshot, matrixBuyReason = null, combinedStrategyTrace = null,
   } = params;
+  if (indicatorSnapshot) {
+    const footprint = validateBuyIndicatorFootprint(indicatorSnapshot);
+    if (!footprint.ok) return { skipDetail: footprint.detail };
+  }
   const demoProbePaper =
     Boolean(demoProbeBuy) && !Boolean((row as any)?.is_live_trading_enabled);
   if (signal?.aborted) return { skipDetail: "cycle_aborted" };
@@ -61,10 +102,34 @@ export async function resolveBuyContextAndSizing(params: {
   const regime: MarketRegime = marketRegime ?? "NEUTRAL";
   const tradeRegime = resolveTradeRegime(symbol, snapshotPrice, atr14);
   const unifiedPolicyGate = getRequiredConfidence(currentBalance, tradeRegime);
-  const confidencePolicy = resolveConfidencePolicy(row as Record<string, unknown>, {
-    marketRegime: regime,
-    tradeRegime,
-  });
+  const dynRegimeGate = resolveRegimeGatePolicy(
+    detectDynamicTradingRegime({
+      symbol,
+      latestPrice: snapshotPrice,
+      marketRegime: regime,
+      adx14,
+      atr14,
+      bbLower: snapshotBbLower,
+      bbMiddle: snapshotPrice,
+      bbUpper: snapshotPrice,
+    } as import("./types.ts").IndicatorSnapshot).regime,
+  );
+  const confirmedForceBuyOverride =
+    isConfirmedForceBuyOverrideStamp(matrixBuyReason) ||
+    isConfirmedForceBuyOverrideStamp(combinedStrategyTrace);
+  const overrideTechScore = indicatorSnapshot
+    ? calculateTechnicalScore(indicatorSnapshot)
+    : readTechScoreFromOverrideStamp(combinedStrategyTrace ?? matrixBuyReason);
+  let confidencePolicy = tuneConfidencePolicyForRegimeGate(
+    resolveConfidencePolicy(row as Record<string, unknown>, {
+      marketRegime: regime,
+      tradeRegime,
+    }),
+    dynRegimeGate,
+  );
+  if (confirmedForceBuyOverride) {
+    confidencePolicy = relaxConfidencePolicyForForceBuyOverride(confidencePolicy);
+  }
   const streakBlacklist = await blockedByStoplossStreakBlacklist({ supabase, userId, symbol });
   if (streakBlacklist.blocked) {
     return { skipDetail: `BUY blocked: ${streakBlacklist.reason ?? "stoploss_streak_blacklist"}` };
@@ -89,11 +154,41 @@ export async function resolveBuyContextAndSizing(params: {
       minWeightedEntry - readPaperWeightedFloorRelaxPoints(),
     );
   }
-  minWeightedEntry = Math.max(minWeightedEntry, unifiedPolicyGate.minAiConfidence);
+  const oversoldBounceMatrix = qualifiesOversoldBounceRelaxedPath({
+    matrixBuyReason,
+    combinedTrace: combinedStrategyTrace,
+  });
+  let unifiedFloor = dynRegimeGate.regime === "REGIME_TRENDING"
+    ? Math.min(unifiedPolicyGate.minAiConfidence, dynRegimeGate.minWeightedConvictionFloor)
+    : unifiedPolicyGate.minAiConfidence;
+  if (oversoldBounceMatrix) {
+    unifiedFloor = Math.min(unifiedFloor, readOversoldBounceSymbolExecutionCap(symbol));
+  }
+  minWeightedEntry = Math.max(minWeightedEntry, unifiedFloor);
+  if (confirmedForceBuyOverride && !demoProbePaper) {
+    minWeightedEntry = relaxMinWeightedEntryForForceBuyOverride({
+      minWeightedEntry,
+      rawWeighted,
+      rawAiConfidence: Number(ai.ai_confidence),
+      technicalScore: overrideTechScore,
+    });
+  }
+  if (oversoldBounceMatrix && !demoProbePaper) {
+    minWeightedEntry = Math.min(
+      minWeightedEntry,
+      resolveOversoldBounceMinAiConfidenceBuy({
+        executionWeightedFloor: confidencePolicy.execution_weighted_floor,
+        assetClassMinAi: unifiedPolicyGate.minAiConfidence,
+        symbol,
+        effectiveConfidence: rawWeighted,
+      }),
+    );
+  }
   if (!demoProbePaper && rawWeighted < minWeightedEntry) {
+    const bounceWeightedNote = oversoldBounceMatrix ? " (oversold bounce path)" : "";
     return {
       skipDetail:
-        `BUY blocked: weighted conviction ${rawWeighted.toFixed(2)}% < policy floor ${minWeightedEntry}%`,
+        `BUY blocked: weighted conviction ${rawWeighted.toFixed(2)}% < policy floor ${minWeightedEntry}%${bounceWeightedNote}`,
       rawWeighted,
       resolvedWeights,
       regime,
@@ -109,6 +204,7 @@ export async function resolveBuyContextAndSizing(params: {
     : TRADING_POLICY.confidence.holdModelMarginLive;
   if (
     !demoProbePaper &&
+    !oversoldBounceMatrix &&
     String(ai.action ?? "").toUpperCase() === "HOLD" &&
     rawWeighted < minWeightedEntry + holdModelMargin
   ) {
@@ -219,13 +315,48 @@ export async function resolveBuyContextAndSizing(params: {
     ? Math.min(rawWeighted, ONE_H_BEARISH_MAX_CONFIDENCE)
     : rawWeighted;
 
+  const executionWeightedFloor = confidencePolicy.execution_weighted_floor;
+  const assetClassMinAi = unifiedPolicyGate.minAiConfidence;
+  const aggressiveMatrixOverride = isAggressiveMatrixBuyReason(matrixBuyReason);
+  const bounceMatrixOverride = oversoldBounceMatrix;
+  const bounceSymbolCap = bounceMatrixOverride
+    ? readOversoldBounceSymbolExecutionCap(symbol)
+    : null;
   const minAiConfidenceBuy = isPaperOnly && !demoProbePaper
     ? minWeightedEntry
-    : Math.max(confidencePolicy.execution_weighted_floor, unifiedPolicyGate.minAiConfidence);
+    : confirmedForceBuyOverride
+      ? resolveForceBuyOverrideMinAiConfidenceBuy({
+        executionWeightedFloor,
+        assetClassMinAi,
+        effectiveConfidence,
+        rawAiConfidence: Number(ai.ai_confidence),
+        technicalScore: overrideTechScore,
+      })
+      : bounceMatrixOverride
+        ? resolveOversoldBounceMinAiConfidenceBuy({
+          executionWeightedFloor,
+          assetClassMinAi,
+          symbol,
+          effectiveConfidence,
+        })
+        : aggressiveMatrixOverride
+          ? Math.min(executionWeightedFloor, assetClassMinAi)
+          : Math.max(executionWeightedFloor, assetClassMinAi);
   if (!demoProbePaper && effectiveConfidence < minAiConfidenceBuy) {
+    const floorNote = confirmedForceBuyOverride
+      ? `force_buy_override cap=55, execution=${executionWeightedFloor}, asset=${assetClassMinAi}`
+      : bounceMatrixOverride
+        ? `bounce cap=${bounceSymbolCap}, execution=${executionWeightedFloor}, asset=${assetClassMinAi}`
+        : aggressiveMatrixOverride
+          ? `aggressive_matrix min(execution=${executionWeightedFloor}, asset=${assetClassMinAi})`
+          : String(tradeRegime);
+    const skipPrefix = confirmedForceBuyOverride
+      ? `BUY blocked: override conviction ${effectiveConfidence.toFixed(2)}% < relaxed override floor ${minAiConfidenceBuy}%`
+      : bounceMatrixOverride
+        ? `BUY blocked: bounce conviction ${effectiveConfidence.toFixed(2)}% < relaxed bounce floor ${minAiConfidenceBuy}%`
+        : `BUY blocked: effective confidence ${effectiveConfidence.toFixed(2)}% < policy floor ${minAiConfidenceBuy}%`;
     return {
-      skipDetail:
-        `BUY blocked: effective confidence ${effectiveConfidence.toFixed(2)}% < policy floor ${minAiConfidenceBuy}% (${tradeRegime})`,
+      skipDetail: `${skipPrefix} (${floorNote})`,
       rawWeighted,
       resolvedWeights,
       regime,
@@ -249,16 +380,22 @@ export async function resolveBuyContextAndSizing(params: {
     ? Math.min(currentBalance, Math.max(MIN_TRADE_USD, envTradingAmount))
     : resolveTradeSizeUsd(row, currentBalance);
   if (!Number.isFinite(baseTradeUsd) || baseTradeUsd < MIN_TRADE_USD) {
-    baseTradeUsd = Math.min(currentBalance, MIN_TRADE_USD);
+    baseTradeUsd = currentBalance > 0
+      ? Math.min(currentBalance, MIN_TRADE_USD)
+      : (bounceMatrixOverride ? readOversoldBounceRigidFloorUsd() : MIN_TRADE_USD);
   }
-  baseTradeUsd = Math.min(currentBalance, Math.max(MIN_TRADE_USD, baseTradeUsd));
+  if (currentBalance > 0) {
+    baseTradeUsd = Math.min(currentBalance, Math.max(MIN_TRADE_USD, baseTradeUsd));
+  } else if (bounceMatrixOverride) {
+    baseTradeUsd = Math.max(baseTradeUsd, readOversoldBounceRigidFloorUsd());
+  }
 
   const confidenceSizing = resolveConfidenceTradeUsdScale({
     aiConfidence: Number(ai.ai_confidence),
     weightedConfidence: effectiveConfidence,
     minAiConfidence: minAiConfidenceBuy,
   });
-  const tradeUsd = applySymbolTradeUsdFloor({
+  let tradeUsd = applySymbolTradeUsdFloor({
     symbol,
     tradeUsd: applyConfidenceSizedTradeUsd({
       baseTradeUsd,
@@ -266,13 +403,105 @@ export async function resolveBuyContextAndSizing(params: {
       minTradeUsd: MIN_TRADE_USD,
       sizing: confidenceSizing,
       executionUsdScale,
-      useConfidenceScale: !useEnvTradeAmount && fixedUsd <= 0,
+      useConfidenceScale: !useEnvTradeAmount && fixedUsd <= 0 && !bounceMatrixOverride,
     }),
     currentBalance,
   });
+  const paperEnvForced = isPaperTradingEnvForced();
+  const sizingBalance = paperEnvForced
+    ? resolvePaperSimulationLiquidityUsdt(currentBalance)
+    : currentBalance;
+  const liveWalletSizing = normalizeLiveWalletSizingResult(
+    await applyLiveWalletSizingConstraints({
+      enabled: !isPaperOnly && !demoProbePaper && !paperEnvForced,
+      symbol,
+      tradeUsd,
+      currentBalance: sizingBalance,
+      oversoldBounce: bounceMatrixOverride,
+    }),
+  );
+  if (
+    liveWalletSizing.skipDetail &&
+    !(bounceMatrixOverride && isLegacyDbLiveBalanceSkip(liveWalletSizing.skipDetail))
+  ) {
+    return {
+      skipDetail: liveWalletSizing.skipDetail,
+      rawWeighted,
+      resolvedWeights,
+      regime,
+      scoreWeightProfile,
+      ghostMode,
+      isPaperOnly,
+      demoProbePaper,
+      isTestMode,
+      mtf,
+      effectiveConfidence,
+      bearish1hCap,
+      tradeUsd: liveWalletSizing.tradeUsd,
+      baseTradeUsd,
+      confidenceSizing,
+      live_free_usdt: liveWalletSizing.liveFreeUsdt,
+    };
+  }
+  const availableBalance = !isPaperOnly &&
+      Number.isFinite(liveWalletSizing.liveFreeUsdt) &&
+      liveWalletSizing.liveFreeUsdt > 0
+    ? liveWalletSizing.liveFreeUsdt
+    : currentBalance;
+  tradeUsd = salvageTradeUsdBeforeExecution({
+    tradeUsd: liveWalletSizing.tradeUsd,
+    availableBalance,
+    oversoldBounce: bounceMatrixOverride,
+    symbol,
+  });
+  const assetMaxNotional = resolveAssetMaxNotionalUsd(symbol);
+  if (assetMaxNotional > 0 && tradeUsd > assetMaxNotional) {
+    tradeUsd = assetMaxNotional;
+  }
+  if (!(tradeUsd > 0) || !Number.isFinite(tradeUsd)) {
+    return {
+      skipDetail:
+        `BUY blocked: invalid order size (${String(tradeUsd)}) (available $${availableBalance.toFixed(2)})`,
+      rawWeighted,
+      resolvedWeights,
+      regime,
+      scoreWeightProfile,
+      ghostMode,
+      isPaperOnly,
+      demoProbePaper,
+      isTestMode,
+      mtf,
+      effectiveConfidence,
+      bearish1hCap,
+      tradeUsd,
+      baseTradeUsd,
+      confidenceSizing,
+    };
+  }
   if (tradeUsd < MIN_TRADE_USD) {
     return {
-      skipDetail: `Balance too low for BUY (${currentBalance.toFixed(2)})`,
+      skipDetail:
+        `BUY blocked: order size $${tradeUsd.toFixed(2)} below minimum $${MIN_TRADE_USD} (available $${availableBalance.toFixed(2)})`,
+      rawWeighted,
+      resolvedWeights,
+      regime,
+      scoreWeightProfile,
+      ghostMode,
+      isPaperOnly,
+      demoProbePaper,
+      isTestMode,
+      mtf,
+      effectiveConfidence,
+      bearish1hCap,
+      tradeUsd,
+      baseTradeUsd,
+      confidenceSizing,
+    };
+  }
+  if (!bounceMatrixOverride && availableBalance < tradeUsd) {
+    return {
+      skipDetail:
+        `Balance too low for BUY: need $${tradeUsd.toFixed(2)}, available $${availableBalance.toFixed(2)}`,
       rawWeighted,
       resolvedWeights,
       regime,
@@ -309,5 +538,7 @@ export async function resolveBuyContextAndSizing(params: {
     confidencePolicy,
     trading_policy_rule_refs: unifiedPolicyGate.policy_rule_refs,
     trading_policy_unified_min_ai: unifiedPolicyGate.minAiConfidence,
+    oversoldBounceMatrix: bounceMatrixOverride,
+    live_free_usdt: liveWalletSizing.liveFreeUsdt,
   };
 }

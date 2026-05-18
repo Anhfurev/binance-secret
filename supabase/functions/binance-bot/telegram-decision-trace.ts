@@ -12,6 +12,7 @@ import type {
   SignalDecision,
 } from "./types.ts";
 import { escapeHtml } from "./bot-shared.ts";
+import { formatIndicatorForLog, formatLogNumber } from "./indicator-precision.ts";
 import { formatCycleReason } from "./index-decision-format.ts";
 import { resolveMinTechScore } from "./utils.ts";
 import { resolveStrategyBuyRsiMax } from "./config.ts";
@@ -143,10 +144,9 @@ export async function maybeSendDecisionTraceTelegram(params: {
   const cache = escapeHtml(String((ai as any).ai_cache_status ?? "n/a"));
   const tip = escapeHtml(String(ai.pro_tip ?? "").trim() || "—");
   const regime = escapeHtml(String(snapshot.marketRegime ?? "n/a"));
-  const rsi = Number.isFinite(Number(snapshot.rsi)) ? Number(snapshot.rsi).toFixed(1) : "n/a";
-  const px = Number.isFinite(Number(snapshot.latestPrice))
-    ? Number(snapshot.latestPrice).toFixed(6)
-    : "n/a";
+  const pxRef = Number(snapshot.latestPrice);
+  const rsi = formatLogNumber(snapshot.rsi, 1, pxRef);
+  const px = formatIndicatorForLog(snapshot.latestPrice, pxRef);
 
   const snapFull = snapshotFull ?? (snapshot as IndicatorSnapshot);
   const gateHuman =

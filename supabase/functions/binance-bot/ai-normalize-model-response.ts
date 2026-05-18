@@ -1,12 +1,14 @@
 // @ts-nocheck
 import type { AiAnalysis } from "./types.ts";
 import { computeWeightedConfidence, truncateProTip } from "./ai-scoring.ts";
+import { expandGeminiOutputKeys } from "./gemini-output-expand.ts";
 import { safeJsonParseFromText, toNumber } from "./utils.ts";
 
 export function normalizeAiResponse(text: string): AiAnalysis {
-  const parsed = safeJsonParseFromText(
+  const raw = safeJsonParseFromText(
     sanitizeModelTextForJson(String(text ?? "")),
-  ) as any;
+  ) as Record<string, unknown> | null;
+  const parsed = expandGeminiOutputKeys(raw) as Record<string, unknown>;
   const alignment = Boolean(parsed?.trend_alignment);
   const actionRaw = String(parsed?.action ?? "HOLD").toUpperCase();
   const action =
@@ -50,7 +52,10 @@ export function normalizeAiResponse(text: string): AiAnalysis {
       inline_batch: true,
     };
   }
-  base.ai_confidence = computeWeightedConfidence(base);
+  const override = clamp01to100(
+    Number((parsed as Record<string, unknown>)?.ai_confidence_override),
+  );
+  base.ai_confidence = override > 0 ? override : computeWeightedConfidence(base);
   return base;
 }
 
@@ -60,6 +65,13 @@ function clamp01to100(value: number) {
 }
 
 function sanitizeModelTextForJson(rawText: string) {
-  const brace = rawText.trim().match(/\{[\s\S]*\}/);
-  return brace ? brace[0].trim() : rawText.trim();
+  let s = String(rawText ?? "").trim();
+  s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const brace = s.match(/\{[\s\S]*\}/);
+  if (!brace) return s;
+  try {
+    return JSON.stringify(JSON.parse(brace[0]));
+  } catch {
+    return brace[0].replace(/\s+/g, " ").trim();
+  }
 }

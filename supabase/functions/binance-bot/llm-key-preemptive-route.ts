@@ -1,13 +1,21 @@
 // @ts-nocheck
 /** Pre-emptive per-symbol API key assignment (round-robin by cron symbol index). */
 
-import type { GeminiKeySlot } from "./ai-keys.ts";
+import { dedupeGeminiKeySlotsByValue, type GeminiKeySlot } from "./ai-keys.ts";
 import {
   resolveGeminiSlotsForRuntime,
   resolveGroqKeyPlanForRuntime,
 } from "./llm-api-keys-resolve.ts";
 import type { GroqKeyPlan } from "./llm-api-keys-types.ts";
 import { readAiProviderMatrixEnabled } from "./ai-provider-matrix.ts";
+import {
+  bindActiveCronBatch,
+  clearCronPoolRecoverySnapshot,
+  commitCronLlmKeyPool,
+  resetCronLlmKeyPool,
+  stashCronPoolRecoverySnapshot,
+  tryGetCronLlmKeyPool,
+} from "./llm-key-pool.ts";
 
 export type CronBatchLlmKeyPools = {
   groqPlan: GroqKeyPlan;
@@ -16,6 +24,11 @@ export type CronBatchLlmKeyPools = {
 };
 
 let cronBatchPools: CronBatchLlmKeyPools | null = null;
+let cronBatchPoolsBatchId: string | null = null;
+/** Shifts preferred slot each cron publish so parallel lanes do not align on the same index forever. */
+let cronBatchLlmPoolEpochOffset = 0;
+/** Per-symbol claim inside a cron isolate — spreads parallel lanes across the pool. */
+let cronLaneClaimSeq = 0;
 
 export function readPreemptiveLlmKeyRoutingEnabled(): boolean {
   const raw = String(Deno.env.get("LLM_PREEMPTIVE_KEY_ROUTING") ?? "1").trim().toLowerCase();
@@ -32,10 +45,34 @@ export function shouldPreemptiveRouteForSymbolIndex(symbolMatrixIndex: number | 
   return true;
 }
 
+export function readCronBatchLlmPoolEpochOffset(): number {
+  return cronBatchLlmPoolEpochOffset;
+}
+
+/** Atomic lane salt — call once per symbol before the first LLM slot pick in a cycle. */
+export function claimCronLlmLaneOffset(): number {
+  const salt = cronLaneClaimSeq;
+  cronLaneClaimSeq += 1;
+  return salt;
+}
+
 export function resolvePreemptiveKeyIndex(symbolIndex: number, poolLength: number): number {
   if (poolLength <= 0) return 0;
   const idx = Math.max(0, Math.floor(symbolIndex));
-  return idx % poolLength;
+  const combined = idx + cronBatchLlmPoolEpochOffset;
+  return ((combined % poolLength) + poolLength) % poolLength;
+}
+
+/** Symbol matrix index + per-lane claim — use when parallel symbols enter LLM in the same cron tick. */
+export function resolvePreemptiveKeyIndexForLane(
+  symbolIndex: number,
+  poolLength: number,
+  laneSalt: number,
+): number {
+  if (poolLength <= 0) return 0;
+  const idx = Math.max(0, Math.floor(symbolIndex));
+  const combined = idx + cronBatchLlmPoolEpochOffset + Math.max(0, Math.floor(laneSalt));
+  return ((combined % poolLength) + poolLength) % poolLength;
 }
 
 /** Primary key first, then siblings — used as fallback after a failed attempt. */
@@ -64,10 +101,16 @@ export function buildQuotaRotationOrder(quotaIndex: number, poolLength: number):
 }
 
 export async function fetchCronBatchLlmKeyPools(): Promise<CronBatchLlmKeyPools> {
-  const [groqPlan, geminiSlots] = await Promise.all([
+  const [groqPlan, geminiSlotsRaw] = await Promise.all([
     resolveGroqKeyPlanForRuntime(),
     resolveGeminiSlotsForRuntime(),
   ]);
+  const geminiSlots = dedupeGeminiKeySlotsByValue(geminiSlotsRaw);
+  if (geminiSlots.length !== geminiSlotsRaw.length) {
+    console.log(
+      `[llm_pool] gemini_slots deduped raw=${geminiSlotsRaw.length} unique=${geminiSlots.length}`,
+    );
+  }
   return freezeCronBatchLlmKeyPools({ groqPlan, geminiSlots, fetchedAtMs: Date.now() });
 }
 
@@ -79,6 +122,12 @@ export function freezeCronBatchLlmKeyPools(pools: CronBatchLlmKeyPools): Readonl
     vetoKeys: Object.freeze([...pools.groqPlan.vetoKeys]),
     scanDbIds: Object.freeze([...pools.groqPlan.scanDbIds]),
     vetoDbIds: Object.freeze([...pools.groqPlan.vetoDbIds]),
+    scanDbErrorCounts: Object.freeze([...pools.groqPlan.scanDbErrorCounts]),
+    vetoDbErrorCounts: Object.freeze([...pools.groqPlan.vetoDbErrorCounts]),
+    scanDbStatuses: Object.freeze([...pools.groqPlan.scanDbStatuses]),
+    vetoDbStatuses: Object.freeze([...pools.groqPlan.vetoDbStatuses]),
+    scanDbCooldownUntils: Object.freeze([...pools.groqPlan.scanDbCooldownUntils]),
+    vetoDbCooldownUntils: Object.freeze([...pools.groqPlan.vetoDbCooldownUntils]),
   });
   const geminiSlots = Object.freeze(
     pools.geminiSlots.map((slot) => Object.freeze({ ...slot })),
@@ -90,11 +139,56 @@ export function freezeCronBatchLlmKeyPools(pools: CronBatchLlmKeyPools): Readonl
   });
 }
 
-/** Publish read-only LLM pools for the current cron isolate. */
-export function publishCronBatchLlmKeyPools(pools: CronBatchLlmKeyPools): Readonly<CronBatchLlmKeyPools> {
+export type CronLlmPoolPublishResult = {
+  pools: Readonly<CronBatchLlmKeyPools>;
+  hydrated: boolean;
+  geminiRegistered: number;
+  groqRegistered: number;
+};
+
+/** Publish read-only LLM pools + commit checkout registry (atomic swap, no null window). */
+export function publishCronBatchLlmKeyPools(
+  pools: CronBatchLlmKeyPools,
+  batchId: string,
+): CronLlmPoolPublishResult {
+  const bid = String(batchId ?? "").trim();
+  if (!bid) {
+    return {
+      pools: freezeCronBatchLlmKeyPools(pools),
+      hydrated: false,
+      geminiRegistered: 0,
+      groqRegistered: 0,
+    };
+  }
+  cronLaneClaimSeq = 0;
+  const poolN = Math.max(pools.geminiSlots.length, pools.groqPlan.scanKeys.length, 1);
+  cronBatchLlmPoolEpochOffset = (cronBatchLlmPoolEpochOffset + 1) % poolN;
   const frozen = freezeCronBatchLlmKeyPools(pools);
   cronBatchPools = frozen;
-  return frozen;
+  cronBatchPoolsBatchId = bid;
+  bindActiveCronBatch(bid);
+  const hydrated = commitCronLlmKeyPool(frozen, bid);
+  if (hydrated) stashCronPoolRecoverySnapshot(bid, frozen);
+  const keyPool = tryGetCronLlmKeyPool(bid);
+  const gem = keyPool?.getStats("gemini") ?? { total: 0, available: 0 };
+  const groq = keyPool?.getStats("groq") ?? { total: 0, available: 0 };
+  console.log(
+    `[llm_key_pool] hydrated=${hydrated ? 1 : 0} groq=${groq.total} gemini=${gem.total} available groq=${groq.available} gemini=${gem.available}`,
+  );
+  return {
+    pools: frozen,
+    hydrated,
+    geminiRegistered: gem.total,
+    groqRegistered: groq.total,
+  };
+}
+
+/** Sequential gate: fetch pools from DB/env, then hydrate registry before lanes start. */
+export async function hydrateCronLlmKeyPools(
+  batchId: string,
+): Promise<CronLlmPoolPublishResult> {
+  const raw = await fetchCronBatchLlmKeyPools();
+  return publishCronBatchLlmKeyPools(raw, batchId);
 }
 
 /** @deprecated use publishCronBatchLlmKeyPools */
@@ -106,6 +200,19 @@ export function getCronBatchLlmKeyPools(): Readonly<CronBatchLlmKeyPools> | null
   return cronBatchPools;
 }
 
-export function clearCronBatchLlmKeyPools(): void {
+export function clearCronBatchLlmKeyPools(expectedBatchId?: string): void {
+  if (expectedBatchId) {
+    const want = String(expectedBatchId).trim();
+    if (cronBatchPoolsBatchId && cronBatchPoolsBatchId !== want) {
+      console.log(
+        `[llm_key_pool] skip stale batch cleanup want=${want.slice(0, 8)} active=${cronBatchPoolsBatchId.slice(0, 8)}`,
+      );
+      return;
+    }
+  }
   cronBatchPools = null;
+  cronBatchPoolsBatchId = null;
+  cronLaneClaimSeq = 0;
+  clearCronPoolRecoverySnapshot(expectedBatchId);
+  resetCronLlmKeyPool(expectedBatchId);
 }

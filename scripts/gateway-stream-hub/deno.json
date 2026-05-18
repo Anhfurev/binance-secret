@@ -1,4 +1,7 @@
 {
+  "imports": {
+    "ws": "npm:ws@8.18.0"
+  },
   "tasks": {
     "start": "deno run --allow-net --allow-env hub.ts",
     "check": "deno check hub.ts"

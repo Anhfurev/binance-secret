@@ -13,5 +13,8 @@ export const supabaseAdmin = isSupabaseAdminConfigured
         autoRefreshToken: false,
         persistSession: false,
       },
+      global: {
+        headers: { Connection: "keep-alive" },
+      },
     })
   : null;

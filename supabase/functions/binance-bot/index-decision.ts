@@ -6,6 +6,11 @@ import { passesMeanReversionBuyGate } from "./regime-detection.ts";
 import { evaluateNoTradeStrategyScoutBuy } from "./no-trade-fallback.ts";
 import { allowsAdaptiveNeutralRsiBuy } from "./strategy-hybrid-gates.ts";
 import type { RegimeGatePolicy } from "./dynamic-regime-switcher.ts";
+import { resolveAssetMinSoftExitHoldMs } from "./asset-risk-profile.ts";
+import {
+  isOversoldBounceEntry,
+  qualifiesOversoldBounceAiSoftOverride,
+} from "./strategy-oversold-bounce.ts";
 
 export function decideHybridMatrix(params: {
   strategySignal: SignalDecision;
@@ -91,10 +96,13 @@ export function decideHybridMatrix(params: {
   );
 
   let obImbalanceHoldElapsed = true;
+  let softSignalExitHoldElapsed = true;
   if (hasOpenTrade && openTradeOpenedAt) {
     const t = Date.parse(openTradeOpenedAt);
     if (Number.isFinite(t)) {
-      obImbalanceHoldElapsed = Date.now() - t >= orderBookImbalanceMinHoldMs;
+      const ageMs = Date.now() - t;
+      obImbalanceHoldElapsed = ageMs >= orderBookImbalanceMinHoldMs;
+      softSignalExitHoldElapsed = ageMs >= resolveAssetMinSoftExitHoldMs(symbol);
     }
   }
 
@@ -184,6 +192,12 @@ export function decideHybridMatrix(params: {
     : 0;
 
   if (strategyExitTriggered || strategySignal === "SELL") {
+    if (hasOpenTrade && !softSignalExitHoldElapsed) {
+      return withObStreak({
+        decision: "HOLD",
+        reason: "hold_soft_exit_min_age",
+      });
+    }
     return withObStreak({ decision: "SELL", reason: "strategy_exit_or_signal_sell" });
   }
   if (
@@ -193,6 +207,12 @@ export function decideHybridMatrix(params: {
     Number.isFinite(aiConf) &&
     aiConf > 85
   ) {
+    if (!softSignalExitHoldElapsed) {
+      return withObStreak({
+        decision: "HOLD",
+        reason: "hold_ai_panic_min_age",
+      });
+    }
     return withObStreak({ decision: "SELL", reason: "ai_panic_sell" });
   }
   const isImbalanceExitTemporarilyDisabled =
@@ -227,8 +247,13 @@ export function decideHybridMatrix(params: {
       Number.isFinite(aiConf) &&
       aiConf >= Math.max(55, minAiConfidence - 15) &&
       ai.groq_verdict !== "REJECT";
-    const oversoldBounceTechOk = Boolean(oversoldBounceActive) &&
-      strategyReason === "strategy_oversold_bounce_entry";
+    const isOversoldBounce = isOversoldBounceEntry(strategyReason, oversoldBounceActive);
+    const oversoldBounceTechOk = isOversoldBounce;
+    const oversoldBounceAiSoftOk = qualifiesOversoldBounceAiSoftOverride(
+      ai,
+      strategyReason,
+      oversoldBounceActive,
+    );
     const adaptiveNeutralRsiOk = allowsAdaptiveNeutralRsiBuy({
       rsi,
       aiConfidence: aiConf,
@@ -261,7 +286,7 @@ export function decideHybridMatrix(params: {
     if (adaptiveNeutralRsiOk && aiConf >= minAiConfidence && ai.groq_verdict !== "REJECT" && ai.trend !== "bearish") {
       return { decision: "BUY", reason: "hybrid_adaptive_neutral_rsi_buy" };
     }
-    if (aiConf < minAiConfidence) {
+    if (aiConf < minAiConfidence && !oversoldBounceAiSoftOk) {
       return { decision: "HOLD", reason: "strategy_buy_rejected_low_conviction" };
     }
     if (ai.action !== "BUY") {
@@ -269,6 +294,17 @@ export function decideHybridMatrix(params: {
         return {
           decision: "HOLD",
           reason: `Vetoed by Groq: ${ai.groq_reason ?? "No reason provided"}`,
+        };
+      }
+      if (oversoldBounceAiSoftOk && oversoldBounceTechOk) {
+        const rangingHoldBounce = rangingMeanReversionBlock();
+        if (rangingHoldBounce) return rangingHoldBounce;
+        const bounceSuffix = String(ai.action ?? "").toUpperCase() === "SELL"
+          ? "|bounce_override_ai_soft_sell"
+          : "|bounce_override_ai_soft_hold";
+        return {
+          decision: "BUY",
+          reason: `oversold_bounce_confirmed_buy${bounceSuffix}`,
         };
       }
       if (

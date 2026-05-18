@@ -30,17 +30,23 @@ import {
   resolveGhostMode,
   resolveTestMode,
   resolveExchangeSkipped,
-  resolveTrailingStopPct,
+  resolveTrailingStopPctForSymbol,
   shouldSendHeartbeat,
   toUsdCents,
 } from "./bot-shared.ts";
+import { resolvePaperSimulationLiquidityUsdt } from "./paper-balance.ts";
+import { isPaperTradingEnvForced } from "./paper-trade-interceptor.ts";
 import { persistRunTelemetry } from "./bot-telemetry.ts";
+import { canFireSoftSignalExit } from "./strategy-stop-hold.ts";
 import {
   shouldPersistBotSkipLog,
   shouldTelegramHoldHeartbeat,
   shouldTelegramTrailingRowUpdate,
 } from "./log-policy.ts";
 import { executeBuyFlow } from "./bot-buy-v2.ts";
+import { executeFastBounceFuturesBuy } from "./fast-bounce-lane.ts";
+import type { BotGlobalSettingsRow } from "./bot-global-settings.ts";
+import { validateBuyIndicatorFootprint } from "./indicator-buy-validation.ts";
 import { executeSellFlow } from "./bot-sell.ts";
 import { tryPartialTakeProfitIfDue } from "./sell-partial-tp.ts";
 import { maybeArmClassicBreakEven } from "./sell-break-even.ts";
@@ -95,6 +101,11 @@ export async function processBot(params: {
   signal?: AbortSignal;
   /** Sideways grinder tight take-profit (% points). */
   takeProfitPctOverride?: number | null;
+  /** Hybrid matrix BUY reason (orderbook / fallback overrides). */
+  matrixBuyReason?: string | null;
+  /** Math-only bounce lane — skip War Room + inline LLM; futures REST entry. */
+  fastBounceLane?: boolean;
+  globalSettings?: BotGlobalSettingsRow | null;
 }): Promise<BotActionResult> {
   const {
     supabase,
@@ -110,6 +121,9 @@ export async function processBot(params: {
     demoProbeBuy = false,
     signal,
     takeProfitPctOverride = null,
+    matrixBuyReason = null,
+    fastBounceLane = false,
+    globalSettings = null,
   } = params;
   const strategyNotes = resolveCombinedStrategyNotes(strategyReason);
   if (signal?.aborted) {
@@ -165,12 +179,13 @@ export async function processBot(params: {
       };
     }
 
-    const paperOrGhost = resolveExchangeSkipped(row);
+    const paperEnvForced = isPaperTradingEnvForced();
+    const paperOrGhost = resolveExchangeSkipped(row) || paperEnvForced;
     const liveBalance = paperOrGhost
       ? null
       : await getLatestRecordedBalance(supabase, userId);
     let currentBalance = paperOrGhost
-      ? toNumber(profile.demo_balance, 10000)
+      ? resolvePaperSimulationLiquidityUsdt(profile.demo_balance)
       : liveBalance ?? toNumber(profile.starting_balance, 0);
     const currentStartingBalance = toNumber(profile.starting_balance, 0);
     const resolvedStartingBalance =
@@ -201,7 +216,10 @@ export async function processBot(params: {
       snapshot.symbol,
       toStringValue(row.id) ?? undefined,
     );
-    const trailingStopPct = resolveTrailingStopPct(row.trailing_stop_pct);
+    const trailingStopPct = resolveTrailingStopPctForSymbol(
+      snapshot.symbol,
+      row.trailing_stop_pct,
+    );
     let effectiveDecision = decision;
     let effectiveExitReason = exitReason;
     let trailingStopTriggered = false;
@@ -315,6 +333,24 @@ export async function processBot(params: {
     ) {
       effectiveExitReason = "signal_exit";
     }
+    if (
+      openTrade &&
+      effectiveDecision === "SELL" &&
+      effectiveExitReason === "signal_exit" &&
+      !canFireSoftSignalExit(openTrade, snapshot.symbol)
+    ) {
+      effectiveDecision = "HOLD";
+      effectiveExitReason = "hold";
+    }
+    if (
+      openTrade &&
+      effectiveDecision === "SELL" &&
+      effectiveExitReason === "rsi_overbought" &&
+      !canFireSoftSignalExit(openTrade, snapshot.symbol)
+    ) {
+      effectiveDecision = "HOLD";
+      effectiveExitReason = "hold";
+    }
 
     if (effectiveDecision === "HOLD") {
       const aiWantsBuy = String(ai?.action ?? "").toUpperCase() === "BUY";
@@ -366,6 +402,26 @@ export async function processBot(params: {
     }
 
     if (effectiveDecision === "BUY") {
+      const footprint = validateBuyIndicatorFootprint(snapshot);
+      if (!footprint.ok) {
+        botDebug("processBot", "buy_blocked_invalid_footprint", {
+          userId,
+          symbol: snapshot.symbol,
+          codes: footprint.codes,
+        });
+        return {
+          userId,
+          symbol: snapshot.symbol,
+          decision: effectiveDecision,
+          technical,
+          ai,
+          indicators,
+          action: "hold",
+          detail: footprint.detail,
+          exit_reason: effectiveExitReason,
+          strategy_reason: strategyNotes,
+        };
+      }
       botDebug("processBot", "reached_buy_flow_check", {
         userId,
         symbol: snapshot.symbol,
@@ -385,44 +441,62 @@ export async function processBot(params: {
           exit_reason: effectiveExitReason,
           strategy_reason: strategyNotes,
         };
-      if (!resolveExchangeSkipped(row)) {
+      if (!resolveExchangeSkipped(row) && !fastBounceLane) {
         await assertExpectedEgressIpOrThrow();
       }
-      const buyResult = await executeBuyFlow({
-        supabase,
-        row,
-        userId,
-        symbol: snapshot.symbol,
-        ai,
-        technical,
-        strategyNotes,
-        snapshotPrice: snapshot.latestPrice,
-        snapshotEma200: snapshot.ema200,
-        marketRegime: snapshot.marketRegime,
-        snapshotRsi: snapshot.rsi,
-        snapshotBbLower: snapshot.bbLower,
-        adx14: Number(snapshot.adx14 ?? 0),
-        atr14: Number(snapshot.atr14 ?? 0),
-        currentBalance,
-        resolvedStartingBalance,
-        shouldInitializeStartingBalance,
-        maxDrawdownLimitPct,
-        trailingStopPct,
-        cycleId,
-        volBurstWidenMult: (() => {
-          const raw = Number(snapshot.volBurstWidenMult);
-          const max = 1 + VOL_BURST_MAX_ATR_BONUS;
-          if (!Number.isFinite(raw) || raw < 1) return 1;
-          return Math.min(raw, max);
-        })(),
-        volBurstMeta: snapshot.volBurstMeta,
-        snapshotImbalanceRatio: snapshot.imbalance_ratio,
-        snapshotVolume24hQuote: snapshot.volume24hQuote ?? null,
-        executionUsdScale,
-        demoProbeBuy,
-        signal,
-        takeProfitPctOverride,
-      });
+      const buyResult = fastBounceLane && globalSettings
+        ? await executeFastBounceFuturesBuy({
+          supabase,
+          row,
+          userId,
+          symbol: snapshot.symbol,
+          snapshot,
+          global: globalSettings,
+          strategyNotes,
+          currentBalance,
+          resolvedStartingBalance,
+          shouldInitializeStartingBalance,
+          trailingStopPct,
+          cycleId,
+          signal,
+        })
+        : await executeBuyFlow({
+          supabase,
+          row,
+          userId,
+          symbol: snapshot.symbol,
+          ai,
+          technical,
+          strategyNotes,
+          snapshotPrice: snapshot.latestPrice,
+          snapshotEma200: snapshot.ema200,
+          marketRegime: snapshot.marketRegime,
+          snapshotRsi: snapshot.rsi,
+          snapshotBbLower: snapshot.bbLower,
+          adx14: Number(snapshot.adx14 ?? 0),
+          atr14: Number(snapshot.atr14 ?? 0),
+          currentBalance,
+          resolvedStartingBalance,
+          shouldInitializeStartingBalance,
+          maxDrawdownLimitPct,
+          trailingStopPct,
+          cycleId,
+          volBurstWidenMult: (() => {
+            const raw = Number(snapshot.volBurstWidenMult);
+            const max = 1 + VOL_BURST_MAX_ATR_BONUS;
+            if (!Number.isFinite(raw) || raw < 1) return 1;
+            return Math.min(raw, max);
+          })(),
+          volBurstMeta: snapshot.volBurstMeta,
+          snapshotImbalanceRatio: snapshot.imbalance_ratio,
+          snapshotVolume24hQuote: snapshot.volume24hQuote ?? null,
+          executionUsdScale,
+          demoProbeBuy,
+          signal,
+          takeProfitPctOverride,
+          indicatorSnapshot: snapshot,
+          matrixBuyReason,
+        });
       if (buyResult.action === "skip") {
         botDebug("processBot", "buy_skipped", {
           userId,

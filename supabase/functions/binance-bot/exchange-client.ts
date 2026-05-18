@@ -4,11 +4,23 @@ import {
   ccxtBinanceOptionsForRestGateway,
   shouldSkipEgressIpCheck,
 } from "./binance-rest-base.ts";
+import { bindCcxtPooledFetch } from "./ccxt-pooled-fetch.ts";
+import { pooledFetch } from "./pooled-http-client.ts";
 import {
   readSmartLimitMaxChasePct,
   readSmartLimitMaxSlippagePct,
   computeAdverseSlippageFrac,
 } from "./smart-limit-chase-config.ts";
+import {
+  computeBuyBaseQtyFromNotional,
+  resolveSymbolLotStepSize,
+} from "./buy-live-wallet-sizing.ts";
+import { readPaperSimulationPoolUsdt } from "./paper-balance.ts";
+import {
+  isPaperTradingEnvForced,
+  paperInterceptToMarketResult,
+  paperInterceptToSmartLimitResult,
+} from "./paper-trade-interceptor.ts";
 
 export function toCcxtSymbol(symbol: string) {
   if (symbol.includes("/")) return symbol;
@@ -33,7 +45,7 @@ export function createBinanceExchange() {
     throw new Error("Missing BINANCE_API_KEY or BINANCE_SECRET");
   }
 
-  return new ccxt.binance({
+  const exchange = new ccxt.binance({
     apiKey,
     secret,
     // Keep CCXT-side pacing on for all REST calls.
@@ -44,6 +56,7 @@ export function createBinanceExchange() {
     },
     ...ccxtBinanceOptionsForRestGateway(),
   });
+  return bindCcxtPooledFetch(exchange);
 }
 
 let sharedSignedBinance: InstanceType<typeof ccxt.binance> | null = null;
@@ -101,7 +114,7 @@ export async function assertExpectedEgressIpOrThrow(): Promise<void> {
   const t = setTimeout(() => ctrl.abort(), 12_000);
   let observed: string;
   try {
-    const res = await fetch(echoUrl, {
+    const res = await pooledFetch(echoUrl, {
       signal: ctrl.signal,
       headers: { Accept: "application/json" },
     });
@@ -279,11 +292,11 @@ export async function formatBuyAmountWithinUsdCap(
   const rawStep = filters.find((f: any) => f?.filterType === "LOT_SIZE")?.stepSize;
   const stepSize = Number(rawStep);
 
-  let qty = maxUsd / referencePrice;
-  if (!Number.isFinite(qty) || qty <= 0) return 0;
-  if (Number.isFinite(stepSize) && stepSize > 0) {
-    qty = Math.floor(qty / stepSize) * stepSize;
-  }
+  const lotStep = Number.isFinite(stepSize) && stepSize > 0
+    ? stepSize
+    : resolveSymbolLotStepSize(symbol);
+  let qty = computeBuyBaseQtyFromNotional(maxUsd, referencePrice, lotStep, symbol);
+  if (!(qty > 0)) return 0;
   qty = Number(exchange.amountToPrecision(ccxtSymbol, qty));
   if (!Number.isFinite(qty) || qty <= 0) return 0;
 
@@ -354,6 +367,20 @@ export async function executeMarketOrder(
   amount: number,
   opts?: ExecuteMarketOrderOpts,
 ) {
+  const refPxEarly = Number(opts?.referencePrice ?? 0);
+  if (isPaperTradingEnvForced()) {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error("InvalidOrder: amount must be > 0 for paper market dispatch");
+    }
+    const ref = Number.isFinite(refPxEarly) && refPxEarly > 0 ? refPxEarly : 1;
+    return paperInterceptToMarketResult({
+      symbol,
+      side,
+      amount,
+      referencePrice: ref,
+    });
+  }
+
   const exchange = getSharedBinanceSignedExchange();
   const ccxtSymbol = toCcxtSymbol(symbol);
   await applyBinanceJitter();
@@ -502,6 +529,15 @@ export async function executeSmartLimitChaser(params: {
   }
   if (!Number.isFinite(initialAmount) || initialAmount <= 0) {
     throw new Error("smart_limit_invalid_amount");
+  }
+
+  if (isPaperTradingEnvForced()) {
+    return paperInterceptToSmartLimitResult({
+      symbol,
+      side,
+      amount: initialAmount,
+      signalPrice,
+    });
   }
 
   const exchange = getSharedBinanceSignedExchange();
@@ -749,18 +785,83 @@ export async function getAvailableBalance(
   return Number.isFinite(free) ? free : 0;
 }
 
+type UsdtBalanceSlice = {
+  free: number;
+  used: number;
+  total: number;
+  usedMargin: number;
+};
+
+function readCcxtNumber(raw: unknown): number {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Slice USDT free/used/total from ccxt `fetchBalance()` (nested or flat). */
+export function sliceUsdtFromCcxtBalance(balance: unknown): UsdtBalanceSlice {
+  const b = balance as Record<string, unknown> | null | undefined;
+  const empty: UsdtBalanceSlice = { free: 0, used: 0, total: 0, usedMargin: 0 };
+  if (!b) return empty;
+
+  const usdt = (b.USDT ?? b.usdt) as Record<string, unknown> | undefined;
+  const freeBlock = b.free as Record<string, unknown> | undefined;
+  const usedBlock = b.used as Record<string, unknown> | undefined;
+  const totalBlock = b.total as Record<string, unknown> | undefined;
+
+  return {
+    free: readCcxtNumber(usdt?.free ?? freeBlock?.USDT ?? freeBlock?.usdt),
+    used: readCcxtNumber(usdt?.used ?? usedBlock?.USDT ?? usedBlock?.usdt),
+    total: readCcxtNumber(usdt?.total ?? totalBlock?.USDT ?? totalBlock?.usdt),
+    usedMargin: readCcxtNumber(
+      usdt?.used_margin ?? usdt?.usedMargin ?? usdt?.margin ?? 0,
+    ),
+  };
+}
+
+export function readUsdtMarginFallbackMinTotalUsd(): number {
+  const raw = Number(Deno.env.get("USDT_MARGIN_FALLBACK_MIN_TOTAL_USD") ?? "12");
+  return Number.isFinite(raw) && raw > 0 ? raw : 12;
+}
+
+export function readUsdtMarginFallbackBaselineUsd(): number {
+  const raw = Number(Deno.env.get("USDT_MARGIN_FALLBACK_BASELINE_USD") ?? "12");
+  return Number.isFinite(raw) && raw > 0 ? raw : 12;
+}
+
+/**
+ * Parse spendable USDT from ccxt `fetchBalance()`.
+ * When `free` is 0 but `total` is funded (margin/used lock), derive liquidity from
+ * total − used_margin/used so micro-clip bounce trades can still dispatch.
+ */
+export function parseUsdtFreeFromCcxtBalance(balance: unknown): number {
+  const { free, used, total, usedMargin } = sliceUsdtFromCcxtBalance(balance);
+  if (free > 0) return free;
+
+  const minTotal = readUsdtMarginFallbackMinTotalUsd();
+  const baseline = readUsdtMarginFallbackBaselineUsd();
+  if (!(total > minTotal)) return Math.max(0, free);
+
+  const usedLock = Math.max(0, usedMargin > 0 ? usedMargin : used);
+  let availableUsdt = total - usedLock;
+  if (availableUsdt <= 0) {
+    availableUsdt = Math.min(baseline, total);
+  }
+  return Number.isFinite(availableUsdt) && availableUsdt > 0
+    ? Number(availableUsdt.toFixed(8))
+    : 0;
+}
+
 export async function getUsdtBalance(isTestMode = false): Promise<number> {
-  if (isTestMode) {
-    // Paper BUY sizing uses `profiles.demo_balance` via `resolvePaperWalletUsdt` in buy-prep.
-    const testBalance = Number(Deno.env.get("TEST_USDT_BALANCE") ?? "100000");
-    return Number.isFinite(testBalance) ? testBalance : 100000;
+  if (isTestMode || isPaperTradingEnvForced()) {
+    const testBalance = Number(Deno.env.get("TEST_USDT_BALANCE") ?? "");
+    if (Number.isFinite(testBalance) && testBalance > 0) return testBalance;
+    return readPaperSimulationPoolUsdt();
   }
 
   const exchange = getSharedBinanceSignedExchange();
   await applyBinanceJitter();
   const balance = await exchange.fetchBalance();
-  const usdt = Number(balance?.USDT?.free ?? balance?.free?.USDT ?? 0);
-  return Number.isFinite(usdt) ? usdt : 0;
+  return parseUsdtFreeFromCcxtBalance(balance);
 }
 
 export async function getTotalAccountBalanceUsdt(

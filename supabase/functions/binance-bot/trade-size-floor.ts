@@ -21,6 +21,11 @@ export function applySymbolTradeUsdFloor(params: {
   currentBalance: number;
 }): number {
   const floor = readSymbolMinTradeUsd(params.symbol);
-  const capped = Math.min(params.currentBalance, Math.max(floor, params.tradeUsd));
-  return Number(capped.toFixed(2));
+  const tradeUsd = Math.max(0, Number(params.tradeUsd));
+  const balance = Math.max(0, Number(params.currentBalance));
+  const target = Math.max(floor, tradeUsd);
+  if (balance <= 0) {
+    return Number(target.toFixed(2));
+  }
+  return Number(Math.min(balance, target).toFixed(2));
 }

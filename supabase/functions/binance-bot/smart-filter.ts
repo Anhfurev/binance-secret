@@ -9,6 +9,7 @@ import {
 } from "./regime-scaling.ts";
 import { readActiveFrictionSpreadBoost } from "./professional-expectancy.ts";
 import { resolveScaledSmartFilterFloors } from "./strategy-hybrid-gates.ts";
+import { resolveSmartFilterVolumeGatePolicy } from "./smart-filter-volume-policy.ts";
 
 export type SmartNoiseFilterResult = {
   sleepAi: boolean;
@@ -20,6 +21,8 @@ export type SmartNoiseFilterResult = {
   spreadBps: number | null;
   tradeRegime: TradeRegime;
   volume1mQuoteUsd: number;
+  volumeGateMode: string;
+  minVolume1mQuoteUsdApplied: number;
 };
 
 function readEnabled(): boolean {
@@ -32,6 +35,33 @@ function readMinVolVs24hAvg(): number {
   const n = raw.length ? Number(raw) : NaN;
   if (!Number.isFinite(n)) return 0.45;
   return Math.min(3, Math.max(0.1, n));
+}
+
+export function isCapitulationTape(snapshot: IndicatorSnapshot): boolean {
+  const rsi = toNumber(snapshot.rsi, 50);
+  const px = toNumber(snapshot.latestPrice, 0);
+  const bbLow = toNumber(snapshot.bbLower, 0);
+  const nearLowerBand =
+    bbLow > 0 && px > 0 && px <= bbLow * 1.015;
+  return rsi > 0 && rsi < 38 && nearLowerBand;
+}
+
+export function resolveEffectiveMinVolRatio(params: {
+  snapshot: IndicatorSnapshot;
+  baseRatio: number;
+  volume1m: number;
+  avgFrom24h: number;
+}): number {
+  let ratio = params.baseRatio;
+  if (isCapitulationTape(params.snapshot)) {
+    ratio = Math.min(ratio, 0.22);
+  }
+  const burst =
+    params.avgFrom24h > 0 ? params.volume1m / params.avgFrom24h : 0;
+  if (burst >= 1.8) {
+    ratio = Math.min(ratio, 0.28);
+  }
+  return ratio;
 }
 
 export function resolveAvgVolume1mFrom24h(snapshot: IndicatorSnapshot): number | null {
@@ -50,6 +80,8 @@ export function evaluateSmartNoiseFilter(params: {
   hasOpenTrade: boolean;
   isGhostExecution?: boolean;
   paperRelaxed?: boolean;
+  /** From `bot_settings.min_volume_24h_quote` — high-liq pairs prefer this over 1m burst gates. */
+  minVolume24hQuoteFromDb?: number;
 }): SmartNoiseFilterResult {
   const {
     snapshot,
@@ -57,6 +89,7 @@ export function evaluateSmartNoiseFilter(params: {
     hasOpenTrade,
     isGhostExecution = false,
     paperRelaxed = false,
+    minVolume24hQuoteFromDb = 0,
   } = params;
   const volume1m = Math.max(0, toNumber(lastCandleVolume, 0));
   const latestPrice = toNumber(snapshot.latestPrice, 0);
@@ -83,6 +116,8 @@ export function evaluateSmartNoiseFilter(params: {
       spreadBps,
       tradeRegime,
       volume1mQuoteUsd,
+      volumeGateMode: "disabled",
+      minVolume1mQuoteUsdApplied: 0,
     };
   }
 
@@ -100,16 +135,51 @@ export function evaluateSmartNoiseFilter(params: {
   const minVolRatio = paperRelaxed
     ? Math.min(scaledFloors.minVolVs24hAvg, 0.32)
     : scaledFloors.minVolVs24hAvg;
-  const minVolume1mQuoteUsd = scaledFloors.minVolume1mQuoteUsd;
+  const volumeGate = resolveSmartFilterVolumeGatePolicy({
+    symbol: snapshot.symbol,
+    baseMinVolume1mQuoteUsd: scaledFloors.minVolume1mQuoteUsd,
+    minVolume24hQuoteFromDb,
+    snapshot,
+  });
+  const minVolume1mQuoteUsd = volumeGate.minVolume1mQuoteUsd;
 
-  if (!hasOpenTrade && avgVolume1mFrom24h != null && avgVolume1mFrom24h > 0) {
-    if (volume1m < avgVolume1mFrom24h * minVolRatio) {
+  if (volumeGate.mode !== "standard") {
+    console.log("[SMART_FILTER_VOLUME]", {
+      symbol: snapshot.symbol,
+      mode: volumeGate.mode,
+      base_1m_floor_usd: scaledFloors.minVolume1mQuoteUsd,
+      applied_1m_floor_usd: minVolume1mQuoteUsd,
+      min_volume_24h_quote_db: volumeGate.minVolume24hQuoteDb,
+      volume_24h_quote: volumeGate.volume24hQuote,
+      skip_1m_usd: volumeGate.skip1mUsdGate,
+      skip_1m_vs_24h_avg: volumeGate.skip1mVs24hAvgGate,
+    });
+  }
+
+  if (
+    !hasOpenTrade
+    && !volumeGate.skip1mVs24hAvgGate
+    && avgVolume1mFrom24h != null
+    && avgVolume1mFrom24h > 0
+  ) {
+    const effectiveMinVolRatio = resolveEffectiveMinVolRatio({
+      snapshot,
+      baseRatio: minVolRatio,
+      volume1m,
+      avgFrom24h: avgVolume1mFrom24h,
+    });
+    if (volume1m < avgVolume1mFrom24h * effectiveMinVolRatio) {
       sleepAi = true;
       vetoReasons.push("FAIL_LOW_VOLUME_VS_24H_AVG");
     }
   }
 
-  if (!hasOpenTrade && minVolume1mQuoteUsd > 0 && volume1mQuoteUsd < minVolume1mQuoteUsd) {
+  if (
+    !hasOpenTrade
+    && !volumeGate.skip1mUsdGate
+    && minVolume1mQuoteUsd > 0
+    && volume1mQuoteUsd < minVolume1mQuoteUsd
+  ) {
     blockBuy = true;
     blockReason =
       `hold_low_1m_volume_${volume1mQuoteUsd.toFixed(0)}usd_lt_${minVolume1mQuoteUsd}`;
@@ -138,5 +208,7 @@ export function evaluateSmartNoiseFilter(params: {
     spreadBps,
     tradeRegime,
     volume1mQuoteUsd,
+    volumeGateMode: volumeGate.mode,
+    minVolume1mQuoteUsdApplied: minVolume1mQuoteUsd,
   };
 }
