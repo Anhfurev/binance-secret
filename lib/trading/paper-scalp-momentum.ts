@@ -46,7 +46,9 @@ export function evaluatePaperBuySignal(
     return { shouldBuy: false, reason: "rsi_overbought" };
   }
 
-  if (rsi <= settings.rsiOversoldPanic) {
+  // Temporary testing threshold override (revert to settings.rsiOversoldPanic after live test)
+  const panicThreshold = 45;
+  if (rsi <= panicThreshold) {
     return { shouldBuy: true, reason: "oversold_bounce" };
   }
 
