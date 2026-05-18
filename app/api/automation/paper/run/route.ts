@@ -29,16 +29,23 @@ import {
   paperWalletWasAligned,
   resolvePaperScalpWalletUsd,
 } from "@/lib/trading/paper-scalp-wallet";
+import {
+  writeServerLogAsync,
+  writeServerLogFromError,
+} from "@/lib/server-logs";
 import type { CoinData } from "@/lib/types";
 
 type TradingAction = "BUY" | "SELL" | "HOLD" | "NO_TRADE";
 
-function logFatalRouteException(error: unknown): void {
+function logFatalRouteException(error: unknown, phase?: string): void {
   const err = error instanceof Error ? error : new Error(String(error));
   console.error("❌ [FATAL ROUTE EXCEPTION] LOG DETAILS:", {
     message: err?.message,
     stack: err?.stack,
     cause: err?.cause,
+  });
+  writeServerLogFromError("paper-scalp-route", err, {
+    phase: phase ?? "fatal_route_exception",
   });
 }
 
@@ -106,6 +113,7 @@ function dispatchRouteTelegram(
     });
   } catch (err) {
     console.error("[TELEGRAM-ROUTE-ERROR]", err);
+    writeServerLogFromError("paper-scalp-telegram", err, { summary });
   }
 }
 
@@ -125,6 +133,9 @@ async function fetchDemoWorkspacesSafe(): Promise<DemoWorkspaceListResult> {
       stack: err.stack,
       cause: err.cause,
     });
+    writeServerLogFromError("paper-scalp-route", err, {
+      phase: "supabase_workspaces",
+    });
     return {
       ok: false,
       data: [],
@@ -140,6 +151,11 @@ export async function GET(request: NextRequest) {
 
   if (!isAuthorized(request)) {
     console.warn("[paper-scalp] Unauthorized — bearer token mismatch or missing");
+    writeServerLogAsync({
+      level: "warn",
+      source: "paper-scalp-route",
+      message: "unauthorized_cron_request",
+    });
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -150,6 +166,12 @@ export async function GET(request: NextRequest) {
     const listResult = await fetchDemoWorkspacesSafe();
     if (!listResult.ok) {
       console.error("[paper-scalp] workspace list failed:", listResult.error);
+      writeServerLogAsync({
+        level: "error",
+        source: "paper-scalp-route",
+        message: "workspace_list_failed",
+        meta: { detail: listResult.error },
+      });
       return NextResponse.json(
         {
           error: listResult.error ?? "Unable to load demo workspaces",
@@ -186,6 +208,10 @@ export async function GET(request: NextRequest) {
         message: err.message,
         stack: err.stack,
         cause: err.cause,
+      });
+      writeServerLogFromError("paper-scalp-route", err, {
+        phase: "binance_klines",
+        symbols,
       });
       scalpSnapshots = buildMockScalpSnapshots(symbols, marketCoins);
       snapshotSource = "mock";
@@ -278,6 +304,12 @@ export async function GET(request: NextRequest) {
               `[paper-scalp] workspace=${workspaceKey} | save failed`,
               saveResult.error,
             );
+            writeServerLogAsync({
+              level: "error",
+              source: "paper-scalp-route",
+              message: "workspace_save_failed",
+              meta: { workspaceKey, detail: saveResult.error },
+            });
             return;
           }
           updated += 1;
@@ -310,7 +342,7 @@ export async function GET(request: NextRequest) {
       durationMs: Number(duration),
     });
   } catch (error: unknown) {
-    logFatalRouteException(error);
+    logFatalRouteException(error, "fatal_route_exception");
     const duration = (performance.now() - startTime).toFixed(2);
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json(

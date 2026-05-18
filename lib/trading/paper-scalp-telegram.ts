@@ -4,6 +4,7 @@
  */
 
 import { formatMicroPrice } from "@/lib/trading/micro-price";
+import { writeServerLogAsync } from "@/lib/server-logs";
 import {
   formatNavTelegramBlock,
   humanPaperScalpReason,
@@ -59,10 +60,22 @@ export function sendTelegramNotification(message: string): void {
             `[paper-scalp-telegram] HTTP ${res.status}`,
             body.slice(0, 400),
           );
+          writeServerLogAsync({
+            level: "error",
+            source: "paper-scalp-telegram",
+            message: "telegram_send_failed",
+            meta: { http_status: res.status, detail: body.slice(0, 400) },
+          });
         }
       })
       .catch((err) => {
         console.error("[paper-scalp-telegram] network error:", err);
+        writeServerLogAsync({
+          level: "error",
+          source: "paper-scalp-telegram",
+          message: "telegram_network_error",
+          meta: { detail: String(err) },
+        });
       });
   });
 }
