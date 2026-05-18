@@ -104,8 +104,4 @@ export async function transmitManifestHtmlDashboard(
     );
   }
 
-  console.log("[paper-scalp-manifest] Telegram delivered", {
-    messageId: payload.result?.message_id ?? null,
-    chatIdSuffix: chatId.slice(-4),
-  });
 }

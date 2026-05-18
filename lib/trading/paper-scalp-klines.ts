@@ -123,11 +123,6 @@ export async function fetch15mKlines(
       if (!isValidKlineTicker(candidate)) continue;
       const candles = await fetch15mKlinesForSymbol(candidate, limit);
       if (candles.length >= 30) {
-        if (candidate !== base) {
-          console.log(
-            `[paper-15m] ${base} via ${candidate} (${candles.length}×15m bars)`,
-          );
-        }
         return candles;
       }
     }

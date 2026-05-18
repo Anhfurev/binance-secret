@@ -18,16 +18,12 @@ export function isBtcBearish1h(
   return btc.ema9 < btc.ema21;
 }
 
-export function logCorrelationFilterSkip(symbol: string): void {
-  console.log(
-    `[CORRELATION-FILTER] Max risk exposure reached. Skipping entry for ${normalizePaperSymbol(symbol)}`,
-  );
+export function logCorrelationFilterSkip(_symbol: string): void {
+  /* silent — high-signal events surface via manifest */
 }
 
-export function logBtcRegimePause(symbol: string): void {
-  console.log(
-    `[BTC-REGIME] Bearish 1h (EMA9 < EMA21) — pausing altcoin entry for ${normalizePaperSymbol(symbol)}`,
-  );
+export function logBtcRegimePause(_symbol: string): void {
+  /* silent — regime shown on tactical pulse / high-signal manifest */
 }
 
 export function passesCorrelationExposureGate(openLegCount: number): boolean {

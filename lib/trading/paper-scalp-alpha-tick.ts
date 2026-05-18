@@ -73,7 +73,7 @@ export function runPaperScalpAlphaTick(params: {
   let velocityPartial = false;
   const velocityPartialSymbols: string[] = [];
   let positionClosed = false;
-  let lastCloseSummary: string | null = null;
+  const closeSummaries: string[] = [];
 
   const legsToEvaluate = [...account.openPositions];
   for (const leg of legsToEvaluate) {
@@ -94,10 +94,15 @@ export function runPaperScalpAlphaTick(params: {
     }
     if (evalResult.exit?.changed) {
       positionClosed = true;
-      lastCloseSummary = evalResult.exit.summary;
+      closeSummaries.push(evalResult.exit.summary);
       account = evalResult.exit.account;
     }
   }
+
+  const lastCloseSummary =
+    closeSummaries.length > 0
+      ? closeSummaries[closeSummaries.length - 1]!
+      : null;
 
   const openLegIds = account.openPositions.map((p) => p.id);
   for (const legId of openLegIds) {

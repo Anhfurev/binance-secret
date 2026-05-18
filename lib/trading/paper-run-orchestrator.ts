@@ -74,6 +74,11 @@ async function fetchDemoWorkspacesSafe() {
   }
 }
 
+/**
+ * Paper run: prepare 15m harvest → per-workspace alpha tick (all legs, no early exit skip)
+ * → persist → Telegram only on high-signal or ULAT 10m pulse (see manifest-notify).
+ * Velocity wake: route sets x-paper-velocity-wake:1 → skips 120s heartbeat interval.
+ */
 async function executePaperScalpOrchestrator(): Promise<
   | { ok: false; status: number; body: Record<string, unknown> }
   | PaperRunOrchestratorResult

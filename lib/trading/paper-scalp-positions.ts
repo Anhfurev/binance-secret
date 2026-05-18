@@ -147,6 +147,7 @@ function tryVelocityPartialTakeProfit(
       costSold > 0 ? Number(((partialPnl / costSold) * 100).toFixed(2)) : 0,
     closedAt: new Date(),
     notes: `${trade.notes ?? ""} | velocity-partial-70`.trim(),
+    followedSignal: false,
     tags: [...(trade.tags ?? []), "velocity-partial-70", "paper-scalp"],
   };
 
