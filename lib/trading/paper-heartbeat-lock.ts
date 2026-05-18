@@ -38,6 +38,8 @@ export function tryAcquirePaperHeartbeat(): PaperHeartbeatGateResult {
     };
   }
 
+  // TEST: temporarily bypass hourly interval safety gate (re-enable after live-fire test)
+  /*
   if (lastCompletedAtMs > 0 && now - lastCompletedAtMs < intervalMs) {
     return {
       ok: false,
@@ -46,6 +48,7 @@ export function tryAcquirePaperHeartbeat(): PaperHeartbeatGateResult {
       lastCompletedAtMs,
     };
   }
+  */
 
   isProcessing = true;
   lastStartedAtMs = now;
