@@ -4,12 +4,16 @@ import { sanitizePaperScalpSymbolList } from "@/lib/trading/paper-scalp-kline-sy
 
 export const PAPER_MIN_NOTIONAL_USDT = 5.5;
 
-/** Below this live NAV, use %-of-wallet only (no $5.50 floor). */
+/**
+ * Below this live NAV, paper mode uses %-of-wallet only (no $5.50 floor).
+ * Live Binance spot: min notional ~$5–10/pair — at 23% risk, orders reject if
+ * NAV × 0.23 < min (e.g. NAV < ~$22 when min = $5). $28 → $6.44 is fine.
+ */
 export const PAPER_NAV_COMPOUND_THRESHOLD_USDT = 50;
 
 export const DEFAULT_RISK_PER_TRADE_PERCENT = 23;
 
-export const DEFAULT_MAX_OPEN_POSITIONS = 5;
+export const DEFAULT_MAX_OPEN_POSITIONS = 2;
 
 export const DEFAULT_PAPER_WATCH_SYMBOLS = [
   "BTCUSDT",
@@ -56,7 +60,7 @@ export function resolvePaperScalpWorkspaceSettings(
     DEFAULT_RISK_PER_TRADE_PERCENT,
   );
   const maxOpenPositions = Math.min(
-    10,
+    2,
     Math.max(1, Math.floor(readNumber(raw?.maxOpenPositions, DEFAULT_MAX_OPEN_POSITIONS))),
   );
   const symbols = normalizeSymbolList(raw?.symbols);

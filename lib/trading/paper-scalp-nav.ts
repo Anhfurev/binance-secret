@@ -120,6 +120,10 @@ export function humanPaperScalpReason(summary: string): string {
       "Legacy cap — copy-profile max open positions reached",
     "max-open-positions-reached":
       "Max concurrent open positions reached (workspace limit)",
+    "correlation-max-exposure":
+      "Correlation filter — max 2 open legs per workspace",
+    "btc-bearish-pause":
+      "BTC 1h bearish (EMA9 < EMA21) — altcoin entries paused",
     "no-1m-snapshots":
       "1h indicator snapshots missing (klines blocked or empty)",
     "no-hourly-snapshots":

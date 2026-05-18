@@ -1,5 +1,9 @@
 import type { CoinData, DemoAccount } from "@/lib/types";
-import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
+import {
+  formatRiskRewardLogLine,
+  computeAtrStops,
+  type Scalp1mSnapshot,
+} from "@/lib/trading/paper-scalp-indicators";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import {
   formatSnapshotScanLine,
@@ -37,6 +41,11 @@ export function relayPaperScalpTickTelegram(params: {
     if (!trade) return;
     const sym = normSymbol(trade.symbol);
     const snap = scalpSnapshots.get(sym);
+    const stopPlan = computeAtrStops(
+      trade.entryPrice,
+      snap?.atr14 ?? Math.abs(trade.entryPrice - trade.stopLoss) / 1.5,
+      "long",
+    );
     notifyPaperScalpBuy({
       symbol: sym,
       entryPrice: trade.entryPrice,
@@ -49,6 +58,11 @@ export function relayPaperScalpTickTelegram(params: {
       rsi14: snap?.rsi14 ?? 50,
       nav,
       openLegCount,
+      riskRewardLine: formatRiskRewardLogLine(
+        stopPlan,
+        trade.value,
+        trade.entryPrice,
+      ),
     });
     return;
   }
@@ -142,6 +156,24 @@ export function relayPaperScalpTickTelegram(params: {
         minNotionalFloor: 5.5,
         liveNav: nav.portfolio_nav_usdt,
         openUnrealizedPnl: nav.open_unrealized_pnl_usdt,
+      },
+      throttleKey: summary,
+      nav,
+      openLegCount,
+    });
+    return;
+  }
+
+  if (
+    summary === "correlation-max-exposure" ||
+    summary === "btc-bearish-pause"
+  ) {
+    notifyPaperScalpDecision({
+      kind: "skip",
+      reason: summary,
+      details: {
+        openCount: account.openPositions.length,
+        maxLegs: 2,
       },
       throttleKey: summary,
       nav,

@@ -1,8 +1,16 @@
 import {
   computeAtrStops,
+  formatRiskRewardLogLine,
   type Scalp1mSnapshot,
 } from "@/lib/trading/paper-scalp-indicators";
 import { logPaperScalpActiveLine } from "@/lib/trading/paper-scalp-active-log";
+import {
+  logBtcRegimePause,
+  logCorrelationFilterSkip,
+  MAX_OPEN_LEGS_PER_WORKSPACE,
+  passesBtcAltcoinGate,
+  passesCorrelationExposureGate,
+} from "@/lib/trading/paper-scalp-correlation";
 import { maybeResetPaperDailyPnl } from "@/lib/trading/paper-scalp-daily";
 import { formatAssetPrice } from "@/lib/trading/paper-scalp-metrics-format";
 import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
@@ -24,9 +32,6 @@ import type { PaperAutomationTickResult } from "@/lib/trading/paper-scalp-types"
 import type { CoinData, DemoAccount, DemoTrade } from "@/lib/types";
 
 export type { PaperAutomationTickResult };
-
-const ATR_STOP_MULT = 1.5;
-const ATR_TP_MULT = 3;
 
 function resolveRsiMaxBuy(): number {
   const raw = String(process.env.PAPER_RSI_MAX_BUY ?? "").trim();
@@ -66,23 +71,25 @@ export function runPaperScalp1hTick(params: {
     if (evalResult.exit?.changed) return evalResult.exit;
   }
 
-  if (account.openPositions.length > 0) {
-    const sym = normalizeSymbol(account.openPositions[0].symbol);
+  const openLegCount = account.openPositions.length;
+  const maxLegs = Math.min(
+    paperSettings.maxOpenPositions,
+    MAX_OPEN_LEGS_PER_WORKSPACE,
+  );
+
+  if (!passesCorrelationExposureGate(openLegCount)) {
+    const heldSym = account.openPositions[0]?.symbol ?? "—";
     logPaperScalpActiveLine({
-      symbol: sym,
+      symbol: normalizeSymbol(heldSym),
       action: "HOLD",
-      reason: "managing_open",
-      snap: snapshots.get(sym),
+      reason: "correlation_max_exposure",
+      snap: snapshots.get(normalizeSymbol(heldSym)),
     });
     return {
       account,
       changed: stopsAdjusted,
-      summary: "holding-position",
+      summary: "correlation-max-exposure",
     };
-  }
-
-  if (account.openPositions.length >= paperSettings.maxOpenPositions) {
-    return { account, changed: false, summary: "max-open-positions-reached" };
   }
 
   const momentum = resolvePaperMomentumSettings(
@@ -106,12 +113,43 @@ export function runPaperScalp1hTick(params: {
   const pick = ranked[0];
 
   if (!pick) {
+    if (openLegCount > 0) {
+      const sym = normalizeSymbol(account.openPositions[0].symbol);
+      logPaperScalpActiveLine({
+        symbol: sym,
+        action: "HOLD",
+        reason: "managing_open",
+        snap: snapshots.get(sym),
+      });
+      return {
+        account,
+        changed: stopsAdjusted,
+        summary: "holding-position",
+      };
+    }
     return { account, changed: false, summary: "no-signal" };
   }
 
   const entrySnap = pick.snap;
   const buyReason = pick.evaluation.reason as PaperMomentumBuyReason;
   const sym = normalizeSymbol(entrySnap.symbol);
+
+  if (!passesBtcAltcoinGate(sym, snapshots)) {
+    logBtcRegimePause(sym);
+    if (openLegCount > 0) {
+      return { account, changed: stopsAdjusted, summary: "holding-position" };
+    }
+    return { account, changed: false, summary: "btc-bearish-pause" };
+  }
+
+  if (openLegCount >= maxLegs) {
+    logCorrelationFilterSkip(sym);
+    return {
+      account,
+      changed: stopsAdjusted,
+      summary: "correlation-max-exposure",
+    };
+  }
 
   logPaperScalpActiveLine({
     symbol: sym,
@@ -136,12 +174,9 @@ export function runPaperScalp1hTick(params: {
     return { account, changed: false, summary: "insufficient-free-margin-floor" };
   }
 
-  const { stopLoss, takeProfit, riskUsd, rewardUsd } = computeAtrStops(
-    entryPrice,
-    entrySnap.atr14,
-    "long",
-  );
+  const stopPlan = computeAtrStops(entryPrice, entrySnap.atr14, "long");
   const amount = Number((positionSizeUsdt / entryPrice).toFixed(6));
+  const rrLine = formatRiskRewardLogLine(stopPlan, positionSizeUsdt, entryPrice);
 
   console.log(`[paper-scalp] BUY ${sym} | ${buyReason}`, {
     entryPrice: formatAssetPrice(entryPrice),
@@ -150,8 +185,11 @@ export function runPaperScalp1hTick(params: {
     navPct: paperSettings.riskPerTradePercent,
     minFloor: appliedMinFloor,
     navSummary: formatNavLogLine(nav),
-    riskRewardRatio: riskUsd > 0 ? Number((rewardUsd / riskUsd).toFixed(2)) : 2,
+    stopLoss: formatAssetPrice(stopPlan.stopLoss),
+    takeProfit: formatAssetPrice(stopPlan.takeProfit),
+    riskReward: rrLine,
   });
+  console.log(`[paper-scalp] • Risk/Reward Ratio: ${rrLine}`);
 
   const trade: DemoTrade = {
     id: `scalp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -164,16 +202,17 @@ export function runPaperScalp1hTick(params: {
     value: positionSizeUsdt,
     status: "open",
     openedAt: new Date(),
-    stopLoss,
-    takeProfit,
+    stopLoss: stopPlan.stopLoss,
+    takeProfit: stopPlan.takeProfit,
     trailingStopPct: undefined,
     followedSignal: false,
     notes: `1h momentum ${buyReason}`,
     tags: ["paper-scalp", buyReason, sym],
     executionNotes: [
       `ATR14=${entrySnap.atr14.toFixed(8)}`,
-      `SL=1.5×ATR TP=3×ATR`,
+      `SL=1.5×ATR TP=1:2.5 R:R`,
       `size=$${positionSizeUsdt}`,
+      `R:R ${rrLine}`,
     ],
   };
 

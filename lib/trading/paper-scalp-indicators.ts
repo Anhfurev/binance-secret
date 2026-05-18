@@ -147,19 +147,51 @@ export function buildScalp1mSnapshot(
   };
 }
 
+export const ATR_STOP_LOSS_MULT = 1.5;
+export const MIN_RISK_REWARD_RATIO = 2.5;
+
+export type AtrStopPlan = {
+  stopLoss: number;
+  takeProfit: number;
+  riskDistance: number;
+  rewardDistance: number;
+  riskRewardRatio: number;
+};
+
+/** SL from ATR volatility; TP enforces min 1:2.5 R:R from entry. */
 export function computeAtrStops(
   entryPrice: number,
   atr14: number,
   side: "long",
-): { stopLoss: number; takeProfit: number; riskUsd: number; rewardUsd: number } {
-  const stopDist = atr14 * 1.5;
-  const rewardDist = atr14 * 3;
-  const stopLoss = side === "long" ? entryPrice - stopDist : entryPrice + stopDist;
-  const takeProfit = side === "long" ? entryPrice + rewardDist : entryPrice - rewardDist;
+  stopMult = ATR_STOP_LOSS_MULT,
+  rewardMult = MIN_RISK_REWARD_RATIO,
+): AtrStopPlan {
+  const stopDist = atr14 * stopMult;
+  const stopLoss =
+    side === "long" ? entryPrice - stopDist : entryPrice + stopDist;
+  const riskDistance = Math.abs(entryPrice - stopLoss);
+  const rewardDistance = riskDistance * rewardMult;
+  const takeProfit =
+    side === "long"
+      ? entryPrice + rewardDistance
+      : entryPrice - rewardDistance;
+
   return {
     stopLoss: Number(stopLoss.toFixed(8)),
     takeProfit: Number(takeProfit.toFixed(8)),
-    riskUsd: Number(stopDist.toFixed(8)),
-    rewardUsd: Number(rewardDist.toFixed(8)),
+    riskDistance: Number(riskDistance.toFixed(8)),
+    rewardDistance: Number(rewardDistance.toFixed(8)),
+    riskRewardRatio: rewardMult,
   };
+}
+
+export function formatRiskRewardLogLine(
+  plan: AtrStopPlan,
+  positionSizeUsdt: number,
+  entryPrice: number,
+): string {
+  const qty = entryPrice > 0 ? positionSizeUsdt / entryPrice : 0;
+  const riskDollars = Number((plan.riskDistance * qty).toFixed(4));
+  const rewardDollars = Number((plan.rewardDistance * qty).toFixed(4));
+  return `1:${plan.riskRewardRatio} (Risking $${riskDollars} to make $${rewardDollars})`;
 }

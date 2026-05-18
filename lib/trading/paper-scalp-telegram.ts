@@ -104,8 +104,9 @@ export function notifyPaperScalpBuy(params: {
   rsi14: number;
   nav?: PaperWorkspaceNav;
   openLegCount?: number;
+  riskRewardLine?: string;
 }): void {
-  const { symbol, entryPrice, positionSizeUsd, stopLoss, takeProfit, ema9, ema21, atr14, rsi14, nav, openLegCount } =
+  const { symbol, entryPrice, positionSizeUsd, stopLoss, takeProfit, ema9, ema21, atr14, rsi14, nav, openLegCount, riskRewardLine } =
     params;
   const lines = [
     `🚀 *[paper-scalp] BUY SIGNAL | ${symbol}*`,
@@ -115,6 +116,9 @@ export function notifyPaperScalpBuy(params: {
     `• Target TP: ${fmtUsd(takeProfit)}`,
     `• Indicators (1h): EMA9: ${fmtNum(ema9)} | EMA21: ${fmtNum(ema21)} | RSI14: ${rsi14.toFixed(1)} | ATR: ${fmtNum(atr14)}`,
   ];
+  if (riskRewardLine) {
+    lines.push(`• Risk/Reward Ratio: ${riskRewardLine}`);
+  }
   if (nav) lines.push(formatNavTelegramBlock(nav, openLegCount ?? 1));
   sendTelegramNotification(lines.join("\n"));
 }
