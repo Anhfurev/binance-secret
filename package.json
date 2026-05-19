@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "start:prod": "bash scripts/start-production.sh",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test:edge": "cd supabase/functions/binance-bot && deno task test",
