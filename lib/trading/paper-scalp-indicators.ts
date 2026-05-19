@@ -163,7 +163,7 @@ export type AtrStopPlan = {
 export function computeAtrStops(
   entryPrice: number,
   atr14: number,
-  side: "long",
+  side: "long" | "short",
   stopMult = ATR_STOP_LOSS_MULT,
   rewardMult = MIN_RISK_REWARD_RATIO,
 ): AtrStopPlan {

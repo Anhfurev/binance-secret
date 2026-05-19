@@ -8,6 +8,18 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-19 — Alpha Shield Long/Short regime switcher (paper 15m)
+
+**Summary**
+
+- **`paper-scalp-regime.ts`:** `RISK_OFF` (`entryMode: "short"`) no longer sets `blockAltcoinEntries`; only API/BTC snapshot fallback blocks all entries. Bullish/neutral → `entryMode: "long"`.
+- **`paper-scalp-velocity.ts`:** ±1.2% candle velocity gates; `pickVelocityBreakdownCandidate` for short hunt; long keeps RVOL+RSI breakout path.
+- **`paper-scalp-alpha-entry.ts` / `paper-scalp-alpha-tick.ts`:** Opens `type: "sell"` + `direction: "SHORT"` in short regime; terminal log `[REGIME: ACTIVE_SHORT]` on entry.
+- **`paper-scalp-trailing-exit.ts` / `paper-scalp-positions.ts`:** Short ATR trail (trough + ceiling stop), cover on `mark >= stopLoss` or bullish EMA cross.
+- **`paper-scalp-engine-manifest.ts`:** Telegram manifest shows `REGIME: ACTIVE_SHORT` and SHORT leg labels.
+
+---
+
 ## 2026-05-15 — Groq tiered models (8B scan, 70B high-conviction veto)
 
 **Summary**

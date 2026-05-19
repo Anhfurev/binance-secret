@@ -52,6 +52,7 @@ export type PaperRunOrchestratorResult = {
 };
 
 function resolveTradingAction(summary: string): string {
+  if (summary.startsWith("opened-short:")) return "SHORT";
   if (summary.startsWith("opened:")) return "BUY";
   if (summary.startsWith("closed:")) return "SELL";
   if (summary.startsWith("velocity-tp-70:")) return "VELOCITY_TP";
@@ -201,7 +202,11 @@ async function executePaperScalpOrchestrator(): Promise<
     if (result.velocityPartial || result.summary.startsWith("velocity-tp-70:")) {
       velocityPartialAny = true;
     }
-    if (result.entryExecuted || result.summary.startsWith("opened:")) {
+    if (
+      result.entryExecuted ||
+      result.summary.startsWith("opened:") ||
+      result.summary.startsWith("opened-short:")
+    ) {
       entryAny = true;
     }
 
@@ -255,7 +260,7 @@ async function executePaperScalpOrchestrator(): Promise<
       btcSnapshot: resolveBtcSnapshot(prepared.scalpSnapshots),
       btcCandles: resolveBtcCandles(prepared.candlesBySymbol),
       apiDegraded: prepared.apiDegraded,
-    }).state === "risk_off";
+    }).blockAltcoinEntries;
 
   const outcome = buildPartialResult(startTime, {
     scanned,

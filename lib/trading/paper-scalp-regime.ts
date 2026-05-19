@@ -3,6 +3,8 @@ import { computeSessionVwap } from "@/lib/trading/paper-scalp-vwap";
 
 const BTC_SYMBOL = "BTCUSDT";
 
+export type RegimeEntryMode = "long" | "short" | "none";
+
 export type DynamicTrendScore = {
   score: number;
   emaSpreadPct: number;
@@ -12,10 +14,13 @@ export type DynamicTrendScore = {
 
 export type DynamicMarketRegime = {
   state: "bullish" | "neutral" | "risk_off";
+  /** RISK_ON → long entries; RISK_OFF → short hunt (not a hard block). */
+  entryMode: RegimeEntryMode;
   trendScore: DynamicTrendScore;
   btcAboveEma21: boolean;
   btcAboveVwap: boolean;
   altSizeMultiplier: number;
+  /** True only for API fallback — blocks all new alt entries. */
   blockAltcoinEntries: boolean;
   deployTopN: number;
   fallback: boolean;
@@ -53,6 +58,7 @@ function safeFallbackRegime(reason: string): DynamicMarketRegime {
   console.warn("[alpha-regime] fallback risk-off", { reason });
   return {
     state: "risk_off",
+    entryMode: "none",
     trendScore: {
       score: -50,
       emaSpreadPct: 0,
@@ -70,7 +76,7 @@ function safeFallbackRegime(reason: string): DynamicMarketRegime {
 
 /**
  * Institutional regime — BTC EMA21 + session VWAP (Alpha Shield).
- * Exits are unaffected; this gates entries and sizing only.
+ * RISK_OFF activates short-hunt mode instead of blocking all alt entries.
  */
 export function calculateDynamicRegime(params: {
   btcSnapshot?: Scalp1mSnapshot;
@@ -96,6 +102,7 @@ export function calculateDynamicRegime(params: {
   if (btcAboveEma21 && btcAboveVwap && trendScore.score >= 45) {
     return {
       state: "bullish",
+      entryMode: "long",
       trendScore,
       btcAboveEma21,
       btcAboveVwap,
@@ -109,6 +116,7 @@ export function calculateDynamicRegime(params: {
   if (btcAboveEma21 && !btcAboveVwap) {
     return {
       state: "neutral",
+      entryMode: "long",
       trendScore,
       btcAboveEma21,
       btcAboveVwap: false,
@@ -122,6 +130,7 @@ export function calculateDynamicRegime(params: {
   if (btcAboveEma21 && btcAboveVwap && trendScore.score < 45) {
     return {
       state: "neutral",
+      entryMode: "long",
       trendScore,
       btcAboveEma21,
       btcAboveVwap,
@@ -134,12 +143,13 @@ export function calculateDynamicRegime(params: {
 
   return {
     state: "risk_off",
+    entryMode: "short",
     trendScore,
     btcAboveEma21,
     btcAboveVwap,
-    altSizeMultiplier: 0,
-    blockAltcoinEntries: true,
-    deployTopN: 0,
+    altSizeMultiplier: 0.5,
+    blockAltcoinEntries: false,
+    deployTopN: 1,
     fallback: false,
   };
 }

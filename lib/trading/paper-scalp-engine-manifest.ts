@@ -28,8 +28,10 @@ import {
 } from "@/lib/trading/paper-scalp-metrics-format";
 import {
   evaluatePaperBuySignal,
+  evaluatePaperShortSignal,
   type PaperMomentumSettings,
 } from "@/lib/trading/paper-scalp-momentum";
+import { resolvePaperLegSide } from "@/lib/trading/paper-scalp-leg-side";
 import { humanPaperScalpReason, type PaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import {
   escapeTelegramHtml,
@@ -108,7 +110,28 @@ function buildSymbolGridRow(
   const isAlt = isAltcoinSymbol(norm(symbol));
 
   if (ctx.regime.blockAltcoinEntries && isAlt) {
-    return tgBullet(`${base} | Alpha Shield Risk-Off [BLOCKED]`);
+    return tgBullet(`${base} | Alpha Shield Fallback [BLOCKED]`);
+  }
+
+  if (ctx.regime.entryMode === "short" && isAlt) {
+    const shortEval = evaluatePaperShortSignal(snap, momentum);
+    if (!ctx.deploySet.has(norm(symbol)) && shortEval.shouldShort) {
+      return tgBullet(`${base} | Momentum Rank [BLOCKED]`);
+    }
+    if (ctx.atMaxLegs && shortEval.shouldShort) {
+      return tgBullet(`${base} | Max Risk Cap Hit [BLOCKED]`);
+    }
+    if (shortEval.reason === "rsi_oversold") {
+      return tgBullet(`${base} | RSI Low [BLOCKED]`);
+    }
+    if (shortEval.shouldShort) {
+      const tag =
+        shortEval.reason === "overbought_fade"
+          ? "Overbought Fade"
+          : "Bearish Resumption";
+      return tgBullet(`${base} | ${escapeTelegramHtml(tag)} [SHORT SIGNAL]`);
+    }
+    return tgBullet(`${base} | No Short Signal [PASSED]`);
   }
 
   if (isAlt && !ctx.deploySet.has(norm(symbol)) && evaluation.shouldBuy) {
@@ -128,7 +151,7 @@ function buildSymbolGridRow(
       evaluation.reason === "oversold_bounce"
         ? "Oversold Bounce"
         : "Trend Resumption";
-    return tgBullet(`${base} | ${escapeTelegramHtml(tag)} [SIGNAL]`);
+    return tgBullet(`${base} | ${escapeTelegramHtml(tag)} [LONG SIGNAL]`);
   }
 
   return tgBullet(`${base} | No Signal [PASSED]`);
@@ -142,6 +165,7 @@ function formatActiveLegHtml(
   },
 ): string {
   const sym = escapeTelegramHtml(norm(trade.symbol));
+  const side = resolvePaperLegSide(trade);
   const trailLine = escapeTelegramHtml(
     formatTrailingLegManifestLine(trade, ctx.mark, ctx.atr14),
   );
@@ -150,7 +174,7 @@ function formatActiveLegHtml(
     ? " · [Velocity 70% banked · runner 30%]"
     : "";
   return tgBullet(
-    `${sym} LONG — entry ${escapeTelegramHtml(formatAssetPrice(trade.entryPrice))} · $${escapeTelegramHtml(formatNavUsd(trade.value))} · ${trailLine} · ${pyramidLine}${velocityTag}`,
+    `${sym} ${side} — entry ${escapeTelegramHtml(formatAssetPrice(trade.entryPrice))} · $${escapeTelegramHtml(formatNavUsd(trade.value))} · ${trailLine} · ${pyramidLine}${velocityTag}`,
   );
 }
 
@@ -167,9 +191,13 @@ function buildGatesBlockHtml(
   const vwapOk = regime.btcAboveVwap ? "above" : "below";
   const emaOk = regime.btcAboveEma21 ? "above" : "below";
 
-  if (regime.state === "risk_off" || regime.blockAltcoinEntries) {
+  if (regime.blockAltcoinEntries) {
     lines.push(
-      `🛑 ${tgBold(`REGIME: ${stateLabel}`)} · trend ${score} · BTC ${emaOk} EMA21 · ${vwapOk} session VWAP · alt entries blocked.`,
+      `🛑 ${tgBold(`REGIME: ${stateLabel} (FALLBACK)`)} · trend ${score} · BTC ${emaOk} EMA21 · ${vwapOk} VWAP · all entries blocked.`,
+    );
+  } else if (regime.entryMode === "short") {
+    lines.push(
+      `📉 ${tgBold("REGIME: ACTIVE_SHORT")} · trend ${score} · BTC ${emaOk} EMA21 · ${vwapOk} VWAP · short hunt ≤−1.2% velocity · 50% size · top ${regime.deployTopN}.`,
     );
   } else if (regime.state === "neutral") {
     lines.push(
@@ -200,7 +228,13 @@ function buildGatesBlockHtml(
     lines.push(`🛑 ${tgBold("CIRCUIT BREAKER:")} tripped — new entries blocked.`);
   }
   if (masterSummary === "alpha-risk-off") {
-    lines.push(`🛑 ${tgBold("TICK OUTCOME:")} Alpha Shield risk-off (no alt entries).`);
+    lines.push(`🛑 ${tgBold("TICK OUTCOME:")} Alpha Shield fallback (no entries).`);
+  }
+  if (masterSummary === "no-short-signal") {
+    lines.push(`📉 ${tgBold("TICK OUTCOME:")} ACTIVE_SHORT regime — no bearish entry this tick.`);
+  }
+  if (masterSummary.startsWith("opened-short:")) {
+    lines.push(`📉 ${tgBold("TICK OUTCOME:")} [REGIME: ACTIVE_SHORT] short leg opened.`);
   }
   if (masterSummary === "correlation-max-exposure") {
     lines.push(`🛑 ${tgBold("TICK OUTCOME:")} max open legs reached.`);

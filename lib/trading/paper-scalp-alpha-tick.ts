@@ -1,27 +1,13 @@
-import {
-  computeAtrStops,
-  type Scalp1mSnapshot,
-  type ScalpCandle,
-} from "@/lib/trading/paper-scalp-indicators";
+import type { Scalp1mSnapshot, ScalpCandle } from "@/lib/trading/paper-scalp-indicators";
 import { MAX_OPEN_LEGS_PER_WORKSPACE } from "@/lib/trading/paper-scalp-correlation";
 import { maybeResetPaperDailyPnl } from "@/lib/trading/paper-scalp-daily";
-import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
 import {
-  buildDeployLeaderboard,
-  rankAltcoinMomentum,
-} from "@/lib/trading/paper-scalp-momentum-rank";
-import {
-  rankMomentumCandidates,
-  resolvePaperMomentumSettings,
-  type PaperMomentumBuyReason,
-} from "@/lib/trading/paper-scalp-momentum";
+  buildAlphaEntryTrade,
+  resolveAlphaEntryPick,
+} from "@/lib/trading/paper-scalp-alpha-entry";
 import { evaluateOpenPaperPosition } from "@/lib/trading/paper-scalp-positions";
 import { tryPyramidLayerOnOpenLeg } from "@/lib/trading/paper-scalp-pyramid";
-import { computeOpenEndedTakeProfit } from "@/lib/trading/paper-scalp-trailing-exit";
-import {
-  formatVelocityTp70Summary,
-  pickVelocityBreakoutCandidate,
-} from "@/lib/trading/paper-scalp-velocity";
+import { formatVelocityTp70Summary } from "@/lib/trading/paper-scalp-velocity";
 import {
   calculateDynamicRegime,
   resolveBtcCandles,
@@ -33,7 +19,7 @@ import {
 } from "@/lib/trading/paper-scalp-settings";
 import type { PaperAutomationTickResult } from "@/lib/trading/paper-scalp-types";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
-import type { CoinData, DemoAccount, DemoTrade } from "@/lib/types";
+import type { CoinData, DemoAccount } from "@/lib/types";
 
 function resolveRsiMaxBuy(): number {
   const raw = String(process.env.PAPER_RSI_MAX_BUY ?? "").trim();
@@ -55,7 +41,7 @@ function withTickMeta(
 }
 
 /**
- * Alpha engine tick — 15m regime, velocity breakout, trail, pyramid, 70/30 TP.
+ * Alpha engine tick — 15m regime, velocity breakout/breakdown, trail, pyramid, 70/30 TP.
  */
 export function runPaperScalpAlphaTick(params: {
   account: DemoAccount;
@@ -146,6 +132,7 @@ export function runPaperScalpAlphaTick(params: {
       { positionClosed: true, pyramided: pyramided || undefined },
     );
   }
+
   const maxLegs = Math.min(
     paperSettings.maxOpenPositions,
     MAX_OPEN_LEGS_PER_WORKSPACE,
@@ -201,48 +188,17 @@ export function runPaperScalpAlphaTick(params: {
   );
   const watch = paperSettings.symbols.map((s) => normalizeSymbol(s));
 
-  const momentumRanked = rankAltcoinMomentum({
-    symbols: watch,
-    snapshots,
-    candlesBySymbol,
+  const entryPick = resolveAlphaEntryPick({
     regime,
-    held,
-  });
-  const leaders = buildDeployLeaderboard(momentumRanked, regime.deployTopN);
-  const deploySet = new Set(leaders.map((row) => row.symbol));
-
-  const momentum = resolvePaperMomentumSettings(
-    paperSettings,
-    resolveRsiMaxBuy(),
-  );
-
-  const velocityPick = pickVelocityBreakoutCandidate({
-    symbols: watch,
+    watch,
     snapshots,
     candlesBySymbol,
     held,
+    paperSettings,
+    rsiMaxBuy: resolveRsiMaxBuy(),
   });
 
-  const pool = [...snapshots.values()].filter((s) => {
-    const sym = normalizeSymbol(s.symbol);
-    return watch.includes(sym) && !held.has(sym) && deploySet.has(sym);
-  });
-
-  const ranked = rankMomentumCandidates(pool, momentum);
-  const momentumPick = ranked[0];
-
-  let entrySnap: Scalp1mSnapshot | null = null;
-  let buyReason: PaperMomentumBuyReason = "trend_resumption";
-
-  if (velocityPick) {
-    entrySnap = velocityPick.snap;
-    buyReason = "velocity_breakout";
-  } else if (momentumPick) {
-    entrySnap = momentumPick.snap;
-    buyReason = momentumPick.evaluation.reason as PaperMomentumBuyReason;
-  }
-
-  if (!entrySnap) {
+  if (!entryPick) {
     if (lastCloseSummary) {
       return withTickMeta(
         { account, changed: true, summary: lastCloseSummary },
@@ -276,12 +232,11 @@ export function runPaperScalpAlphaTick(params: {
     return {
       account,
       changed: stopsAdjusted || velocityPartial,
-      summary: "no-signal",
+      summary: regime.entryMode === "short" ? "no-short-signal" : "no-signal",
     };
   }
 
-  const sym = normalizeSymbol(entrySnap.symbol);
-  const entryPrice = resolvePaperLiveMarkPrice(sym, marketCoins, entrySnap.close);
+  const sym = normalizeSymbol(entryPick.snap.symbol);
   const nav = computePaperWorkspaceNav(account, marketCoins);
   const baseSize = computePaperPositionSizeUsdt(
     nav.portfolio_nav_usdt,
@@ -308,42 +263,21 @@ export function runPaperScalpAlphaTick(params: {
     );
   }
 
-  const entryAtr =
-    entrySnap.atr14 > 0 ? entrySnap.atr14 : Math.max(entryPrice * 0.01, 1e-8);
-  const stopPlan = computeAtrStops(entryPrice, entryAtr, "long");
-  const softTakeProfit = computeOpenEndedTakeProfit(entryPrice, entryAtr);
-  const amount = Number((positionSizeUsdt / entryPrice).toFixed(6));
+  const trade = buildAlphaEntryTrade({
+    pick: entryPick,
+    regime,
+    marketCoins,
+    positionSizeUsdt,
+  });
 
-  const trade: DemoTrade = {
-    id: `scalp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    signalId: `alpha-${buyReason}-${sym}`,
-    coinId: sym.replace(/USDT$/, "").toLowerCase(),
-    symbol: sym,
-    type: "buy",
-    entryPrice,
-    amount,
-    value: positionSizeUsdt,
-    status: "open",
-    openedAt: new Date(),
-    stopLoss: stopPlan.stopLoss,
-    takeProfit: softTakeProfit,
-    highestPriceReached: entryPrice,
-    originalEntryPrice: entryPrice,
-    initialPositionValueUsdt: positionSizeUsdt,
-    pyramidLayers: 0,
-    pyramidAddedUsdt: 0,
-    velocityTakeProfitSecured: false,
-    notes: `15m alpha ${buyReason} (${regime.state}) · trailing exit`,
-    followedSignal: false,
-    tags: ["paper-scalp", "alpha-15m", "atr-trail", buyReason, regime.state, sym],
-    executionNotes: [
-      `regime=${regime.state}`,
-      buyReason === "velocity_breakout"
-        ? `velocity rvol>${2} rsi>60`
-        : `trendScore=${regime.trendScore.score}`,
-      "trail=peak-1.5xATR",
-    ],
-  };
+  const summaryPrefix =
+    entryPick.side === "SHORT" ? `opened-short:${sym}` : `opened:${sym}`;
+
+  if (entryPick.side === "SHORT") {
+    console.log(
+      `[REGIME: ACTIVE_SHORT] ${sym} ${entryPick.reason} size=$${positionSizeUsdt} entry=${trade.entryPrice} sl=${trade.stopLoss}`,
+    );
+  }
 
   return withTickMeta(
     {
@@ -353,7 +287,7 @@ export function runPaperScalpAlphaTick(params: {
         openPositions: [...account.openPositions, trade],
       },
       changed: true,
-      summary: `opened:${sym}:${buyReason}`,
+      summary: `${summaryPrefix}:${entryPick.reason}`,
     },
     { entryExecuted: true, pyramided: pyramided || undefined },
   );

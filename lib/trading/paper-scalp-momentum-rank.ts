@@ -37,6 +37,20 @@ function scoreAltcoin(
   return Number(score.toFixed(4));
 }
 
+function scoreAltcoinShort(
+  snap: Scalp1mSnapshot,
+  rvol: number,
+): number {
+  const emaSpread =
+    snap.ema21 > 0 ? (snap.ema9 - snap.ema21) / snap.ema21 : 0;
+  let score = rvol * 40;
+  score += Math.max(0, -emaSpread) * 120;
+  score += snap.rsi14 >= 45 ? (snap.rsi14 - 45) * 0.35 : 0;
+  if (snap.bearishCross) score += 12;
+  if (snap.close < snap.ema21) score += 8;
+  return Number(score.toFixed(4));
+}
+
 /**
  * Rank watchlist by 24h RVOL + RSI + EMA momentum for capital rotation.
  */
@@ -59,7 +73,10 @@ export function rankAltcoinMomentum(params: {
 
     const candles = params.candlesBySymbol.get(symbol) ?? [];
     const rvol24h = computeRvol24h(candles);
-    const score = scoreAltcoin(snap, rvol24h, params.regime);
+    const score =
+      params.regime.entryMode === "short"
+        ? scoreAltcoinShort(snap, rvol24h)
+        : scoreAltcoin(snap, rvol24h, params.regime);
 
     rows.push({
       symbol,

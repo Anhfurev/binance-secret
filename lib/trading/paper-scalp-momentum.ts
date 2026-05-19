@@ -5,6 +5,11 @@ export type PaperMomentumBuyReason =
   | "oversold_bounce"
   | "velocity_breakout";
 
+export type PaperMomentumShortReason =
+  | "bearish_resumption"
+  | "overbought_fade"
+  | "velocity_breakdown";
+
 export type PaperMomentumSettings = {
   rsiBuyThreshold: number;
   rsiOversoldPanic: number;
@@ -14,6 +19,11 @@ export type PaperMomentumSettings = {
 export type PaperBuyEvaluation = {
   shouldBuy: boolean;
   reason: PaperMomentumBuyReason | "no_signal" | "rsi_overbought";
+};
+
+export type PaperShortEvaluation = {
+  shouldShort: boolean;
+  reason: PaperMomentumShortReason | "no_signal" | "rsi_oversold";
 };
 
 export function resolvePaperMomentumSettings(
@@ -56,6 +66,41 @@ export function evaluatePaperBuySignal(
   }
 
   return { shouldBuy: false, reason: "no_signal" };
+}
+
+/** Bearish momentum entry for RISK_OFF short regime. */
+export function evaluatePaperShortSignal(
+  snap: Scalp1mSnapshot,
+  settings: PaperMomentumSettings,
+): PaperShortEvaluation {
+  const rsi = snap.rsi14;
+
+  if (rsi < settings.rsiOversoldPanic) {
+    return { shouldShort: false, reason: "rsi_oversold" };
+  }
+
+  if (rsi >= settings.rsiMaxBuy && snap.ema9 < snap.ema21) {
+    return { shouldShort: true, reason: "overbought_fade" };
+  }
+
+  if (snap.ema9 < snap.ema21 && rsi >= settings.rsiBuyThreshold) {
+    return { shouldShort: true, reason: "bearish_resumption" };
+  }
+
+  return { shouldShort: false, reason: "no_signal" };
+}
+
+export function rankShortMomentumCandidates(
+  snapshots: Scalp1mSnapshot[],
+  settings: PaperMomentumSettings,
+): Array<{ snap: Scalp1mSnapshot; evaluation: PaperShortEvaluation }> {
+  return snapshots
+    .map((snap) => ({
+      snap,
+      evaluation: evaluatePaperShortSignal(snap, settings),
+    }))
+    .filter((row) => row.evaluation.shouldShort)
+    .sort((a, b) => b.snap.rsi14 - a.snap.rsi14);
 }
 
 export function rankMomentumCandidates(

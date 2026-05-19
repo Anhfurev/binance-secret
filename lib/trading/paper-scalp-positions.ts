@@ -3,6 +3,7 @@ import { formatAssetPrice } from "@/lib/trading/paper-scalp-metrics-format";
 import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
 import { defaultScalpingSettings } from "@/lib/trading/settings";
 import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
+import { isPaperShortLeg } from "@/lib/trading/paper-scalp-leg-side";
 import {
   applyTrailingProfitState,
   resolveLegAtr14,
@@ -188,7 +189,21 @@ export function evaluateOpenPaperPosition(params: {
   );
   const atr14 = resolveLegAtr14(snap, trade);
 
-  if (trade.type === "buy") {
+  if (isPaperShortLeg(trade)) {
+    const risePct = (mark - trade.entryPrice) / trade.entryPrice;
+    if (risePct >= ASSET_PROTECTION_DROP_PCT) {
+      return {
+        account,
+        exit: closePaperScalpTrade(
+          account,
+          trade,
+          mark,
+          "asset-protection-1.5pct-short",
+        ),
+        stopAdjusted: false,
+      };
+    }
+  } else {
     const dropPct = (trade.entryPrice - mark) / trade.entryPrice;
     if (dropPct >= ASSET_PROTECTION_DROP_PCT) {
       return {
@@ -217,6 +232,34 @@ export function evaluateOpenPaperPosition(params: {
   const trailed = trail.trade;
   const stopAdjusted = trail.stopRatcheted || trail.peakUpdated;
   let nextAccount = stopAdjusted ? patchOpenLeg(account, trade.id, trailed) : account;
+
+  if (isPaperShortLeg(trailed)) {
+    if (mark >= trailed.stopLoss) {
+      return {
+        account: nextAccount,
+        exit: closePaperScalpTrade(
+          nextAccount,
+          trailed,
+          mark,
+          "atr-trailing-stop-short",
+        ),
+        stopAdjusted,
+      };
+    }
+    if (snap?.bullishCross) {
+      return {
+        account: nextAccount,
+        exit: closePaperScalpTrade(
+          nextAccount,
+          trailed,
+          mark,
+          "ema9-above-ema21-short-cover",
+        ),
+        stopAdjusted,
+      };
+    }
+    return { account: nextAccount, exit: null, stopAdjusted };
+  }
 
   if (mark <= trailed.stopLoss) {
     return {

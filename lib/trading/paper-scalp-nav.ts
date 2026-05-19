@@ -1,3 +1,4 @@
+import { isPaperShortLeg } from "@/lib/trading/paper-scalp-leg-side";
 import type { CoinData, DemoAccount, DemoTrade } from "@/lib/types";
 import {
   formatNavUsd,
@@ -47,8 +48,13 @@ export function computePaperWorkspaceNav(
       marketCoins,
       pos.entryPrice,
     );
-    open_positions_usdt += pos.amount * mark;
-    open_unrealized_pnl_usdt += unrealizedLegPnl(pos, mark);
+    const legPnl = unrealizedLegPnl(pos, mark);
+    if (isPaperShortLeg(pos)) {
+      open_positions_usdt += pos.value + legPnl;
+    } else {
+      open_positions_usdt += pos.amount * mark;
+    }
+    open_unrealized_pnl_usdt += legPnl;
   }
 
   open_positions_usdt = Number(open_positions_usdt.toFixed(4));
@@ -125,7 +131,11 @@ export function humanPaperScalpReason(summary: string): string {
     "btc-bearish-pause":
       "BTC bearish — altcoin entries paused (legacy)",
     "alpha-risk-off":
-      "Alpha Shield risk-off — BTC below VWAP or weak trend; entries blocked",
+      "Alpha Shield fallback — API degraded or missing BTC snapshot; entries blocked",
+    "no-short-signal":
+      "RISK_OFF short regime — no bearish velocity or momentum short setup",
+    "alpha-short-regime":
+      "Alpha Shield RISK_OFF — hunting SHORT on bearish alt velocity (≤−1.2%)",
     "atr-trailing-stop":
       "ATR trailing floor hit — locked intraday gains at ratcheted stop",
     "pyramid-layer-added":
@@ -141,6 +151,9 @@ export function humanPaperScalpReason(summary: string): string {
   if (summary.startsWith("velocity-tp-70:")) {
     const syms = summary.replace("velocity-tp-70:", "").replace(/,/g, ", ");
     return `Velocity 70% take-profit banked on ${syms} — runners trail at breakeven`;
+  }
+  if (summary.startsWith("opened-short:")) {
+    return `SHORT opened — ${summary.replace("opened-short:", "").replace(/:/g, " ")}`;
   }
   if (summary.startsWith("opened:")) {
     return `BUY filled — ${summary.replace("opened:", "").replace(/:/g, " ")}`;

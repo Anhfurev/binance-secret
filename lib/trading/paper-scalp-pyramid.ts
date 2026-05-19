@@ -1,6 +1,7 @@
 import { formatAssetPrice, formatNavUsd } from "@/lib/trading/paper-scalp-metrics-format";
 import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
 import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
+import { isPaperShortLeg } from "@/lib/trading/paper-scalp-leg-side";
 import {
   applyTrailingProfitState,
   resolveLegAtr14,
@@ -145,6 +146,9 @@ export function tryPyramidLayerOnOpenLeg(params: {
   marketCoins: CoinData[];
 }): PyramidLayerResult {
   const { account, trade, snapshots, marketCoins } = params;
+  if (isPaperShortLeg(trade)) {
+    return { account, pyramided: false };
+  }
   const sym = normalizeSymbol(trade.symbol);
   const snap = snapshots.get(sym);
   const mark = resolvePaperLiveMarkPrice(

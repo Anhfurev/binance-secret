@@ -61,6 +61,7 @@ export function resetTacticalPulseSlotForTests(): void {
 
 export function isStateChangingSummary(summary: string): boolean {
   if (summary.startsWith("opened:")) return true;
+  if (summary.startsWith("opened-short:")) return true;
   if (summary.startsWith("closed:")) return true;
   if (summary.startsWith("velocity-tp-70:")) return true;
   if (summary === "pyramid-layer-added") return true;
