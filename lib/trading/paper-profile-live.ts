@@ -45,14 +45,13 @@ export async function applyLiveProfileNav(params: {
     .eq("id", params.userId);
 
   if (error) {
-    const hint =
-      error.code === "PGRST116" || error.message.includes("0 rows")
-        ? "profile row missing — set PAPER_TRADES_USER_ID to a valid profiles.id"
-        : undefined;
     console.warn("[paper-profile-live] profiles update failed", {
-      userId: params.userId,
+      userId: `${params.userId.slice(0, 8)}…`,
       message: error.message,
-      hint,
+      hint:
+        error.code === "PGRST116" || error.message.includes("0 rows")
+          ? "Set PAPER_TRADES_USER_ID to a valid public.profiles.id"
+          : undefined,
     });
     return patch;
   }

@@ -8,6 +8,8 @@ import type {
   Scalp1mSnapshot,
   ScalpCandle,
 } from "@/lib/trading/paper-scalp-indicators";
+import type { DemoWorkspaceOwnerType } from "@/lib/supabase-demo";
+import type { PaperWorkspaceDbCtx } from "@/lib/trading/paper-portfolio-db";
 import type { DualMicroHarvest } from "@/lib/trading/paper-scalp-micro-klines";
 import type { PaperScalpWorkspaceSettings } from "@/lib/trading/paper-scalp-settings";
 import type { PaperAutomationTickResult } from "@/lib/trading/paper-scalp-types";
@@ -32,8 +34,10 @@ export async function runPaperTradingAutomationTick(params: {
   copyProfile: CopyProfile;
   paperSettings: PaperScalpWorkspaceSettings;
   workspaceKey?: string | null;
-  ownerType?: "user" | "device";
+  ownerType?: DemoWorkspaceOwnerType;
   ownerId?: string;
+  userId?: string;
+  dbCtx?: PaperWorkspaceDbCtx | null;
 }): Promise<PaperAutomationTickResult> {
   const marketCoins = params.marketCoins ?? [];
   const snapshots = params.scalpSnapshots ?? new Map<string, Scalp1mSnapshot>();
@@ -56,6 +60,8 @@ export async function runPaperTradingAutomationTick(params: {
     workspaceKey: params.workspaceKey,
     ownerType: params.ownerType,
     ownerId: params.ownerId,
+    userId: params.userId,
+    dbCtx: params.dbCtx,
     candles1m: params.candles1m,
     candles3m: params.candles3m,
   });

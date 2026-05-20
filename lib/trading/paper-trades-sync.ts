@@ -32,14 +32,15 @@ function extractExitReason(trade: DemoTrade): string {
   return tag ?? "paper-scalp";
 }
 
-/** `trades.user_id` must be auth.users — device workspaces use PAPER_TRADES_USER_ID. */
+/** Canonical profiles.id for all paper DB rows — device + user workspaces share one wallet. */
 export function resolvePaperTradesUserId(
   ownerType: DemoWorkspaceOwnerType,
   ownerId: string,
 ): string | null {
-  if (ownerType === "user") return ownerId;
   const mapped = String(process.env.PAPER_TRADES_USER_ID ?? "").trim();
-  return mapped.length > 0 ? mapped : null;
+  if (mapped.length > 0) return mapped;
+  if (ownerType === "user" && ownerId.trim().length > 0) return ownerId.trim();
+  return null;
 }
 
 function buildUnifiedClosedRow(params: {

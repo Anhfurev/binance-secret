@@ -1,7 +1,7 @@
 import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
-import type { DemoWorkspaceOwnerType } from "@/lib/supabase-demo";
 import { resolvePaperTradesUserId } from "@/lib/trading/paper-trades-sync";
 import type { DemoTrade } from "@/lib/types";
+import type { DemoWorkspaceOwnerType } from "@/lib/supabase-demo";
 
 export type PaperPositionRow = {
   id: string;
@@ -51,6 +51,16 @@ function mapRow(raw: Record<string, unknown>): PaperPositionRow {
   };
 }
 
+async function profileExists(userId: string): Promise<boolean> {
+  if (!supabaseAdmin) return false;
+  const { data, error } = await supabaseAdmin
+    .from("profiles")
+    .select("id")
+    .eq("id", userId)
+    .maybeSingle();
+  return !error && Boolean(data?.id);
+}
+
 export async function loadOpenPaperPositions(
   userId: string,
 ): Promise<PaperPositionRow[]> {
@@ -63,7 +73,7 @@ export async function loadOpenPaperPositions(
     .eq("user_id", userId);
   if (error) {
     console.warn("[paper_positions] load open failed", {
-      userId,
+      userId: `${userId.slice(0, 8)}…`,
       message: error.message,
     });
     return [];
@@ -79,6 +89,14 @@ export async function upsertOpenPaperPosition(params: {
   if (!supabaseAdmin) return;
   const userId = resolvePaperTradesUserId(params.ownerType, params.ownerId);
   if (!userId) return;
+
+  if (!(await profileExists(userId))) {
+    console.warn("[paper_positions] skip insert — profiles.id not found", {
+      userId: `${userId.slice(0, 8)}…`,
+      hint: "Set PAPER_TRADES_USER_ID to a valid public.profiles.id",
+    });
+    return;
+  }
 
   const symbol = normSymbol(params.trade.symbol);
   const peak = params.trade.highestPriceReached ?? params.trade.entryPrice;
@@ -106,6 +124,7 @@ export async function upsertOpenPaperPosition(params: {
 
   if (error) {
     console.warn("[paper_positions] insert failed", {
+      userId: `${userId.slice(0, 8)}…`,
       leg: params.trade.id,
       symbol,
       message: error.message,
