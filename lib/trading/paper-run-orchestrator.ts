@@ -40,7 +40,8 @@ import {
   resolvePaperScalpWalletUsd,
 } from "@/lib/trading/paper-scalp-wallet";
 import { writeServerLogFromError } from "@/lib/server-logs";
-import type { DemoAccount } from "@/lib/types";
+import type { CoinData, DemoAccount } from "@/lib/types";
+import type { PaperWorkspaceDbCtx } from "@/lib/trading/paper-portfolio-db";
 
 export type PaperRunOrchestratorResult = {
   ok: true;
@@ -227,7 +228,6 @@ async function executePaperScalpOrchestrator(): Promise<
           workspaceKey: key,
           trade: closedLeg,
         });
-        void recordPaperPortfolioSnapshot({ ctx: dbCtx, nav });
       }
     }
     if (result.velocityPartial || result.summary.startsWith("velocity-tp-70:")) {
@@ -296,6 +296,12 @@ async function executePaperScalpOrchestrator(): Promise<
       apiDegraded: prepared.apiDegraded,
     }).blockAltcoinEntries;
 
+  await recordMasterPortfolioSnapshot({
+    masterWorkspaceKey,
+    masterAccount,
+    prepared,
+  });
+
   const outcome = buildPartialResult(startTime, {
     scanned,
     updated,
@@ -338,6 +344,33 @@ async function executePaperScalpOrchestrator(): Promise<
   });
 
   return finalizePaperTickRun(outcome, manifest, notify);
+}
+
+/** One NAV snapshot per tick on master workspace (avoids 4× inserts + NaN rows). */
+async function recordMasterPortfolioSnapshot(params: {
+  masterWorkspaceKey: string | null;
+  masterAccount: DemoAccount | null;
+  prepared: {
+    dbCtxByKey: Map<string, PaperWorkspaceDbCtx>;
+    marketCoins: CoinData[];
+  };
+}): Promise<void> {
+  const key = params.masterWorkspaceKey;
+  if (!key || !params.masterAccount) return;
+  const ctx = params.prepared.dbCtxByKey.get(key);
+  if (!ctx) return;
+  const nav = enrichNavWithDbMetrics(
+    computePaperWorkspaceNav(
+      params.masterAccount,
+      params.prepared.marketCoins,
+    ),
+    ctx.metrics ?? null,
+  );
+  await recordPaperPortfolioSnapshot({
+    ctx,
+    nav,
+    openLegCount: params.masterAccount.openPositions.length,
+  });
 }
 
 /** Sync return — Telegram on high-signal or ULAT 10m tactical pulse. */

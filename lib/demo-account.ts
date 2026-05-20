@@ -1,4 +1,5 @@
 import { fetchAccountBalanceHistory, insertAccountBalance } from "@/lib/supabase";
+import { coerceOpenPositionList } from "@/lib/trading/paper-trade-coerce";
 import type { DemoAccount, DemoTrade } from "@/lib/types";
 
 function hydrateTradeDates(
@@ -110,7 +111,9 @@ export function hydrateAccount(raw: string): DemoAccount | null {
       ...parsed,
       createdAt: new Date(parsed.createdAt),
       expiresAt: new Date(parsed.expiresAt),
-      openPositions: (parsed.openPositions ?? []).map(hydrateTradeDates),
+      openPositions: coerceOpenPositionList(
+        (parsed.openPositions ?? []).map(hydrateTradeDates),
+      ),
       tradeHistory: (parsed.tradeHistory ?? []).map(hydrateTradeDates),
     };
   } catch {

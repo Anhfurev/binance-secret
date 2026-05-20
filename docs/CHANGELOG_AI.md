@@ -8,6 +8,33 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-20 — entry_price null on paper_positions + hydrate fix
+
+**Summary**
+
+- **`paper-trade-coerce.ts`:** Map legacy `entry_price` / `qty` from workspace JSON → `entryPrice` / `amount`.
+- **`demo-account.ts` `hydrateAccount`:** Coerce open legs on load (fixes legs `42` / `44` with missing entry).
+- **`paper-positions-db.ts`:** Skip invalid inserts; prune orphan DB rows; never send null `entry_price`.
+- **`paper-portfolio-snapshot.ts`:** Hard `safeNavUsdt` + legacy retry when `portfolio_nav_usdt` NOT NULL fails.
+- **`paper-scalp-engine.ts`:** `normalizePaperWorkspaceAccount` before `syncOpenPositionsToDb`.
+
+---
+
+## 2026-05-20 — Snapshot null NAV + master-only DB merge
+
+**Summary**
+
+- **`paper-nav-sanitize.ts`:** Strip corrupt legs (0 entry/qty); coerce finite NAV before DB/Telegram (fixes `portfolio_nav_usdt` null — JSON `NaN` → null).
+- **`paper-portfolio-snapshot.ts`:** Unified + legacy snapshot insert; `loadNavSnapshotAtOrBefore` reads `total_nav_usdt` fallback.
+- **`paper-run-prepared.ts`:** `paper_positions` merge only on **master** workspace (stops 4× duplicate legs / wallet-reset noise).
+- **`paper-run-orchestrator.ts`:** One snapshot per tick on master; removed per-close/per-persist snapshot spam.
+- **`paper-scalp-engine.ts`:** Default `MICRO_MAX_OPEN` cap 2 when env unset (aligns correlation filter).
+- Migration `20260520160000_paper_snapshot_nav_compat.sql`; VPS backup `scripts/paper-run-cron.sh` (2m curl).
+
+**Deploy:** `supabase db push` (or apply migration on `emviaygygylosvmtsvlq`), then `git pull && npm run build && pm2 restart binance-app binance-ws-daemon --update-env`.
+
+---
+
 ## 2026-05-20 — Paper NAV double-count fix ($28 cash + $38 legs → $66)
 
 **Summary**

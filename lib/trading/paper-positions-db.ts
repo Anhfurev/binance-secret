@@ -5,6 +5,8 @@ import {
   getPaperDbUserId,
   resolvePaperTradesUserId,
 } from "@/lib/trading/paper-db-user";
+import { isValidPaperOpenLeg } from "@/lib/trading/paper-nav-sanitize";
+import { coerceDemoTradeFields } from "@/lib/trading/paper-trade-coerce";
 import type { DemoTrade } from "@/lib/types";
 
 export type PaperPositionRow = {
@@ -41,16 +43,32 @@ export function isPaperPositionTrailArmed(row: PaperPositionRow): boolean {
 }
 
 function mapRow(raw: Record<string, unknown>): PaperPositionRow {
+  const entry_price =
+    num(raw.entry_price) ||
+    num(raw.entry_price_usdt) ||
+    num(raw.entryPrice);
+  const qty =
+    num(raw.qty) || num(raw.amount) || num(raw.quantity);
+  const peak_price =
+    num(raw.peak_price) ||
+    num(raw.highest_price) ||
+    num(raw.highestPriceReached) ||
+    entry_price;
+  const trail_price =
+    num(raw.trail_price) ||
+    num(raw.stop_loss) ||
+    num(raw.stopLoss) ||
+    entry_price;
   return {
     id: String(raw.id),
     user_id: String(raw.user_id),
     symbol: normSymbol(String(raw.symbol)),
     side: String(raw.side ?? "LONG"),
-    entry_price: num(raw.entry_price),
-    qty: num(raw.qty),
-    peak_price: num(raw.peak_price),
-    trail_price: num(raw.trail_price),
-    layer: Math.max(0, Math.floor(num(raw.layer))),
+    entry_price,
+    qty,
+    peak_price,
+    trail_price,
+    layer: Math.max(0, Math.floor(num(raw.layer) || num(raw.pyramid_layers))),
     opened_at: String(raw.opened_at ?? new Date().toISOString()),
   };
 }
@@ -73,7 +91,43 @@ export async function loadOpenPaperPositions(
     });
     return [];
   }
-  return (data ?? []).map((r) => mapRow(r as Record<string, unknown>));
+  return (data ?? [])
+    .map((r) => mapRow(r as Record<string, unknown>))
+    .filter((row) => row.entry_price > 0 && row.qty > 0);
+}
+
+function coercePositionInsert(trade: DemoTrade): {
+  symbol: string;
+  side: string;
+  entry_price: number;
+  qty: number;
+  peak_price: number;
+  trail_price: number;
+  layer: number;
+  opened_at: string;
+} | null {
+  const leg = coerceDemoTradeFields(trade);
+  if (!leg || !isValidPaperOpenLeg(leg)) return null;
+
+  const symbol = normSymbol(leg.symbol);
+  const entry_price = num(leg.entryPrice);
+  const qty = num(leg.amount);
+  const peak_price = num(leg.highestPriceReached ?? leg.entryPrice, entry_price);
+  const trail_price = num(leg.stopLoss ?? leg.entryPrice, entry_price);
+  const opened =
+    leg.openedAt instanceof Date ? leg.openedAt : new Date(leg.openedAt);
+  if (Number.isNaN(opened.getTime())) return null;
+
+  return {
+    symbol,
+    side: leg.direction ?? "LONG",
+    entry_price,
+    qty,
+    peak_price,
+    trail_price,
+    layer: Math.max(0, Math.floor(num(leg.pyramidLayers))),
+    opened_at: opened.toISOString(),
+  };
 }
 
 export async function upsertOpenPaperPosition(params: {
@@ -88,27 +142,28 @@ export async function upsertOpenPaperPosition(params: {
   const userId = getPaperDbUserId();
   if (!userId) return;
 
-  const symbol = normSymbol(params.trade.symbol);
-  const peak = params.trade.highestPriceReached ?? params.trade.entryPrice;
-  const trail = params.trade.stopLoss ?? params.trade.entryPrice;
+  const row = coercePositionInsert(params.trade);
+  if (!row) {
+    console.warn("[paper_positions] skip insert — invalid leg", {
+      userId: `${userId.slice(0, 8)}…`,
+      leg: params.trade.id,
+      symbol: params.trade.symbol,
+      entry: params.trade.entryPrice,
+      qty: params.trade.amount,
+    });
+    return;
+  }
 
   await supabaseAdmin
     .from("paper_positions")
     .delete()
     .eq("user_id", userId)
-    .eq("symbol", symbol);
+    .eq("symbol", row.symbol);
 
   const { error } = await supabaseAdmin.from("paper_positions").insert([
     {
       user_id: userId,
-      symbol,
-      side: params.trade.direction ?? "LONG",
-      entry_price: params.trade.entryPrice,
-      qty: params.trade.amount,
-      peak_price: peak,
-      trail_price: trail,
-      layer: params.trade.pyramidLayers ?? 0,
-      opened_at: params.trade.openedAt.toISOString(),
+      ...row,
     },
   ]);
 
@@ -116,7 +171,7 @@ export async function upsertOpenPaperPosition(params: {
     console.warn("[paper_positions] insert failed", {
       userId: `${userId.slice(0, 8)}…`,
       leg: params.trade.id,
-      symbol,
+      symbol: row.symbol,
       message: error.message,
     });
   }
@@ -198,13 +253,27 @@ export async function syncOpenPositionsToDb(params: {
   ownerId: string;
   openTrades: DemoTrade[];
 }): Promise<void> {
-  if (!isSupabaseAdminConfigured) return;
+  if (!isSupabaseAdminConfigured || !supabaseAdmin) return;
+  const userId = getPaperDbUserId();
+  if (!userId) return;
+
+  const validSymbols = new Set<string>();
   for (const trade of params.openTrades) {
+    const row = coercePositionInsert(trade);
+    if (!row) continue;
+    validSymbols.add(row.symbol);
     await upsertOpenPaperPosition({
       ownerType: params.ownerType,
       ownerId: params.ownerId,
       trade,
     });
+  }
+
+  const existing = await loadOpenPaperPositions(userId);
+  for (const row of existing) {
+    if (!validSymbols.has(normSymbol(row.symbol))) {
+      await closePaperPositionRow(row.id);
+    }
   }
 }
 

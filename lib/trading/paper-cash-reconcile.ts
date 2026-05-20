@@ -1,3 +1,4 @@
+import { stripInvalidOpenLegs } from "@/lib/trading/paper-nav-sanitize";
 import { resolvePaperScalpWalletUsd } from "@/lib/trading/paper-scalp-wallet";
 import type { DemoAccount, DemoTrade } from "@/lib/types";
 
@@ -52,5 +53,7 @@ export function reconcilePaperAccountCash(account: DemoAccount): DemoAccount {
 }
 
 export function normalizePaperWorkspaceAccount(account: DemoAccount): DemoAccount {
-  return reconcilePaperAccountCash(dedupeOpenPositionsBySymbol(account));
+  return reconcilePaperAccountCash(
+    dedupeOpenPositionsBySymbol(stripInvalidOpenLegs(account)),
+  );
 }

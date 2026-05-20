@@ -5,6 +5,7 @@ import {
   formatPct4,
   formatSignedNavUsd,
 } from "@/lib/trading/paper-scalp-metrics-format";
+import { sanitizePaperWorkspaceNav } from "@/lib/trading/paper-nav-sanitize";
 import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
 
 export type PaperWorkspaceNav = {
@@ -78,7 +79,7 @@ export function computePaperWorkspaceNav(
       ? Number(((session_pnl_usdt / starting_usdt) * 100).toFixed(4))
       : 0;
 
-  return {
+  return sanitizePaperWorkspaceNav({
     available_usdt,
     open_positions_usdt,
     portfolio_nav_usdt,
@@ -86,7 +87,7 @@ export function computePaperWorkspaceNav(
     session_pnl_usdt,
     session_pnl_pct,
     open_unrealized_pnl_usdt,
-  };
+  });
 }
 
 export function formatNavTelegramBlock(

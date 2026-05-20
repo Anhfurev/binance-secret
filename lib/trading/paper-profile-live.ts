@@ -2,10 +2,7 @@ import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
 import { normalizePaperWorkspaceAccount } from "@/lib/trading/paper-cash-reconcile";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import { resolvePaperScalpWalletUsd } from "@/lib/trading/paper-scalp-wallet";
-import {
-  recordPaperPortfolioSnapshot,
-  type PaperWorkspaceDbCtx,
-} from "@/lib/trading/paper-portfolio-db";
+import type { PaperWorkspaceDbCtx } from "@/lib/trading/paper-portfolio-db";
 import type { PaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import type { CoinData, DemoAccount } from "@/lib/types";
 
@@ -59,13 +56,6 @@ export async function applyLiveProfileNav(params: {
           : undefined,
     });
     return patch;
-  }
-
-  if (params.dbCtx) {
-    await recordPaperPortfolioSnapshot({
-      ctx: params.dbCtx,
-      nav,
-    });
   }
 
   return patch;

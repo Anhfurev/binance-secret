@@ -24,6 +24,7 @@ import {
 } from "@/lib/trading/paper-portfolio-db";
 import { normalizePaperWorkspaceAccount } from "@/lib/trading/paper-cash-reconcile";
 import { mergeAccountWithLiveProfile } from "@/lib/trading/paper-profile-live";
+import { resolvePaperTelegramMasterWorkspaceKey } from "@/lib/trading/paper-scalp-notify-gate";
 import { resolvePaperTradesUserId } from "@/lib/trading/paper-db-user";
 import { logPaperDbBinding } from "@/lib/trading/paper-trades-db-safe";
 import type { CoinData, DemoAccount } from "@/lib/types";
@@ -128,6 +129,7 @@ export async function preparePaperRun(
 
   const accountByKey = new Map<string, CachedWorkspaceAccount>();
   const dbCtxByKey = new Map<string, PaperWorkspaceDbCtx>();
+  const masterWorkspaceKey = resolvePaperTelegramMasterWorkspaceKey(workspaces);
 
   const hydrateJobs = workspaces.map(async (ws) => {
     const key = workspaceKey(ws);
@@ -149,10 +151,13 @@ export async function preparePaperRun(
     });
     if (dbCtx) dbCtxByKey.set(key, dbCtx);
 
-    let merged = await mergePaperAccountFromDatabase({
-      account: normalizeAccount(hydrated),
-      ctx: dbCtx,
-    });
+    let merged = normalizeAccount(hydrated);
+    if (dbCtx && key === masterWorkspaceKey) {
+      merged = await mergePaperAccountFromDatabase({
+        account: merged,
+        ctx: dbCtx,
+      });
+    }
 
     const userId = resolvePaperTradesUserId(ws.ownerType, ws.ownerId);
     if (userId) {

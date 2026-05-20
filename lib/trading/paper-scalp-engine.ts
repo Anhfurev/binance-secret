@@ -12,6 +12,7 @@ import {
   harvestMicroCandlesParallel,
   type DualMicroHarvest,
 } from "@/lib/trading/paper-scalp-micro-klines";
+import { normalizePaperWorkspaceAccount } from "@/lib/trading/paper-cash-reconcile";
 import { applyLiveProfileNav } from "@/lib/trading/paper-profile-live";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import type { PaperWorkspaceDbCtx } from "@/lib/trading/paper-portfolio-db";
@@ -61,8 +62,11 @@ function norm(symbol: string): string {
 }
 
 function readMicroMaxOpen(fallback: number): number {
-  const n = Number(String(process.env.MICRO_MAX_OPEN ?? "").trim());
-  if (!Number.isFinite(n) || n < 1) return fallback;
+  const raw = String(process.env.MICRO_MAX_OPEN ?? "").trim();
+  const cap = Math.min(fallback, 2);
+  if (!raw) return cap;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return cap;
   return Math.min(8, Math.floor(n));
 }
 
@@ -93,7 +97,9 @@ export async function runMicroScalpEngineTick(
   watchlist: string[],
   context: MicroEngineContext,
 ): Promise<PaperAutomationTickResult> {
-  let account = maybeResetPaperDailyPnl(context.account);
+  let account = normalizePaperWorkspaceAccount(
+    maybeResetPaperDailyPnl(context.account),
+  );
   const { snapshots, candles1m, candles3m } = resolveHarvest(context);
 
   let nav = computePaperWorkspaceNav(account, context.marketCoins);

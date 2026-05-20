@@ -21,9 +21,13 @@ import {
   safeFetchTradesPnlAggregate,
 } from "@/lib/trading/paper-trades-db-safe";
 import { normalizePaperWorkspaceAccount } from "@/lib/trading/paper-cash-reconcile";
+import { sanitizePaperWorkspaceNav } from "@/lib/trading/paper-nav-sanitize";
+import { loadNavSnapshotAtOrBefore } from "@/lib/trading/paper-portfolio-snapshot";
 import type { PaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import { resolvePaperScalpWalletUsd } from "@/lib/trading/paper-scalp-wallet";
 import type { DemoAccount, DemoTrade } from "@/lib/types";
+
+export { recordPaperPortfolioSnapshot } from "@/lib/trading/paper-portfolio-snapshot";
 
 function normSymbol(symbol: string): string {
   const s = symbol.toUpperCase().replace(/\//g, "");
@@ -194,8 +198,11 @@ export async function mergePaperAccountFromDatabase(params: {
     closed,
   ).slice(0, TRADE_LOAD_LIMIT);
 
+  const positionRows = await loadOpenPaperPositions(params.ctx.userId).catch(
+    () => [] as PaperPositionRow[],
+  );
   const dbBySymbol = new Map(
-    open.map((row) => [normSymbol(row.symbol), row] as const),
+    positionRows.map((row) => [normSymbol(row.symbol), row] as const),
   );
 
   let openPositions: DemoTrade[];
@@ -272,55 +279,11 @@ export async function loadPaperPortfolioMetrics(params: {
   };
 }
 
-async function loadNavSnapshotAtOrBefore(
-  userId: string,
-  isoBefore: string,
-): Promise<number | null> {
-  if (!supabaseAdmin) return null;
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("paper_portfolio_snapshots")
-      .select("portfolio_nav_usdt")
-      .eq("user_id", userId)
-      .lte("recorded_at", isoBefore)
-      .order("recorded_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (error || !data) return null;
-    const nav = num(data.portfolio_nav_usdt);
-    return nav > 0 ? nav : null;
-  } catch {
-    return null;
-  }
-}
-
-export async function recordPaperPortfolioSnapshot(params: {
-  ctx: PaperWorkspaceDbCtx;
-  nav: PaperWorkspaceNav;
-}): Promise<void> {
-  if (!supabaseAdmin) return;
-
-  const { error } = await supabaseAdmin.from("paper_portfolio_snapshots").insert([
-    {
-      user_id: params.ctx.userId,
-      portfolio_nav_usdt: params.nav.portfolio_nav_usdt,
-      recorded_at: new Date().toISOString(),
-    },
-  ]);
-
-  if (error) {
-    console.warn("[paper-portfolio-db] snapshot insert failed", {
-      userId: params.ctx.userId,
-      message: error.message,
-    });
-  }
-}
-
 export function enrichNavWithDbMetrics(
   nav: PaperWorkspaceNav,
   metrics: PaperPortfolioDbMetrics | null,
 ): PaperWorkspaceNav {
-  if (!metrics) return nav;
+  if (!metrics) return sanitizePaperWorkspaceNav(nav);
 
   const starting_usdt = Number(metrics.sessionBaselineUsdt.toFixed(4));
   const session_pnl_usdt = Number(
@@ -340,7 +303,7 @@ export function enrichNavWithDbMetrics(
       ? Number((nav.portfolio_nav_usdt - metrics.nav7dAgoUsdt).toFixed(4))
       : null;
 
-  return {
+  return sanitizePaperWorkspaceNav({
     ...nav,
     starting_usdt,
     session_pnl_usdt,
@@ -349,5 +312,5 @@ export function enrichNavWithDbMetrics(
     pnl_7d_usdt,
     lifetime_realized_pnl_usdt: metrics.lifetimeRealizedPnlUsdt,
     closed_trade_count: metrics.closedTradeCount,
-  };
+  });
 }
