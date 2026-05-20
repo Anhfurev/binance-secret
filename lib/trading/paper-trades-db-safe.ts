@@ -3,24 +3,24 @@ import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
 export type PaperTradesSchemaMode = "unified" | "legacy";
 
 let bindingLogged = false;
-let schemaDetectLogged = false;
 
-/** Set after first probe or env read — never re-probes on later ticks. */
+/** Locked on first module load — no unified probe on legacy VPS unless env says unified. */
 let cachedSchemaMode: PaperTradesSchemaMode | null = null;
-let schemaProbePromise: Promise<PaperTradesSchemaMode> | null = null;
+let schemaInitPromise: Promise<PaperTradesSchemaMode> | null = null;
 
-function resolveTradesSchemaModeFromEnv(): PaperTradesSchemaMode | null {
+const DEBUG = String(process.env.PAPER_DB_DEBUG ?? "").trim() === "1";
+
+function resolveTradesSchemaModeFromEnv(): PaperTradesSchemaMode | "auto" | null {
   const env = String(process.env.PAPER_TRADES_SCHEMA ?? "").trim().toLowerCase();
   if (env === "unified") return "unified";
   if (env === "legacy") return "legacy";
+  if (env === "auto") return "auto";
   return null;
 }
 
-/** Unified clean-slate columns (only when cached mode is unified). */
 export const TRADES_UNIFIED_SELECT =
   "id,user_id,symbol,side,entry_price,exit_price,qty,raw_pnl,fees,net_pnl,strategy_executed,closed_at";
 
-/** Production legacy columns (camelCase in Postgres). */
 export const TRADES_LEGACY_SELECT =
   "id,user_id,symbol,type,entryPrice,exitPrice,amount,value,status,pnl,pnlPercent,opened_at,closed_at,exit_reason,notes,extra";
 
@@ -33,59 +33,65 @@ function maskSupabaseHost(url: string): string {
   }
 }
 
-function logSchemaResolved(mode: PaperTradesSchemaMode, source: string): void {
-  if (schemaDetectLogged) return;
-  schemaDetectLogged = true;
-  console.log(`[paper-db] trades schema: ${mode} (${source})`);
+function isSchemaMismatchError(message: string): boolean {
+  return (
+    /column\s+.+\s+does not exist/i.test(message) ||
+    /42703/.test(message) ||
+    /Could not find the '[^']+' column/i.test(message)
+  );
 }
 
-function applyCachedSchemaMode(
-  mode: PaperTradesSchemaMode,
-  source: "env" | "probe" | "fallback",
-): void {
-  if (cachedSchemaMode === mode && source !== "fallback") return;
-  cachedSchemaMode = mode;
-  if (source === "fallback") {
-    console.log("[paper-db] Falling back to legacy schema mapping");
-    return;
-  }
-  logSchemaResolved(mode, source);
+function debugLog(message: string, extra?: Record<string, unknown>): void {
+  if (!DEBUG) return;
+  console.log(message, extra ?? "");
 }
 
 async function probeTradesSchemaOnce(): Promise<PaperTradesSchemaMode> {
-  if (!supabaseAdmin) {
-    applyCachedSchemaMode("legacy", "probe");
-    return "legacy";
-  }
+  if (!supabaseAdmin) return "legacy";
 
   const { error } = await supabaseAdmin.from("trades").select("side").limit(1);
-  if (!error) {
-    applyCachedSchemaMode("unified", "probe");
-    return "unified";
-  }
+  if (!error) return "unified";
   if (isSchemaMismatchError(error.message)) {
-    applyCachedSchemaMode("legacy", "fallback");
+    debugLog("[paper-db] Falling back to legacy schema mapping");
     return "legacy";
   }
-
-  applyCachedSchemaMode("legacy", "probe");
   return "legacy";
 }
 
-/** One-time schema resolution per process — safe to call every tick. */
-async function ensureTradesSchemaMode(): Promise<PaperTradesSchemaMode> {
+async function initSchemaCacheOnce(): Promise<PaperTradesSchemaMode> {
   if (cachedSchemaMode) return cachedSchemaMode;
 
   const fromEnv = resolveTradesSchemaModeFromEnv();
-  if (fromEnv) {
-    applyCachedSchemaMode(fromEnv, "env");
-    return fromEnv;
+  if (fromEnv === "unified") {
+    cachedSchemaMode = "unified";
+    debugLog("[paper-db] trades schema: unified (env)");
+    return cachedSchemaMode;
+  }
+  if (fromEnv === "legacy" || fromEnv === null) {
+    cachedSchemaMode = "legacy";
+    debugLog("[paper-db] trades schema: legacy (default)");
+    return cachedSchemaMode;
   }
 
-  if (!schemaProbePromise) {
-    schemaProbePromise = probeTradesSchemaOnce();
+  const probed = await probeTradesSchemaOnce();
+  cachedSchemaMode = probed;
+  debugLog(`[paper-db] trades schema: ${probed} (auto-probe)`);
+  return cachedSchemaMode;
+}
+
+void initSchemaCacheOnce();
+
+function ensureTradesSchemaMode(): PaperTradesSchemaMode {
+  if (cachedSchemaMode) return cachedSchemaMode;
+  return "legacy";
+}
+
+async function ensureTradesSchemaModeAsync(): Promise<PaperTradesSchemaMode> {
+  if (cachedSchemaMode) return cachedSchemaMode;
+  if (!schemaInitPromise) {
+    schemaInitPromise = initSchemaCacheOnce();
   }
-  return schemaProbePromise;
+  return schemaInitPromise;
 }
 
 export function logPaperDbBinding(): void {
@@ -99,14 +105,8 @@ export function logPaperDbBinding(): void {
   console.log("[paper-db] Supabase binding", {
     url: url ? maskSupabaseHost(url) : "(missing NEXT_PUBLIC_SUPABASE_URL)",
     adminReady: isSupabaseAdminConfigured && Boolean(supabaseAdmin),
-    envKeys: {
-      NEXT_PUBLIC_SUPABASE_URL: Boolean(url),
-      SUPABASE_SERVICE_ROLE_KEY: hasService,
-      PAPER_TRADES_USER_ID: paperUser.length > 0,
-      PAPER_TRADES_SCHEMA: process.env.PAPER_TRADES_SCHEMA ?? "(auto-probe once)",
-    },
+    tradesSchemaMode: cachedSchemaMode ?? "legacy (pending-init)",
     paperTradesUserId: paperUser ? `${paperUser.slice(0, 8)}…` : "(unset)",
-    tradesSchemaMode: cachedSchemaMode ?? "pending-first-tick",
   });
 }
 
@@ -114,22 +114,15 @@ export function getPaperTradesSchemaMode(): PaperTradesSchemaMode | null {
   return cachedSchemaMode;
 }
 
-function isSchemaMismatchError(message: string): boolean {
-  return (
-    /column\s+.+\s+does not exist/i.test(message) ||
-    /42703/.test(message) ||
-    /Could not find the '[^']+' column/i.test(message)
-  );
-}
-
 function logTradesQueryError(
   op: string,
   userId: string,
   message: string,
 ): void {
+  if (isSchemaMismatchError(message)) return;
   console.error(`[paper-db] trades ${op} failed`, {
     userId: `${userId.slice(0, 8)}…`,
-    schemaMode: cachedSchemaMode ?? "unknown",
+    schemaMode: cachedSchemaMode ?? "legacy",
     message,
   });
 }
@@ -170,6 +163,10 @@ async function fetchClosedTradesUnified(
     .limit(limit);
 
   if (error) {
+    if (isSchemaMismatchError(error.message)) {
+      cachedSchemaMode = "legacy";
+      return fetchClosedTradesLegacy(userId, limit);
+    }
     logTradesQueryError("fetch-closed-unified", userId, error.message);
     return [];
   }
@@ -180,20 +177,15 @@ export async function safeFetchPaperClosedTrades(
   userId: string,
   limit = 200,
 ): Promise<Record<string, unknown>[]> {
-  logPaperDbBinding();
   if (!supabaseAdmin || !userId) return [];
 
   try {
-    const mode = await ensureTradesSchemaMode();
+    await ensureTradesSchemaModeAsync();
+    const mode = ensureTradesSchemaMode();
     return mode === "legacy"
       ? fetchClosedTradesLegacy(userId, limit)
       : fetchClosedTradesUnified(userId, limit);
-  } catch (error: unknown) {
-    const err = error instanceof Error ? error : new Error(String(error));
-    console.error("[paper-db] trades fetch-closed exception", {
-      userId: `${userId.slice(0, 8)}…`,
-      message: err.message,
-    });
+  } catch {
     return [];
   }
 }
@@ -242,6 +234,10 @@ async function aggregatePnlUnified(
     .not("closed_at", "is", null);
 
   if (error) {
+    if (isSchemaMismatchError(error.message)) {
+      cachedSchemaMode = "legacy";
+      return aggregatePnlLegacy(userId);
+    }
     logTradesQueryError("aggregate-unified", userId, error.message);
     return { lifetimeRealizedPnlUsdt: 0, closedTradeCount: 0 };
   }
@@ -261,22 +257,17 @@ async function aggregatePnlUnified(
 export async function safeFetchTradesPnlAggregate(
   userId: string,
 ): Promise<{ lifetimeRealizedPnlUsdt: number; closedTradeCount: number }> {
-  logPaperDbBinding();
   if (!supabaseAdmin || !userId) {
     return { lifetimeRealizedPnlUsdt: 0, closedTradeCount: 0 };
   }
 
   try {
-    const mode = await ensureTradesSchemaMode();
+    await ensureTradesSchemaModeAsync();
+    const mode = ensureTradesSchemaMode();
     return mode === "legacy"
       ? aggregatePnlLegacy(userId)
       : aggregatePnlUnified(userId);
-  } catch (error: unknown) {
-    const err = error instanceof Error ? error : new Error(String(error));
-    console.error("[paper-db] trades aggregate exception", {
-      userId: `${userId.slice(0, 8)}…`,
-      message: err.message,
-    });
+  } catch {
     return { lifetimeRealizedPnlUsdt: 0, closedTradeCount: 0 };
   }
 }
@@ -314,6 +305,10 @@ async function findUnifiedRowId(
     .maybeSingle();
 
   if (error) {
+    if (isSchemaMismatchError(error.message)) {
+      cachedSchemaMode = "legacy";
+      return findLegacyRowId(userId, strategyKey);
+    }
     logTradesQueryError("lookup-unified", userId, error.message);
     return null;
   }
@@ -327,13 +322,12 @@ export async function safeFindClosedTradeRowId(
   if (!supabaseAdmin || !userId || !strategyKey) return null;
 
   try {
-    const mode = await ensureTradesSchemaMode();
+    await ensureTradesSchemaModeAsync();
+    const mode = ensureTradesSchemaMode();
     return mode === "legacy"
       ? findLegacyRowId(userId, strategyKey)
       : findUnifiedRowId(userId, strategyKey);
-  } catch (error: unknown) {
-    const err = error instanceof Error ? error : new Error(String(error));
-    console.error("[paper-db] trades lookup exception", { message: err.message });
+  } catch {
     return null;
   }
 }
@@ -351,7 +345,8 @@ export async function safeUpsertClosedTradeRow(
       : `${String((legacyRow.extra as Record<string, unknown>)?.paper_leg_id ?? "")}|paper-scalp`;
 
   try {
-    const mode = await ensureTradesSchemaMode();
+    await ensureTradesSchemaModeAsync();
+    const mode = ensureTradesSchemaMode();
     const primary = mode === "legacy" ? legacyRow : unifiedRow;
     const fallback = mode === "legacy" ? unifiedRow : legacyRow;
 
@@ -363,16 +358,15 @@ export async function safeUpsertClosedTradeRow(
         .update(primary)
         .eq("id", existingId);
       if (error && isSchemaMismatchError(error.message)) {
-        applyCachedSchemaMode(mode === "legacy" ? "unified" : "legacy", "fallback");
+        cachedSchemaMode = "legacy";
         const { error: err2 } = await supabaseAdmin
           .from("trades")
           .update(fallback)
           .eq("id", existingId);
-        if (err2) {
+        if (err2 && !isSchemaMismatchError(err2.message)) {
           logTradesQueryError("update-fallback", userId, err2.message);
-          return false;
         }
-        return true;
+        return !err2;
       }
       if (error) {
         logTradesQueryError("update", userId, error.message);
@@ -383,22 +377,19 @@ export async function safeUpsertClosedTradeRow(
 
     const { error } = await supabaseAdmin.from("trades").insert([primary]);
     if (error && isSchemaMismatchError(error.message)) {
-      applyCachedSchemaMode(mode === "legacy" ? "unified" : "legacy", "fallback");
+      cachedSchemaMode = "legacy";
       const { error: err2 } = await supabaseAdmin.from("trades").insert([fallback]);
-      if (err2) {
+      if (err2 && !isSchemaMismatchError(err2.message)) {
         logTradesQueryError("insert-fallback", userId, err2.message);
-        return false;
       }
-      return true;
+      return !err2;
     }
     if (error) {
       logTradesQueryError("insert", userId, error.message);
       return false;
     }
     return true;
-  } catch (error: unknown) {
-    const err = error instanceof Error ? error : new Error(String(error));
-    console.error("[paper-db] trades upsert exception", { message: err.message });
+  } catch {
     return false;
   }
 }

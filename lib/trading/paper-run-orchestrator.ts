@@ -110,40 +110,20 @@ async function executePaperScalpOrchestrator(): Promise<
     listResult.data,
   );
 
-  if (isPaperRunBudgetExceeded(startTime)) {
-    const early = buildPartialResult(startTime, {
+  if (listResult.data.length === 0) {
+    return buildPartialResult(startTime, {
       scanned: 0,
       updated: 0,
-      actions: ["budget_exceeded:pre_prepare"],
+      actions: ["no_workspaces"],
       symbols: [],
       snapshotsLoaded: 0,
       snapshotSource: "mock",
       marketSource: "mock-fallback",
-      partialReason: "deadline_before_klines",
-      workspacesSkipped: listResult.data.length,
     });
-    const earlyManifest = buildManifestPayload(early, {
-      masterWorkspaceKey,
-      masterAccount: null,
-      masterSummary: "budget_exceeded",
-      workspaceRows: [],
-      momentum: resolvePaperMomentumSettings({}, 70),
-      scalpSnapshots: new Map(),
-      candlesBySymbol: new Map(),
-      marketCoins: [],
-      symbols: [],
-      btcRegimeActive: true,
-      apiDegraded: true,
-    });
-    const earlyNotify = evaluateManifestTelegramDispatch({
-      ranAt: early.ranAt,
-      actions: early.actions,
-      workspaceSummaries: [],
-    });
-    return finalizePaperTickRun(early, earlyManifest, earlyNotify);
   }
 
   const prepared = await preparePaperRun(listResult.data);
+  const workspaceBudgetStart = performance.now();
   console.log(
     `[paper-scalp] orchestrator engine=${prepared.engineMode} snapshots=${prepared.scalpSnapshots.size} accounts=${prepared.accountByKey.size}`,
   );
@@ -170,13 +150,15 @@ async function executePaperScalpOrchestrator(): Promise<
   const workspaceSummaries: string[] = [];
 
   for (const workspace of listResult.data) {
-    if (isPaperRunBudgetExceeded(startTime)) {
+    if (isPaperRunBudgetExceeded(workspaceBudgetStart)) {
       partial = true;
       partialReason = "execution_budget_hot_path";
       workspacesSkipped = listResult.data.length - scanned;
-      console.warn(
-        `[paper-scalp] ${PAPER_RUN_BUDGET_MS}ms hot-path budget hit — partial (${workspacesSkipped} skipped)`,
-      );
+      if (process.env.PAPER_DEBUG === "1") {
+        console.log(
+          `[paper-scalp] ${PAPER_RUN_BUDGET_MS}ms workspace budget — partial (${workspacesSkipped} skipped)`,
+        );
+      }
       break;
     }
 
