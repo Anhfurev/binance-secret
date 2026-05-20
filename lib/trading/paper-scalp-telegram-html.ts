@@ -53,8 +53,23 @@ export function formatNavHtmlBlock(
         )
       : null,
     tgBullet(
-      `Session P&amp;L: ${escapeTelegramHtml(formatSignedNavUsd(nav.session_pnl_usdt))} (${escapeTelegramHtml(formatPct4(nav.session_pnl_pct))}) vs $${escapeTelegramHtml(formatNavUsd(nav.starting_usdt))} start`,
+      `Session P&amp;L: ${escapeTelegramHtml(formatSignedNavUsd(nav.session_pnl_usdt))} (${escapeTelegramHtml(formatPct4(nav.session_pnl_pct))}) vs $${escapeTelegramHtml(formatNavUsd(nav.starting_usdt))} DB baseline`,
     ),
+    nav.pnl_24h_usdt != null
+      ? tgBullet(
+          `24h P&amp;L: ${escapeTelegramHtml(formatSignedNavUsd(nav.pnl_24h_usdt))} (stored NAV)`,
+        )
+      : null,
+    nav.pnl_7d_usdt != null
+      ? tgBullet(
+          `7d P&amp;L: ${escapeTelegramHtml(formatSignedNavUsd(nav.pnl_7d_usdt))} (stored NAV)`,
+        )
+      : null,
+    nav.lifetime_realized_pnl_usdt != null
+      ? tgBullet(
+          `Lifetime realized: ${escapeTelegramHtml(formatSignedNavUsd(nav.lifetime_realized_pnl_usdt))} (${nav.closed_trade_count ?? 0} closed)`,
+        )
+      : null,
   ];
   return rows.filter(Boolean).join("\n");
 }

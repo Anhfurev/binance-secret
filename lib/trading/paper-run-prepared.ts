@@ -9,11 +9,17 @@ import {
 } from "@/lib/trading/paper-scalp-klines";
 import { buildPaperScalpMarketCoins } from "@/lib/trading/paper-scalp-market";
 import { extractPaperWatchSymbolsFromWorkspaces } from "@/lib/trading/paper-scalp-settings";
+import {
+  loadPaperWorkspaceDbContext,
+  mergePaperAccountFromDatabase,
+  type PaperWorkspaceDbCtx,
+} from "@/lib/trading/paper-portfolio-db";
 import type { CoinData, DemoAccount } from "@/lib/types";
 
 export type CachedWorkspaceAccount = {
   workspaceKey: string;
   account: DemoAccount;
+  dbCtx: PaperWorkspaceDbCtx | null;
   paperSettings: DemoWorkspaceRecord["snapshot"]["paperSettings"];
   autoPilotMode: DemoWorkspaceRecord["snapshot"]["autoPilotMode"];
   copyProfile: DemoWorkspaceRecord["snapshot"]["copyProfile"];
@@ -31,6 +37,7 @@ export type PreparedPaperRun = {
   marketSource: "15m-snapshots" | "mock-fallback" | "mixed";
   apiDegraded: boolean;
   accountByKey: Map<string, CachedWorkspaceAccount>;
+  dbCtxByKey: Map<string, PaperWorkspaceDbCtx>;
 };
 
 function workspaceKey(ws: DemoWorkspaceRecord): string {
@@ -74,22 +81,40 @@ export async function preparePaperRun(
   );
 
   const accountByKey = new Map<string, CachedWorkspaceAccount>();
-  for (const ws of workspaces) {
+  const dbCtxByKey = new Map<string, PaperWorkspaceDbCtx>();
+
+  const hydrateJobs = workspaces.map(async (ws) => {
     const key = workspaceKey(ws);
     const snap = ws.snapshot;
     const active = snap.profiles.find((p) => p.id === snap.activeId);
     const hydrated = active?.payload ? hydrateAccount(active.payload) : null;
-    if (!hydrated) continue;
+    if (!hydrated) return;
+
+    const dbCtx = await loadPaperWorkspaceDbContext({
+      ownerType: ws.ownerType,
+      ownerId: ws.ownerId,
+      workspaceKey: key,
+    });
+    if (dbCtx) dbCtxByKey.set(key, dbCtx);
+
+    const merged = await mergePaperAccountFromDatabase({
+      account: normalizeAccount(hydrated),
+      ctx: dbCtx,
+    });
+
     accountByKey.set(key, {
       workspaceKey: key,
-      account: normalizeAccount(hydrated),
+      account: merged,
+      dbCtx,
       paperSettings: snap.paperSettings,
       autoPilotMode: snap.autoPilotMode,
       copyProfile: snap.copyProfile,
       demoAutoPilot: snap.demoAutoPilot,
       walletMode: snap.walletMode,
     });
-  }
+  });
+
+  await Promise.all(hydrateJobs);
 
   return {
     workspaces,
@@ -101,5 +126,6 @@ export async function preparePaperRun(
     marketSource,
     apiDegraded,
     accountByKey,
+    dbCtxByKey,
   };
 }

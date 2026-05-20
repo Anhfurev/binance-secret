@@ -17,6 +17,13 @@ export type PaperWorkspaceNav = {
   session_pnl_pct: number;
   /** Open legs: Σ (mark − entry) × qty — anchored to DB entry price. */
   open_unrealized_pnl_usdt: number;
+  /** NAV delta vs snapshot ~24h ago (null until first snapshot ages). */
+  pnl_24h_usdt?: number | null;
+  /** NAV delta vs snapshot ~7d ago. */
+  pnl_7d_usdt?: number | null;
+  /** Sum of closed paper leg PnL in public.trades for this workspace. */
+  lifetime_realized_pnl_usdt?: number;
+  closed_trade_count?: number;
 };
 
 function unrealizedLegPnl(
@@ -97,14 +104,34 @@ export function formatNavTelegramBlock(
     openLegCount > 0
       ? `• Open P&L (vs entry): ${formatSignedNavUsd(nav.open_unrealized_pnl_usdt)}`
       : null,
-    `• Session P&L: ${formatSignedNavUsd(nav.session_pnl_usdt)} (${formatPct4(nav.session_pnl_pct)}) vs $${formatNavUsd(nav.starting_usdt)} start`,
+    `• Session P&L: ${formatSignedNavUsd(nav.session_pnl_usdt)} (${formatPct4(nav.session_pnl_pct)}) vs $${formatNavUsd(nav.starting_usdt)} DB baseline`,
+    nav.pnl_24h_usdt != null
+      ? `• 24h P&L: ${formatSignedNavUsd(nav.pnl_24h_usdt)} (vs stored NAV snapshot)`
+      : null,
+    nav.pnl_7d_usdt != null
+      ? `• 7d P&L: ${formatSignedNavUsd(nav.pnl_7d_usdt)} (vs stored NAV snapshot)`
+      : null,
+    nav.lifetime_realized_pnl_usdt != null
+      ? `• Lifetime realized: ${formatSignedNavUsd(nav.lifetime_realized_pnl_usdt)} (${nav.closed_trade_count ?? 0} closed legs)`
+      : null,
   ]
     .filter(Boolean)
     .join("\n");
 }
 
 export function formatNavLogLine(nav: PaperWorkspaceNav): string {
-  return `NAV=$${formatNavUsd(nav.portfolio_nav_usdt)} session=${formatSignedNavUsd(nav.session_pnl_usdt)} open=${formatSignedNavUsd(nav.open_unrealized_pnl_usdt)}`;
+  const parts = [
+    `NAV=$${formatNavUsd(nav.portfolio_nav_usdt)}`,
+    `session=${formatSignedNavUsd(nav.session_pnl_usdt)}`,
+    `open=${formatSignedNavUsd(nav.open_unrealized_pnl_usdt)}`,
+  ];
+  if (nav.lifetime_realized_pnl_usdt != null) {
+    parts.push(`lifetime=${formatSignedNavUsd(nav.lifetime_realized_pnl_usdt)}`);
+  }
+  if (nav.pnl_24h_usdt != null) {
+    parts.push(`24h=${formatSignedNavUsd(nav.pnl_24h_usdt)}`);
+  }
+  return parts.join(" ");
 }
 
 export function humanPaperScalpReason(summary: string): string {

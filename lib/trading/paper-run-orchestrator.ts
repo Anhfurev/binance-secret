@@ -15,10 +15,18 @@ import {
   resolveBtcCandles,
   resolveBtcSnapshot,
 } from "@/lib/trading/paper-scalp-regime";
-import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
+import {
+  enrichNavWithDbMetrics,
+  recordPaperPortfolioSnapshot,
+} from "@/lib/trading/paper-portfolio-db";
+import {
+  computePaperWorkspaceNav,
+  formatNavLogLine,
+} from "@/lib/trading/paper-scalp-nav";
 import { resolvePaperMomentumSettings } from "@/lib/trading/paper-scalp-momentum";
 import { preparePaperRun } from "@/lib/trading/paper-run-prepared";
 import { queuePaperWorkspacePersist } from "@/lib/trading/paper-run-persist";
+import { syncPaperTradeImmediately } from "@/lib/trading/paper-trades-sync";
 import {
   isPaperRunBudgetExceeded,
   PAPER_RUN_BUDGET_MS,
@@ -177,7 +185,10 @@ async function executePaperScalpOrchestrator(): Promise<
     const cached = prepared.accountByKey.get(key);
     if (!cached) continue;
 
-    const alignedWallet = alignPaperScalpWallet(cached.account);
+    const dbCtx = prepared.dbCtxByKey.get(key) ?? cached.dbCtx;
+    const alignedWallet = alignPaperScalpWallet(cached.account, {
+      persistedStartingBalance: dbCtx?.metrics?.sessionBaselineUsdt,
+    });
     const walletReset = paperWalletWasAligned(cached.account, alignedWallet);
 
     const result = runPaperTradingAutomationTick({
@@ -191,13 +202,36 @@ async function executePaperScalpOrchestrator(): Promise<
       paperSettings: cached.paperSettings,
     });
 
-    const nav = computePaperWorkspaceNav(result.account, prepared.marketCoins);
+    const nav = enrichNavWithDbMetrics(
+      computePaperWorkspaceNav(result.account, prepared.marketCoins),
+      dbCtx?.metrics ?? null,
+    );
     const action = resolveTradingAction(result.summary);
+
+    if (key === masterWorkspaceKey || workspaceRows.length === 0) {
+      console.log(`[PORTFOLIO NAV] ${key} ${formatNavLogLine(nav)}`);
+    }
     workspaceSummaries.push(result.summary);
 
     if (result.pyramided) pyramidedAny = true;
-    if (result.positionClosed || result.summary.startsWith("closed:")) {
+    const closedThisTick =
+      result.positionClosed || result.summary.startsWith("closed:");
+    if (closedThisTick) {
       positionClosedAny = true;
+      const closedLeg = result.account.tradeHistory[0];
+      if (closedLeg && dbCtx) {
+        void syncPaperTradeImmediately({
+          ownerType: workspace.ownerType,
+          ownerId: workspace.ownerId,
+          workspaceKey: key,
+          trade: closedLeg,
+        });
+        void recordPaperPortfolioSnapshot({
+          ctx: dbCtx,
+          nav,
+          openLegCount: result.account.openPositions.length,
+        });
+      }
     }
     if (result.velocityPartial || result.summary.startsWith("velocity-tp-70:")) {
       velocityPartialAny = true;
@@ -244,6 +278,9 @@ async function executePaperScalpOrchestrator(): Promise<
       ownerType: workspace.ownerType,
       ownerId: workspace.ownerId,
       workspaceKey: key,
+      account: accountToPersist,
+      dbCtx,
+      marketCoins: prepared.marketCoins,
       snapshot: { ...snapshot, profiles: nextProfiles },
       onSettled: (outcome) => {
         if (!outcome.ok) {

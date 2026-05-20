@@ -25,6 +25,7 @@ import type { CoinData } from "@/lib/types";
 import {
   formatAssetPrice,
   formatNavUsd,
+  formatSignedNavUsd,
 } from "@/lib/trading/paper-scalp-metrics-format";
 import {
   evaluatePaperBuySignal,
@@ -372,6 +373,23 @@ export function buildUnifiedEngineManifest(input: EngineManifestInput): string {
   }
 
   lines.push("", tgSection("[EXECUTION]"));
+  const masterNav = input.workspaceRows.find(
+    (r) => r.workspaceKey === input.masterWorkspaceKey,
+  )?.nav;
+  if (masterNav?.lifetime_realized_pnl_usdt != null) {
+    lines.push(
+      tgBullet(
+        `Lifetime realized (DB): ${escapeTelegramHtml(formatSignedNavUsd(masterNav.lifetime_realized_pnl_usdt))} · ${masterNav.closed_trade_count ?? 0} closed`,
+      ),
+    );
+    if (masterNav.pnl_24h_usdt != null) {
+      lines.push(
+        tgBullet(
+          `24h NAV P&amp;L (DB): ${escapeTelegramHtml(formatSignedNavUsd(masterNav.pnl_24h_usdt))}`,
+        ),
+      );
+    }
+  }
   lines.push(
     tgBullet(
       `Scanned ${input.scanned} · persisted ${input.updated} · async queue ${input.persistQueued}`,

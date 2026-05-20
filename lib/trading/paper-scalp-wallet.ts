@@ -41,31 +41,55 @@ export function createFreshPaperScalpAccount(
   };
 }
 
-/** Rebase stale demo megawallets to the configured paper wallet (default $28). */
-export function alignPaperScalpWallet(account: DemoAccount): DemoAccount {
+/**
+ * Align cash to configured wallet without wiping trade history or DB baseline.
+ */
+export function alignPaperScalpWallet(
+  account: DemoAccount,
+  options?: { persistedStartingBalance?: number },
+): DemoAccount {
   const target = resolvePaperScalpWalletUsd();
+  const baseline =
+    options?.persistedStartingBalance ??
+    (account.startingBalance > 0 ? account.startingBalance : target);
 
   if (account.openPositions.length > 0) {
-    return account;
+    return { ...account, startingBalance: baseline };
   }
 
-  const balanceDrift = Math.abs(account.currentBalance - target);
-  const startDrift = Math.abs(account.startingBalance - target);
+  const hasHistory =
+    account.tradeHistory.length > 0 || account.openPositions.length > 0;
+
+  if (account.circuitBreakerTripped) {
+    return {
+      ...account,
+      circuitBreakerTripped: false,
+      currentBalance: hasHistory ? account.currentBalance : target,
+      startingBalance: baseline,
+    };
+  }
+
   const staleMegaWallet =
-    account.currentBalance > target * 2 || account.startingBalance > target * 2;
+    !hasHistory &&
+    (account.currentBalance > target * 4 || account.startingBalance > target * 4);
 
-  const needsReset =
-    balanceDrift > 0.01 ||
-    startDrift > 0.01 ||
-    account.circuitBreakerTripped ||
-    staleMegaWallet ||
-    account.tradeHistory.length > 50;
-
-  if (!needsReset) {
-    return account;
+  if (staleMegaWallet) {
+    return {
+      ...account,
+      currentBalance: target,
+      startingBalance: baseline,
+    };
   }
 
-  return createFreshPaperScalpAccount(target);
+  if (!hasHistory && Math.abs(account.currentBalance - target) > 0.01) {
+    return {
+      ...account,
+      currentBalance: target,
+      startingBalance: baseline,
+    };
+  }
+
+  return { ...account, startingBalance: baseline };
 }
 
 export function paperWalletWasAligned(
@@ -75,7 +99,6 @@ export function paperWalletWasAligned(
   return (
     before.currentBalance !== after.currentBalance ||
     before.circuitBreakerTripped !== after.circuitBreakerTripped ||
-    before.tradeHistory.length !== after.tradeHistory.length ||
-    before.openPositions.length !== after.openPositions.length
+    before.startingBalance !== after.startingBalance
   );
 }

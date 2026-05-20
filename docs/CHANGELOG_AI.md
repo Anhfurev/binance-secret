@@ -8,6 +8,28 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-19 — Paper portfolio DB persistence (session P&L / history)
+
+**Summary**
+
+- **Migration `20260519150000_paper_portfolio_tracking.sql`:** `paper_workspace_baselines` (persisted session start per workspace) + `paper_portfolio_snapshots` (NAV time series for 24h/7d deltas).
+- **`paper-portfolio-db.ts` / `paper-trade-db-map.ts`:** Hydrate workspace accounts from `public.trades` on tick start; record snapshots on persist/close; enrich NAV with DB baseline, 24h/7d, and lifetime realized PnL.
+- **`paper-scalp-wallet.ts`:** `alignPaperScalpWallet` no longer wipes `tradeHistory` at 50+ trades or resets to a fresh $28 account.
+- **`paper-trades-sync.ts`:** Immediate upsert on ATR close; `extra` stores margin/leverage/PnL.
+- **Manifest / logs:** `[PORTFOLIO NAV]` and `[EXECUTION]` show lifetime and 24h metrics from DB when available.
+
+**Deploy:** `supabase db push` (or apply migration in SQL editor). Requires `SUPABASE_SERVICE_ROLE_KEY` + `PAPER_TRADES_USER_ID` for device workspaces.
+
+---
+
+## 2026-05-19 — Paper scalp → `public.trades` sync
+
+**Summary**
+
+- **`paper-trades-sync.ts`:** After each paper tick, open legs + recent `tradeHistory` upsert into `public.trades` (`extra.trade_mode=paper`, `extra.paper_leg_id`). Device workspaces need `PAPER_TRADES_USER_ID` (auth.users uuid) in env.
+
+---
+
 ## 2026-05-19 — Alpha Shield Long/Short regime switcher (paper 15m)
 
 **Summary**
