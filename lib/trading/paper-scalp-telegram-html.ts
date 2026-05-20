@@ -3,6 +3,7 @@ import {
   formatPct4,
   formatSignedNavUsd,
 } from "@/lib/trading/paper-scalp-metrics-format";
+import { sanitizePaperWorkspaceNav } from "@/lib/trading/paper-nav-sanitize";
 import type { PaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import { warnPaperTelegramEnvOnce } from "@/lib/trading/paper-telegram-env";
 
@@ -38,37 +39,38 @@ export function formatNavHtmlBlock(
   nav: PaperWorkspaceNav,
   openLegCount = 0,
 ): string {
+  const safe = sanitizePaperWorkspaceNav(nav);
   const rows = [
-    tgBullet(`Free cash (USDT): $${escapeTelegramHtml(formatNavUsd(nav.available_usdt))}`),
-    nav.open_positions_usdt > 0
+    tgBullet(`Free cash (USDT): $${escapeTelegramHtml(formatNavUsd(safe.available_usdt))}`),
+    safe.open_positions_usdt > 0
       ? tgBullet(
-          `Open legs (${openLegCount}): $${escapeTelegramHtml(formatNavUsd(nav.open_positions_usdt))} at live mark`,
+          `Open legs (${openLegCount}): $${escapeTelegramHtml(formatNavUsd(safe.open_positions_usdt))} at live mark`,
         )
       : openLegCount > 0
         ? tgBullet(`Open legs: ${openLegCount}`)
         : null,
-    tgBullet(`Live NAV: $${escapeTelegramHtml(formatNavUsd(nav.portfolio_nav_usdt))} USDT`),
+    tgBullet(`Live NAV: $${escapeTelegramHtml(formatNavUsd(safe.portfolio_nav_usdt))} USDT`),
     openLegCount > 0
       ? tgBullet(
-          `Open P&amp;L (vs entry): ${escapeTelegramHtml(formatSignedNavUsd(nav.open_unrealized_pnl_usdt))}`,
+          `Open P&amp;L (vs entry): ${escapeTelegramHtml(formatSignedNavUsd(safe.open_unrealized_pnl_usdt))}`,
         )
       : null,
     tgBullet(
-      `Session P&amp;L: ${escapeTelegramHtml(formatSignedNavUsd(nav.session_pnl_usdt))} (${escapeTelegramHtml(formatPct4(nav.session_pnl_pct))}) vs $${escapeTelegramHtml(formatNavUsd(nav.starting_usdt))} DB baseline`,
+      `Session P&amp;L: ${escapeTelegramHtml(formatSignedNavUsd(safe.session_pnl_usdt))} (${escapeTelegramHtml(formatPct4(safe.session_pnl_pct))}) vs $${escapeTelegramHtml(formatNavUsd(safe.starting_usdt))} DB baseline`,
     ),
-    nav.pnl_24h_usdt != null
+    safe.pnl_24h_usdt != null
       ? tgBullet(
-          `24h P&amp;L: ${escapeTelegramHtml(formatSignedNavUsd(nav.pnl_24h_usdt))} (stored NAV)`,
+          `24h P&amp;L: ${escapeTelegramHtml(formatSignedNavUsd(safe.pnl_24h_usdt))} (stored NAV)`,
         )
       : null,
-    nav.pnl_7d_usdt != null
+    safe.pnl_7d_usdt != null
       ? tgBullet(
-          `7d P&amp;L: ${escapeTelegramHtml(formatSignedNavUsd(nav.pnl_7d_usdt))} (stored NAV)`,
+          `7d P&amp;L: ${escapeTelegramHtml(formatSignedNavUsd(safe.pnl_7d_usdt))} (stored NAV)`,
         )
       : null,
-    nav.lifetime_realized_pnl_usdt != null
+    safe.lifetime_realized_pnl_usdt != null
       ? tgBullet(
-          `Lifetime realized: ${escapeTelegramHtml(formatSignedNavUsd(nav.lifetime_realized_pnl_usdt))} (${nav.closed_trade_count ?? 0} closed)`,
+          `Lifetime realized: ${escapeTelegramHtml(formatSignedNavUsd(safe.lifetime_realized_pnl_usdt))} (${safe.closed_trade_count ?? 0} closed)`,
         )
       : null,
   ];

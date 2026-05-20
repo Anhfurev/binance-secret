@@ -7,6 +7,7 @@ import {
 } from "@/lib/trading/paper-scalp-metrics-format";
 import { sanitizePaperWorkspaceNav } from "@/lib/trading/paper-nav-sanitize";
 import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
+import { resolvePaperScalpWalletUsd } from "@/lib/trading/paper-scalp-wallet";
 
 export type PaperWorkspaceNav = {
   available_usdt: number;
@@ -42,9 +43,17 @@ export function computePaperWorkspaceNav(
   account: DemoAccount,
   marketCoins: CoinData[] = [],
 ): PaperWorkspaceNav {
-  const available_usdt = Number(Math.max(0, account.currentBalance).toFixed(4));
+  const wallet = resolvePaperScalpWalletUsd();
+  const cashRaw = Number(account.currentBalance);
+  const available_usdt = Number(
+    Math.max(0, Number.isFinite(cashRaw) ? cashRaw : 0).toFixed(4),
+  );
+  const startRaw = Number(account.startingBalance);
   const starting_usdt = Number(
-    Math.max(0, account.startingBalance || available_usdt).toFixed(4),
+    Math.max(
+      0,
+      Number.isFinite(startRaw) && startRaw > 0 ? startRaw : wallet,
+    ).toFixed(4),
   );
 
   let open_positions_usdt = 0;

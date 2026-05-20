@@ -233,12 +233,13 @@ export async function loadPaperPortfolioMetrics(params: {
   const now = Date.now();
   const at24h = new Date(now - MS_24H).toISOString();
   const at7d = new Date(now - MS_7D).toISOString();
+  const walletTarget = resolvePaperScalpWalletUsd();
 
   let profileStarting = 0;
   try {
     const res = await supabaseAdmin
       .from("profiles")
-      .select("starting_balance,demo_balance")
+      .select("demo_balance,portfolio_nav_usdt")
       .eq("id", params.userId)
       .maybeSingle();
     if (res.error) {
@@ -246,10 +247,9 @@ export async function loadPaperPortfolioMetrics(params: {
         message: res.error.message,
       });
     } else {
-      profileStarting = num(
-        res.data?.starting_balance,
-        num(res.data?.demo_balance),
-      );
+      const demoBal = num(res.data?.demo_balance);
+      profileStarting =
+        demoBal > 0 && demoBal <= walletTarget * 2 ? demoBal : walletTarget;
     }
   } catch (error: unknown) {
     const err = error instanceof Error ? error : new Error(String(error));
@@ -263,8 +263,6 @@ export async function loadPaperPortfolioMetrics(params: {
     loadNavSnapshotAtOrBefore(params.userId, at7d),
     safeFetchTradesPnlAggregate(params.userId),
   ]);
-
-  const walletTarget = resolvePaperScalpWalletUsd();
   const sessionBaselineUsdt =
     profileStarting > 0 && profileStarting <= walletTarget * 2
       ? profileStarting

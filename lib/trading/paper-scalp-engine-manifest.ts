@@ -15,6 +15,8 @@ import {
   resolveBtcCandles,
   resolveBtcSnapshot,
 } from "@/lib/trading/paper-scalp-regime";
+import { sanitizePaperWorkspaceNav } from "@/lib/trading/paper-nav-sanitize";
+import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import { normalizePaperSymbol, resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
 import { formatPyramidLegSuffix } from "@/lib/trading/paper-scalp-pyramid";
 import {
@@ -295,15 +297,10 @@ export function buildUnifiedEngineManifest(input: EngineManifestInput): string {
     const masterRow = input.workspaceRows.find(
       (r) => r.workspaceKey === input.masterWorkspaceKey,
     );
-    const nav = masterRow?.nav ?? {
-      available_usdt: account.currentBalance,
-      open_positions_usdt: 0,
-      portfolio_nav_usdt: account.currentBalance,
-      starting_usdt: account.startingBalance,
-      session_pnl_usdt: 0,
-      session_pnl_pct: 0,
-      open_unrealized_pnl_usdt: 0,
-    };
+    const nav = sanitizePaperWorkspaceNav(
+      masterRow?.nav ??
+        computePaperWorkspaceNav(account, input.marketCoins ?? []),
+    );
     lines.push(formatNavHtmlBlock(nav, openLegCount));
     if (input.masterWorkspaceKey) {
       lines.push(tgBullet(`Master workspace: ${tgCode(input.masterWorkspaceKey)}`));

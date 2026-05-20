@@ -8,6 +8,16 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-20 — Slim snapshot schema (no total_nav_usdt) + NAV NaN fix
+
+**Summary**
+
+- **`paper-portfolio-snapshot.ts`:** Slim insert uses only `portfolio_nav_usdt` (fixes PostgREST “Could not find total_nav_usdt” on prod).
+- **NAV:** Finite cash/starting in `computePaperWorkspaceNav`; coerce legs in `normalizePaperWorkspaceAccount`; Telegram manifest sanitizes before display.
+- **Profiles:** `applyLiveProfileNav` writes sanitized NAV only.
+
+---
+
 ## 2026-05-20 — entry_price null on paper_positions + hydrate fix
 
 **Summary**

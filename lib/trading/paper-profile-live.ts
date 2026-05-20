@@ -1,5 +1,6 @@
 import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
 import { normalizePaperWorkspaceAccount } from "@/lib/trading/paper-cash-reconcile";
+import { sanitizePaperWorkspaceNav } from "@/lib/trading/paper-nav-sanitize";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import { resolvePaperScalpWalletUsd } from "@/lib/trading/paper-scalp-wallet";
 import type { PaperWorkspaceDbCtx } from "@/lib/trading/paper-portfolio-db";
@@ -25,8 +26,9 @@ export async function applyLiveProfileNav(params: {
   dbCtx?: PaperWorkspaceDbCtx | null;
 }): Promise<LiveProfileNav> {
   const account = normalizePaperWorkspaceAccount(params.account);
-  const nav = computePaperWorkspaceNav(account, params.marketCoins);
-  const walletTarget = resolvePaperScalpWalletUsd();
+  const nav = sanitizePaperWorkspaceNav(
+    computePaperWorkspaceNav(account, params.marketCoins),
+  );
   const patch: LiveProfileNav = {
     available_usdt: nav.available_usdt,
     portfolio_nav_usdt: nav.portfolio_nav_usdt,
@@ -41,7 +43,6 @@ export async function applyLiveProfileNav(params: {
       available_usdt: patch.available_usdt,
       portfolio_nav_usdt: patch.portfolio_nav_usdt,
       demo_balance: patch.demo_balance,
-      starting_balance: walletTarget,
       updated_at: new Date().toISOString(),
     })
     .eq("id", params.userId);
@@ -67,7 +68,7 @@ export async function loadLiveProfileNav(
   if (!supabaseAdmin) return null;
   const { data, error } = await supabaseAdmin
     .from("profiles")
-    .select("available_usdt,portfolio_nav_usdt,demo_balance,starting_balance")
+    .select("available_usdt,portfolio_nav_usdt,demo_balance")
     .eq("id", userId)
     .maybeSingle();
   if (error || !data) return null;
