@@ -8,6 +8,18 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-20 — Paper snapshot learning columns (what we hold / why P&L)
+
+**Summary**
+
+- Migration `20260520170000_paper_snapshot_details.sql`: `free_cash_usdt`, `open_legs_value_usdt`, `session_pnl_usdt`, `session_pnl_pct`, `open_leg_count`, `tick_summary`, `regime_label`, `details` jsonb on `paper_portfolio_snapshots`.
+- **`paper-snapshot-payload.ts`:** Each tick stores open legs (symbol, entry, mark, unrealized P&L, trail SL), actions, `loss_note` when session is red.
+- **`paper-portfolio-snapshot.ts`:** v5-details insert; slim fallback if migration not applied yet.
+
+**Query example:** `select recorded_at, portfolio_nav_usdt, session_pnl_usdt, regime_label, details->'open_legs' from paper_portfolio_snapshots order by recorded_at desc limit 20;`
+
+---
+
 ## 2026-05-20 — Silent paper DB logs (no snapshot/position spam)
 
 **Summary**

@@ -1,17 +1,21 @@
 import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
 import { coerceNavUsdtForSnapshot } from "@/lib/trading/paper-nav-sanitize";
+import {
+  buildPaperSnapshotDetails,
+  type PaperSnapshotTickMeta,
+} from "@/lib/trading/paper-snapshot-payload";
 import { resolvePaperScalpWalletUsd } from "@/lib/trading/paper-scalp-wallet";
 import type { PaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import type { PaperWorkspaceDbCtx } from "@/lib/trading/paper-portfolio-db";
+import type { CoinData, DemoAccount } from "@/lib/types";
 
-export const PAPER_SNAPSHOT_MODULE_TAG = "paper-snapshot-v4-slim";
+export const PAPER_SNAPSHOT_MODULE_TAG = "paper-snapshot-v5-details";
 
 function num(value: unknown, fallback = 0): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
 }
 
-/** Always a finite positive number for Postgres numeric NOT NULL. */
 function resolveSnapshotNavUsdt(nav: PaperWorkspaceNav): number {
   const wallet = resolvePaperScalpWalletUsd();
   const coerced = coerceNavUsdtForSnapshot(nav);
@@ -20,29 +24,61 @@ function resolveSnapshotNavUsdt(nav: PaperWorkspaceNav): number {
   return wallet;
 }
 
-/**
- * One NAV row per tick — prod table columns only:
- * user_id, portfolio_nav_usdt, recorded_at
- */
-export async function recordPaperPortfolioSnapshot(params: {
+export type RecordPaperSnapshotParams = {
   ctx: PaperWorkspaceDbCtx;
   nav: PaperWorkspaceNav;
-  openLegCount?: number;
-}): Promise<void> {
-  void params.openLegCount;
+  account: DemoAccount;
+  marketCoins: CoinData[];
+  meta: PaperSnapshotTickMeta;
+};
+
+/**
+ * One NAV row per tick with leg/regime context for later review.
+ */
+export async function recordPaperPortfolioSnapshot(
+  params: RecordPaperSnapshotParams,
+): Promise<void> {
   if (String(process.env.PAPER_SNAPSHOTS ?? "1").trim() === "0") return;
   if (!isSupabaseAdminConfigured || !supabaseAdmin) return;
 
   const portfolio_nav_usdt = resolveSnapshotNavUsdt(params.nav);
+  const details = buildPaperSnapshotDetails({
+    account: params.account,
+    nav: params.nav,
+    marketCoins: params.marketCoins,
+    meta: params.meta,
+  });
+
   const row = {
     user_id: params.ctx.userId,
+    workspace_key: params.meta.workspaceKey || params.ctx.workspaceKey,
     portfolio_nav_usdt,
+    free_cash_usdt: num(params.nav.available_usdt),
+    open_legs_value_usdt: num(params.nav.open_positions_usdt),
+    session_pnl_usdt: num(params.nav.session_pnl_usdt),
+    session_pnl_pct: num(params.nav.session_pnl_pct),
+    open_leg_count: params.account.openPositions.length,
+    tick_summary: params.meta.tickSummary.slice(0, 500),
+    regime_label: params.meta.regimeLabel.slice(0, 120),
+    details,
     recorded_at: new Date().toISOString(),
   };
 
-  const { error } = await supabaseAdmin
+  let { error } = await supabaseAdmin
     .from("paper_portfolio_snapshots")
     .insert([row]);
+
+  if (error?.message?.includes("Could not find")) {
+    const slim = {
+      user_id: params.ctx.userId,
+      portfolio_nav_usdt,
+      recorded_at: row.recorded_at,
+    };
+    const retry = await supabaseAdmin
+      .from("paper_portfolio_snapshots")
+      .insert([slim]);
+    error = retry.error;
+  }
 
   if (error && process.env.PAPER_DEBUG === "1") {
     console.log(`[${PAPER_SNAPSHOT_MODULE_TAG}] insert skipped`, {

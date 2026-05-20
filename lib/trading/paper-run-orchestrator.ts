@@ -20,6 +20,7 @@ import {
   recordPaperPortfolioSnapshot,
 } from "@/lib/trading/paper-portfolio-db";
 import { resolvePaperEngineMode } from "@/lib/trading/paper-scalp-engine-mode";
+import { formatRegimeLabel } from "@/lib/trading/paper-snapshot-regime-label";
 import {
   computePaperWorkspaceNav,
   formatNavLogLine,
@@ -287,18 +288,24 @@ async function executePaperScalpOrchestrator(): Promise<
     });
   }
 
+  const regime = calculateDynamicRegime({
+    btcSnapshot: resolveBtcSnapshot(prepared.scalpSnapshots),
+    btcCandles: resolveBtcCandles(prepared.candlesBySymbol),
+    apiDegraded: prepared.apiDegraded,
+  });
   const btcRegimeActive =
     prepared.apiDegraded ||
     !resolveBtcSnapshot(prepared.scalpSnapshots) ||
-    calculateDynamicRegime({
-      btcSnapshot: resolveBtcSnapshot(prepared.scalpSnapshots),
-      btcCandles: resolveBtcCandles(prepared.candlesBySymbol),
-      apiDegraded: prepared.apiDegraded,
-    }).blockAltcoinEntries;
+    regime.blockAltcoinEntries;
 
   await recordMasterPortfolioSnapshot({
     masterWorkspaceKey,
     masterAccount,
+    masterSummary,
+    actions,
+    workspaceSummaries,
+    regimeLabel: formatRegimeLabel(regime),
+    engineMode: prepared.engineMode,
     prepared,
   });
 
@@ -350,6 +357,11 @@ async function executePaperScalpOrchestrator(): Promise<
 async function recordMasterPortfolioSnapshot(params: {
   masterWorkspaceKey: string | null;
   masterAccount: DemoAccount | null;
+  masterSummary: string;
+  actions: string[];
+  workspaceSummaries: string[];
+  regimeLabel: string;
+  engineMode: string;
   prepared: {
     dbCtxByKey: Map<string, PaperWorkspaceDbCtx>;
     marketCoins: CoinData[];
@@ -370,7 +382,16 @@ async function recordMasterPortfolioSnapshot(params: {
     await recordPaperPortfolioSnapshot({
       ctx,
       nav,
-      openLegCount: params.masterAccount.openPositions.length,
+      account: params.masterAccount,
+      marketCoins: params.prepared.marketCoins,
+      meta: {
+        workspaceKey: key,
+        tickSummary: params.masterSummary,
+        regimeLabel: params.regimeLabel,
+        actions: params.actions,
+        workspaceSummaries: params.workspaceSummaries,
+        engineMode: params.engineMode,
+      },
     });
   } catch {
     /* snapshot is best-effort — never fail the tick */
