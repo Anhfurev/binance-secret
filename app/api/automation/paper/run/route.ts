@@ -1,4 +1,7 @@
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 import { after, NextRequest, NextResponse } from "next/server";
 import {
@@ -7,12 +10,18 @@ import {
   releasePaperHeartbeatWithoutComplete,
   tryAcquirePaperHeartbeat,
 } from "@/lib/trading/paper-heartbeat-lock";
+import { resolvePaperEngineMode } from "@/lib/trading/paper-scalp-engine-mode";
 import { flushPendingManifestTelegram } from "@/lib/trading/paper-scalp-engine-manifest";
 import { runPaperScalpOrchestrator } from "@/lib/trading/paper-run-orchestrator";
 import {
   writeServerLogAsync,
   writeServerLogFromError,
 } from "@/lib/server-logs";
+
+const NO_STORE_HEADERS = {
+  "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+  Pragma: "no-cache",
+};
 
 function isAuthorized(request: NextRequest): boolean {
   const secret = process.env.CRON_SECRET;
@@ -28,15 +37,23 @@ function logFatalRouteException(error: unknown, phase?: string): void {
   });
 }
 
-export async function GET(request: NextRequest) {
+async function handlePaperRun(request: NextRequest): Promise<NextResponse> {
   if (!isAuthorized(request)) {
     writeServerLogAsync({
       level: "warn",
       source: "paper-scalp-route",
       message: "unauthorized_cron_request",
     });
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: NO_STORE_HEADERS },
+    );
   }
+
+  const engineMode = resolvePaperEngineMode();
+  console.log(
+    `[paper-scalp-route] tick start mode=${engineMode} PAPER_ENGINE_MODE=${String(process.env.PAPER_ENGINE_MODE ?? "(default micro)")}`,
+  );
 
   const velocityWake =
     request.headers.get("x-paper-velocity-wake") === "1";
@@ -56,8 +73,9 @@ export async function GET(request: NextRequest) {
         retryAfterMs: gate.retryAfterMs,
         lastCompletedAtMs: gate.lastCompletedAtMs,
         intervalMs: state.intervalMs,
+        engineMode,
       },
-      { status: 429 },
+      { status: 429, headers: NO_STORE_HEADERS },
     );
   }
 
@@ -65,19 +83,27 @@ export async function GET(request: NextRequest) {
   try {
     const outcome = await runPaperScalpOrchestrator();
     if (!outcome.ok) {
-      return NextResponse.json(outcome.body, { status: outcome.status });
+      return NextResponse.json(outcome.body, {
+        status: outcome.status,
+        headers: NO_STORE_HEADERS,
+      });
     }
     heartbeatCompleted = true;
     const body = {
       ...outcome,
+      engineMode,
       partial: outcome.partial ?? false,
       persistAsync: outcome.persistAsync ?? false,
       persistQueued: outcome.persistQueued ?? 0,
+      executedAt: new Date().toISOString(),
     };
     after(() => {
       void flushPendingManifestTelegram();
     });
-    return NextResponse.json(body);
+    console.log(
+      `[paper-scalp-route] tick done scanned=${outcome.scanned} updated=${outcome.updated} persistQueued=${body.persistQueued}`,
+    );
+    return NextResponse.json(body, { headers: NO_STORE_HEADERS });
   } catch (error: unknown) {
     logFatalRouteException(error);
     const message = error instanceof Error ? error.message : String(error);
@@ -86,8 +112,9 @@ export async function GET(request: NextRequest) {
         error: "Internal execution failure",
         details: message,
         phase: "fatal_route_exception",
+        engineMode,
       },
-      { status: 500 },
+      { status: 500, headers: NO_STORE_HEADERS },
     );
   } finally {
     if (heartbeatCompleted) {
@@ -96,4 +123,12 @@ export async function GET(request: NextRequest) {
       releasePaperHeartbeatWithoutComplete();
     }
   }
+}
+
+export async function GET(request: NextRequest) {
+  return handlePaperRun(request);
+}
+
+export async function POST(request: NextRequest) {
+  return handlePaperRun(request);
 }

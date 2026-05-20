@@ -8,6 +8,52 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-19 — Live profile NAV sync (fix frozen $28)
+
+**Summary**
+
+- **`paper-profile-live.ts`:** Every micro close/open/tick updates `profiles.available_usdt`, `portfolio_nav_usdt`, `demo_balance`.
+- **`runMicroScalpEngineTick(watchlist, context)`** + **`runMicroTrailingPass(openPositions, liveCandles, context)`** per Micro Mode spec.
+- Prepare hydrates workspace account from live profile before tick (no stale JSON $28).
+
+---
+
+## 2026-05-19 — Micro engine file architecture (1m default)
+
+**Summary**
+
+- **`paper-scalp-engine.ts`:** Core tick router — drawdown circuit, `harvestMicroCandlesParallel`, `runMicroTrailingPass`, acceleration entries.
+- **`paper_positions` table** + **`paper-positions-db.ts`:** OPEN legs for trailing persistence.
+- **`micro-scalp-acceleration.ts`:** 1m + 3m volume/ROC scanner (no RSI/EMA).
+- **`micro-scalp-trailing.ts`:** DB-backed trailing; `MICRO_TRAIL_ARM_PCT` / `MICRO_TRAIL_GAP_PCT`.
+- **`micro-scalp-drawdown.ts`:** 24h NAV via `paper_portfolio_snapshots.recorded_at`.
+- **`live-micro-order.ts`:** `placeMicroIocLimit` (IOC).
+- Default `PAPER_ENGINE_MODE=micro`.
+
+---
+
+## 2026-05-19 — Fee / slippage / chop diagnostics (paper closes)
+
+**Summary**
+
+- **`paper-trade-economics.ts`:** Net P&L after maker/taker fees; `[TRADE LOG]` raw vs net vs slippage; warns on fee trap and weak signal.
+- **Paper closes** use net P&L (not gross). Micro entries model REST slip; chop filter blocks sideways whipsaw.
+- **`live-micro-order.ts`:** Default maker `GTX` POST_ONLY; `MICRO_ORDER_MODE=taker` for IOC.
+
+**Env:** `PAPER_USE_MAKER_FEES=1`, `PAPER_MAKER_FEE_PCT=0.02`, `PAPER_TAKER_FEE_PCT=0.075`, `PAPER_ASSUMED_SLIPPAGE_PCT=0.04`, `PAPER_MIN_NET_EDGE_PCT` (optional override).
+
+---
+
+## 2026-05-19 — Micro-breakout execution engine (1m/3m)
+
+**Summary**
+
+- **`PAPER_ENGINE_MODE=micro`:** Replaces 15m alpha tick with volume-acceleration entries (3× 1h vol MA in 2m window + ROC), equity-% sizing from live NAV, adaptive 0.5% trail after +1.5%, 24h drawdown pause from `paper_portfolio_snapshots`.
+- **Modules:** `micro-scalp-*.ts`, `paper-scalp-micro-klines.ts`, `live-micro-order.ts` (IOC limit helper for live path).
+- **Env:** `MICRO_SCALP_INTERVAL=1m|3m`, `MICRO_VOLUME_SPIKE_MULT`, `MICRO_TRAIL_ARM_PCT`, `MICRO_TRAIL_GAP_PCT`, `MICRO_MAX_DRAWDOWN_PCT`, `MICRO_MAX_OPEN`.
+
+---
+
 ## 2026-05-19 — Paper portfolio DB persistence (session P&L / history)
 
 **Summary**

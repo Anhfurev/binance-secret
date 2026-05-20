@@ -165,6 +165,16 @@ export function humanPaperScalpReason(summary: string): string {
       "Alpha Shield RISK_OFF — hunting SHORT on bearish alt velocity (≤−1.2%)",
     "atr-trailing-stop":
       "ATR trailing floor hit — locked intraday gains at ratcheted stop",
+    "no-acceleration":
+      "Micro mode — no 3× volume spike + positive ROC on 1m/3m",
+    "no-acceleration-or-chop":
+      "Micro mode — no edge after fees, or sideways chop filter",
+    "drawdown-pause-24h":
+      "24h NAV drawdown limit — PAUSED, no new entries",
+    "micro-trail-0.5pct":
+      "Micro trailing stop — 0.5% below peak after +1.5% arm",
+    "micro-stop":
+      "Micro initial stop hit before trail armed",
     "pyramid-layer-added":
       "Pyramid scale-in — added 50% layer on risk-free winner",
     "velocity-tp-70":
@@ -183,6 +193,9 @@ export function humanPaperScalpReason(summary: string): string {
     return `SHORT opened — ${summary.replace("opened-short:", "").replace(/:/g, " ")}`;
   }
   if (summary.startsWith("opened:")) {
+    if (summary.includes("micro-acceleration")) {
+      return "Micro acceleration entry — 3× volume spike + positive ROC";
+    }
     return `BUY filled — ${summary.replace("opened:", "").replace(/:/g, " ")}`;
   }
   if (summary.startsWith("closed:")) {

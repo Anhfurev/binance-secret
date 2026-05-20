@@ -1,5 +1,9 @@
 import { percentOf, recalculateAccountMetrics } from "@/lib/demo-account";
 import { formatAssetPrice } from "@/lib/trading/paper-scalp-metrics-format";
+import {
+  computeTradeCloseEconomics,
+  logTradeEconomicsDebug,
+} from "@/lib/trading/paper-trade-economics";
 import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
 import { defaultScalpingSettings } from "@/lib/trading/settings";
 import type { Scalp1mSnapshot } from "@/lib/trading/paper-scalp-indicators";
@@ -40,14 +44,36 @@ export function closePaperScalpTrade(
   trade: DemoTrade,
   closePrice: number,
   reason: string,
+  options?: { signalExitPrice?: number },
 ): PaperAutomationTickResult {
   const isLong = trade.type === "buy";
-  const rawPnl = isLong
-    ? (closePrice - trade.entryPrice) * trade.amount
-    : (trade.entryPrice - closePrice) * trade.amount;
-  const pnl = Number(rawPnl.toFixed(4));
+  const signalEntry =
+    trade.originalEntryPrice ?? trade.entryPrice;
+  const signalExit = options?.signalExitPrice ?? closePrice;
+
+  const economics = computeTradeCloseEconomics({
+    entryPrice: trade.entryPrice,
+    exitPrice: closePrice,
+    amount: trade.amount,
+    notionalUsdt: trade.value,
+    isLong,
+    signalEntryPrice: signalEntry,
+    signalExitPrice: signalExit,
+  });
+
+  logTradeEconomicsDebug({
+    symbol: trade.symbol,
+    reason,
+    economics,
+    entryPrice: trade.entryPrice,
+    exitPrice: closePrice,
+    signalEntry,
+    signalExit,
+  });
+
+  const pnl = Number(economics.netPnlUsdt.toFixed(4));
   const effectiveValue = trade.value;
-  const pnlPercent = Number(((pnl / effectiveValue) * 100).toFixed(2));
+  const pnlPercent = Number(economics.netPnlPct.toFixed(2));
   const newDailyPnl = (account.dailyPnl ?? 0) + pnl;
   const hitCb =
     newDailyPnl < 0 &&
@@ -61,8 +87,21 @@ export function closePaperScalpTrade(
     pnl,
     pnlPercent,
     closedAt: new Date(),
-    notes: `${trade.notes ?? ""} | exit:${reason}`.trim(),
+    notes: [
+      trade.notes ?? "",
+      `exit:${reason}`,
+      `rawPnl=${economics.rawPnlUsdt.toFixed(4)}`,
+      `fees=${(economics.entryFeeUsdt + economics.exitFeeUsdt).toFixed(4)}`,
+      `netPnl=${pnl}`,
+    ]
+      .filter(Boolean)
+      .join(" | ")
+      .trim(),
     tags: [...(trade.tags ?? []), "paper-scalp", reason],
+    executionNotes: [
+      ...(trade.executionNotes ?? []),
+      `econ:raw=${economics.rawPnlPct}% net=${economics.netPnlPct}% slipE=${economics.entrySlippagePct}% slipX=${economics.exitSlippagePct}%`,
+    ],
   };
 
   const newEquity = account.currentBalance + effectiveValue + pnl;
@@ -199,6 +238,7 @@ export function evaluateOpenPaperPosition(params: {
           trade,
           mark,
           "asset-protection-1.5pct-short",
+          { signalExitPrice: mark },
         ),
         stopAdjusted: false,
       };
@@ -208,7 +248,9 @@ export function evaluateOpenPaperPosition(params: {
     if (dropPct >= ASSET_PROTECTION_DROP_PCT) {
       return {
         account,
-        exit: closePaperScalpTrade(account, trade, mark, "asset-protection-1.5pct"),
+        exit: closePaperScalpTrade(account, trade, mark, "asset-protection-1.5pct", {
+          signalExitPrice: mark,
+        }),
         stopAdjusted: false,
       };
     }
@@ -242,6 +284,7 @@ export function evaluateOpenPaperPosition(params: {
           trailed,
           mark,
           "atr-trailing-stop-short",
+          { signalExitPrice: mark },
         ),
         stopAdjusted,
       };
@@ -254,6 +297,7 @@ export function evaluateOpenPaperPosition(params: {
           trailed,
           mark,
           "ema9-above-ema21-short-cover",
+          { signalExitPrice: mark },
         ),
         stopAdjusted,
       };
@@ -264,7 +308,9 @@ export function evaluateOpenPaperPosition(params: {
   if (mark <= trailed.stopLoss) {
     return {
       account: nextAccount,
-      exit: closePaperScalpTrade(nextAccount, trailed, mark, "atr-trailing-stop"),
+      exit: closePaperScalpTrade(nextAccount, trailed, mark, "atr-trailing-stop", {
+        signalExitPrice: mark,
+      }),
       stopAdjusted,
     };
   }
@@ -272,7 +318,9 @@ export function evaluateOpenPaperPosition(params: {
   if (snap?.bearishCross) {
     return {
       account: nextAccount,
-      exit: closePaperScalpTrade(nextAccount, trailed, mark, "ema9-below-ema21"),
+      exit: closePaperScalpTrade(nextAccount, trailed, mark, "ema9-below-ema21", {
+        signalExitPrice: mark,
+      }),
       stopAdjusted,
     };
   }

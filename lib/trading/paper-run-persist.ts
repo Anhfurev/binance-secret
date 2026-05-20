@@ -6,11 +6,11 @@ import {
 import { writeServerLogFromError } from "@/lib/server-logs";
 import {
   ensurePaperWorkspaceBaseline,
-  recordPaperPortfolioSnapshot,
   type PaperWorkspaceDbCtx,
 } from "@/lib/trading/paper-portfolio-db";
-import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
+import { applyLiveProfileNav } from "@/lib/trading/paper-profile-live";
 import { queuePaperTradesSync } from "@/lib/trading/paper-trades-sync";
+import { resolvePaperTradesUserId } from "@/lib/trading/paper-trades-sync";
 import type { CoinData, DemoAccount } from "@/lib/types";
 
 export type PaperPersistOutcome = {
@@ -48,14 +48,17 @@ export function queuePaperWorkspacePersist(params: {
     account,
   });
 
-  if (dbCtx) {
+  const userId =
+    dbCtx?.userId ?? resolvePaperTradesUserId(ownerType, ownerId);
+
+  if (dbCtx && userId) {
     void (async () => {
       await ensurePaperWorkspaceBaseline({ ctx: dbCtx, account });
-      const nav = computePaperWorkspaceNav(account, marketCoins);
-      await recordPaperPortfolioSnapshot({
-        ctx: dbCtx,
-        nav,
-        openLegCount: account.openPositions.length,
+      await applyLiveProfileNav({
+        userId,
+        account,
+        marketCoins,
+        dbCtx,
       });
     })().catch((error: unknown) => {
       const err = error instanceof Error ? error : new Error(String(error));

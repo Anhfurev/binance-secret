@@ -15,10 +15,8 @@ import {
   resolveBtcCandles,
   resolveBtcSnapshot,
 } from "@/lib/trading/paper-scalp-regime";
-import {
-  enrichNavWithDbMetrics,
-  recordPaperPortfolioSnapshot,
-} from "@/lib/trading/paper-portfolio-db";
+import { enrichNavWithDbMetrics } from "@/lib/trading/paper-portfolio-db";
+import { resolvePaperEngineMode } from "@/lib/trading/paper-scalp-engine-mode";
 import {
   computePaperWorkspaceNav,
   formatNavLogLine,
@@ -63,6 +61,8 @@ function resolveTradingAction(summary: string): string {
   if (summary.startsWith("opened-short:")) return "SHORT";
   if (summary.startsWith("opened:")) return "BUY";
   if (summary.startsWith("closed:")) return "SELL";
+  if (summary.includes("micro-acceleration")) return "BUY";
+  if (summary === "drawdown-pause-24h") return "PAUSED";
   if (summary.startsWith("velocity-tp-70:")) return "VELOCITY_TP";
   if (summary === "pyramid-layer-added") return "PYRAMID";
   if (summary === "holding-position") return "HOLD";
@@ -141,6 +141,9 @@ async function executePaperScalpOrchestrator(): Promise<
   }
 
   const prepared = await preparePaperRun(listResult.data);
+  console.log(
+    `[paper-scalp] orchestrator engine=${prepared.engineMode} snapshots=${prepared.scalpSnapshots.size} accounts=${prepared.accountByKey.size}`,
+  );
   const sampleSettings = listResult.data[0]?.snapshot.paperSettings;
   const momentum = resolvePaperMomentumSettings(
     sampleSettings ?? {},
@@ -183,7 +186,13 @@ async function executePaperScalpOrchestrator(): Promise<
     }
 
     const cached = prepared.accountByKey.get(key);
-    if (!cached) continue;
+    if (!cached) {
+      console.warn("[paper-scalp] skip workspace — not in prepared.accountByKey", {
+        key,
+        engineMode: prepared.engineMode,
+      });
+      continue;
+    }
 
     const dbCtx = prepared.dbCtxByKey.get(key) ?? cached.dbCtx;
     const alignedWallet = alignPaperScalpWallet(cached.account, {
@@ -191,15 +200,22 @@ async function executePaperScalpOrchestrator(): Promise<
     });
     const walletReset = paperWalletWasAligned(cached.account, alignedWallet);
 
-    const result = runPaperTradingAutomationTick({
+    const result = await runPaperTradingAutomationTick({
       account: alignedWallet,
       marketCoins: prepared.marketCoins,
       scalpSnapshots: prepared.scalpSnapshots,
       candlesBySymbol: prepared.candlesBySymbol,
+      candles1m: prepared.candles1mBySymbol,
+      candles3m: prepared.candles3mBySymbol,
       apiDegraded: prepared.apiDegraded,
       autoPilotMode: cached.autoPilotMode,
       copyProfile: cached.copyProfile,
       paperSettings: cached.paperSettings,
+      workspaceKey: key,
+      ownerType: workspace.ownerType,
+      ownerId: workspace.ownerId,
+      userId: prepared.dbCtxByKey.get(key)?.userId,
+      dbCtx: prepared.dbCtxByKey.get(key) ?? undefined,
     });
 
     const nav = enrichNavWithDbMetrics(

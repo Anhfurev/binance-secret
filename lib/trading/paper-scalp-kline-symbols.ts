@@ -2,6 +2,8 @@ export const BINANCE_KLINES_ENDPOINT =
   "https://api.binance.com/api/v3/klines";
 
 export const KLINE_INTERVAL_15M = "15m";
+export const KLINE_INTERVAL_1M = "1m";
+export const KLINE_INTERVAL_3M = "3m";
 
 /** @deprecated Paper scalp now uses 15m — alias for legacy imports. */
 export const KLINE_INTERVAL_1H = KLINE_INTERVAL_15M;

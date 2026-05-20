@@ -3,6 +3,14 @@ import { mockCoins } from "@/lib/mock-data";
 import type { DemoWorkspaceRecord } from "@/lib/supabase-demo";
 import type { Scalp1mSnapshot, ScalpCandle } from "@/lib/trading/paper-scalp-indicators";
 import {
+  resolvePaperEngineMode,
+  type PaperEngineMode,
+} from "@/lib/trading/paper-scalp-engine-mode";
+import {
+  buildMockMicroHarvest,
+  harvestMicroCandlesParallel,
+} from "@/lib/trading/paper-scalp-micro-klines";
+import {
   buildMockScalpSnapshots,
   loadPaperScalpSnapshotsResilient,
   resolvePaperScalpSymbols,
@@ -14,6 +22,8 @@ import {
   mergePaperAccountFromDatabase,
   type PaperWorkspaceDbCtx,
 } from "@/lib/trading/paper-portfolio-db";
+import { mergeAccountWithLiveProfile } from "@/lib/trading/paper-profile-live";
+import { resolvePaperTradesUserId } from "@/lib/trading/paper-trades-sync";
 import type { CoinData, DemoAccount } from "@/lib/types";
 
 export type CachedWorkspaceAccount = {
@@ -36,8 +46,11 @@ export type PreparedPaperRun = {
   snapshotSource: "binance" | "mock";
   marketSource: "15m-snapshots" | "mock-fallback" | "mixed";
   apiDegraded: boolean;
+  engineMode: PaperEngineMode;
   accountByKey: Map<string, CachedWorkspaceAccount>;
   dbCtxByKey: Map<string, PaperWorkspaceDbCtx>;
+  candles1mBySymbol: Map<string, ScalpCandle[]>;
+  candles3mBySymbol: Map<string, ScalpCandle[]>;
 };
 
 function workspaceKey(ws: DemoWorkspaceRecord): string {
@@ -63,14 +76,44 @@ export async function preparePaperRun(
   let scalpSnapshots: Map<string, Scalp1mSnapshot>;
   let candlesBySymbol = new Map<string, ScalpCandle[]>();
 
+  const engineMode = resolvePaperEngineMode();
+  const microMode = engineMode === "micro";
+  let candles1mBySymbol = new Map<string, ScalpCandle[]>();
+  let candles3mBySymbol = new Map<string, ScalpCandle[]>();
+
+  console.log(
+    `[preparePaperRun] engine=${engineMode} workspaces=${workspaces.length} symbols=${symbols.length}`,
+  );
+
   try {
-    const loaded = await loadPaperScalpSnapshotsResilient(symbols, mockCoins);
+    const loaded = microMode
+      ? await harvestMicroCandlesParallel(symbols)
+      : await loadPaperScalpSnapshotsResilient(symbols, mockCoins);
     scalpSnapshots = loaded.snapshots;
     candlesBySymbol = loaded.candlesBySymbol;
     snapshotSource = loaded.source;
     apiDegraded = loaded.source === "mock" || loaded.snapshots.size === 0;
+    if (microMode && "candles1m" in loaded) {
+      candles1mBySymbol = loaded.candles1m;
+      candles3mBySymbol = loaded.candles3m;
+    }
+    if (microMode && loaded.snapshots.size === 0) {
+      const mock = buildMockMicroHarvest(symbols, mockCoins);
+      scalpSnapshots = mock.snapshots;
+      candlesBySymbol = mock.candlesBySymbol;
+      candles1mBySymbol = mock.candlesBySymbol;
+      snapshotSource = "mock";
+      apiDegraded = true;
+    }
   } catch {
-    scalpSnapshots = buildMockScalpSnapshots(symbols, mockCoins);
+    if (microMode) {
+      const mock = buildMockMicroHarvest(symbols, mockCoins);
+      scalpSnapshots = mock.snapshots;
+      candlesBySymbol = mock.candlesBySymbol;
+      candles1mBySymbol = mock.candlesBySymbol;
+    } else {
+      scalpSnapshots = buildMockScalpSnapshots(symbols, mockCoins);
+    }
     snapshotSource = "mock";
     apiDegraded = true;
   }
@@ -88,7 +131,13 @@ export async function preparePaperRun(
     const snap = ws.snapshot;
     const active = snap.profiles.find((p) => p.id === snap.activeId);
     const hydrated = active?.payload ? hydrateAccount(active.payload) : null;
-    if (!hydrated) return;
+    if (!hydrated) {
+      console.warn("[preparePaperRun] skip workspace — no active profile payload", {
+        workspaceKey: key,
+        activeId: snap.activeId,
+      });
+      return;
+    }
 
     const dbCtx = await loadPaperWorkspaceDbContext({
       ownerType: ws.ownerType,
@@ -97,10 +146,15 @@ export async function preparePaperRun(
     });
     if (dbCtx) dbCtxByKey.set(key, dbCtx);
 
-    const merged = await mergePaperAccountFromDatabase({
+    let merged = await mergePaperAccountFromDatabase({
       account: normalizeAccount(hydrated),
       ctx: dbCtx,
     });
+
+    const userId = resolvePaperTradesUserId(ws.ownerType, ws.ownerId);
+    if (userId) {
+      merged = await mergeAccountWithLiveProfile(userId, merged);
+    }
 
     accountByKey.set(key, {
       workspaceKey: key,
@@ -116,6 +170,10 @@ export async function preparePaperRun(
 
   await Promise.all(hydrateJobs);
 
+  console.log(
+    `[preparePaperRun] ready engine=${engineMode} accounts=${accountByKey.size} snapshots=${scalpSnapshots.size} source=${snapshotSource}`,
+  );
+
   return {
     workspaces,
     symbols,
@@ -125,7 +183,10 @@ export async function preparePaperRun(
     snapshotSource,
     marketSource,
     apiDegraded,
+    engineMode,
     accountByKey,
     dbCtxByKey,
+    candles1mBySymbol,
+    candles3mBySymbol,
   };
 }
