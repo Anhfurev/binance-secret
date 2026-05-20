@@ -366,11 +366,15 @@ async function recordMasterPortfolioSnapshot(params: {
     ),
     ctx.metrics ?? null,
   );
-  await recordPaperPortfolioSnapshot({
-    ctx,
-    nav,
-    openLegCount: params.masterAccount.openPositions.length,
-  });
+  try {
+    await recordPaperPortfolioSnapshot({
+      ctx,
+      nav,
+      openLegCount: params.masterAccount.openPositions.length,
+    });
+  } catch {
+    /* snapshot is best-effort — never fail the tick */
+  }
 }
 
 /** Sync return — Telegram on high-signal or ULAT 10m tactical pulse. */

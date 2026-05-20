@@ -69,8 +69,15 @@ export function sanitizePaperWorkspaceNav(nav: PaperWorkspaceNav): PaperWorkspac
   };
 }
 
-/** Safe NAV for DB insert — never NaN/null. */
+/** Safe NAV for DB insert — never NaN/null (Postgres rejects JSON null). */
 export function coerceNavUsdtForSnapshot(nav: PaperWorkspaceNav): number {
-  const clean = sanitizePaperWorkspaceNav(nav);
-  return clean.portfolio_nav_usdt;
+  const wallet = resolvePaperScalpWalletUsd();
+  try {
+    const clean = sanitizePaperWorkspaceNav(nav);
+    const n = Number(clean.portfolio_nav_usdt);
+    if (Number.isFinite(n) && n >= 0) return Number(n.toFixed(4));
+    return wallet;
+  } catch {
+    return wallet;
+  }
 }

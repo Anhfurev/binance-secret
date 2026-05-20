@@ -12,6 +12,7 @@ import {
 } from "@/lib/trading/paper-heartbeat-lock";
 import { resolvePaperEngineMode } from "@/lib/trading/paper-scalp-engine-mode";
 import { flushPendingManifestTelegram } from "@/lib/trading/paper-scalp-engine-manifest";
+import { PAPER_SNAPSHOT_MODULE_TAG } from "@/lib/trading/paper-portfolio-snapshot";
 import { runPaperScalpOrchestrator } from "@/lib/trading/paper-run-orchestrator";
 import { warnPaperTelegramEnvOnce } from "@/lib/trading/paper-telegram-env";
 import {
@@ -54,7 +55,7 @@ async function handlePaperRun(request: NextRequest): Promise<NextResponse> {
   const engineMode = resolvePaperEngineMode();
   warnPaperTelegramEnvOnce();
   console.log(
-    `[paper-scalp-route] tick start mode=${engineMode} PAPER_ENGINE_MODE=${String(process.env.PAPER_ENGINE_MODE ?? "(default micro)")}`,
+    `[paper-scalp-route] tick start mode=${engineMode} snapshot=${PAPER_SNAPSHOT_MODULE_TAG} PAPER_ENGINE_MODE=${String(process.env.PAPER_ENGINE_MODE ?? "(default micro)")}`,
   );
 
   const velocityWake =

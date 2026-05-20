@@ -57,8 +57,9 @@ export function queuePaperWorkspacePersist(params: {
         dbCtx,
       });
     })().catch((error: unknown) => {
+      if (process.env.PAPER_DEBUG !== "1") return;
       const err = error instanceof Error ? error : new Error(String(error));
-      console.warn("[paper-portfolio-db] async snapshot failed", {
+      console.log("[paper-profile-live] async persist failed", {
         workspaceKey,
         message: err.message,
       });

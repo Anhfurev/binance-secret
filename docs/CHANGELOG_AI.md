@@ -8,6 +8,16 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-20 — Silent paper DB logs (no snapshot/position spam)
+
+**Summary**
+
+- **`paper-portfolio-snapshot.ts`:** Slim-only inserts; legacy path only if `PAPER_SNAPSHOT_LEGACY=1`; no `console.warn` (use `PAPER_DEBUG=1` to trace).
+- **`paper-positions-db.ts`:** Invalid-leg / insert failures debug-only.
+- **`paper-run-persist.ts`:** Profile async errors debug-only.
+
+---
+
 ## 2026-05-20 — Slim snapshot schema (no total_nav_usdt) + NAV NaN fix
 
 **Summary**

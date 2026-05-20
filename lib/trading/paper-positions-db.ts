@@ -144,13 +144,13 @@ export async function upsertOpenPaperPosition(params: {
 
   const row = coercePositionInsert(params.trade);
   if (!row) {
-    console.warn("[paper_positions] skip insert — invalid leg", {
-      userId: `${userId.slice(0, 8)}…`,
-      leg: params.trade.id,
-      symbol: params.trade.symbol,
-      entry: params.trade.entryPrice,
-      qty: params.trade.amount,
-    });
+    if (process.env.PAPER_DEBUG === "1") {
+      console.log("[paper_positions] skip insert — invalid leg", {
+        userId: `${userId.slice(0, 8)}…`,
+        leg: params.trade.id,
+        symbol: params.trade.symbol,
+      });
+    }
     return;
   }
 
@@ -167,8 +167,8 @@ export async function upsertOpenPaperPosition(params: {
     },
   ]);
 
-  if (error) {
-    console.warn("[paper_positions] insert failed", {
+  if (error && process.env.PAPER_DEBUG === "1") {
+    console.log("[paper_positions] insert failed", {
       userId: `${userId.slice(0, 8)}…`,
       leg: params.trade.id,
       symbol: row.symbol,
