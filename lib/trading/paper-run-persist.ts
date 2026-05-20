@@ -4,10 +4,7 @@ import {
   type DemoWorkspaceSnapshot,
 } from "@/lib/supabase-demo";
 import { writeServerLogFromError } from "@/lib/server-logs";
-import {
-  ensurePaperWorkspaceBaseline,
-  type PaperWorkspaceDbCtx,
-} from "@/lib/trading/paper-portfolio-db";
+import type { PaperWorkspaceDbCtx } from "@/lib/trading/paper-portfolio-db";
 import { applyLiveProfileNav } from "@/lib/trading/paper-profile-live";
 import { queuePaperTradesSync } from "@/lib/trading/paper-trades-sync";
 import { resolvePaperTradesUserId } from "@/lib/trading/paper-trades-sync";
@@ -53,7 +50,6 @@ export function queuePaperWorkspacePersist(params: {
 
   if (dbCtx && userId) {
     void (async () => {
-      await ensurePaperWorkspaceBaseline({ ctx: dbCtx, account });
       await applyLiveProfileNav({
         userId,
         account,

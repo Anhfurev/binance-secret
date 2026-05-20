@@ -1,7 +1,6 @@
 import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import {
-  ensurePaperWorkspaceBaseline,
   recordPaperPortfolioSnapshot,
   type PaperWorkspaceDbCtx,
 } from "@/lib/trading/paper-portfolio-db";
@@ -54,11 +53,9 @@ export async function applyLiveProfileNav(params: {
   }
 
   if (params.dbCtx) {
-    await ensurePaperWorkspaceBaseline({ ctx: params.dbCtx, account: params.account });
     await recordPaperPortfolioSnapshot({
       ctx: params.dbCtx,
       nav,
-      openLegCount: params.account.openPositions.length,
     });
   }
 
@@ -71,7 +68,7 @@ export async function loadLiveProfileNav(
   if (!supabaseAdmin) return null;
   const { data, error } = await supabaseAdmin
     .from("profiles")
-    .select("available_usdt,portfolio_nav_usdt,demo_balance,starting_balance")
+    .select("available_usdt,portfolio_nav_usdt,demo_balance")
     .eq("id", userId)
     .maybeSingle();
   if (error || !data) return null;

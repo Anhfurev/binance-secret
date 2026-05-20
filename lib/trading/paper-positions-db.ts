@@ -5,16 +5,15 @@ import type { DemoTrade } from "@/lib/types";
 
 export type PaperPositionRow = {
   id: string;
-  paper_leg_id: string;
+  user_id: string;
   symbol: string;
   side: string;
   entry_price: number;
-  amount: number;
-  value_usdt: number;
+  qty: number;
   peak_price: number;
-  stop_loss: number;
-  trail_armed: boolean;
-  status: string;
+  trail_price: number;
+  layer: number;
+  opened_at: string;
 };
 
 function num(v: unknown, fb = 0): number {
@@ -22,36 +21,49 @@ function num(v: unknown, fb = 0): number {
   return Number.isFinite(n) ? n : fb;
 }
 
+function normSymbol(symbol: string): string {
+  const s = symbol.toUpperCase().replace(/\//g, "");
+  return s.endsWith("USDT") ? s : `${s}USDT`;
+}
+
+function readMicroTrailArmPct(): number {
+  const n = Number(String(process.env.MICRO_TRAIL_ARM_PCT ?? "1.5").trim());
+  return Number.isFinite(n) && n > 0 ? n : 1.5;
+}
+
+export function isPaperPositionTrailArmed(row: PaperPositionRow): boolean {
+  const arm = readMicroTrailArmPct() / 100;
+  return row.peak_price > row.entry_price * (1 + arm);
+}
+
 function mapRow(raw: Record<string, unknown>): PaperPositionRow {
   return {
     id: String(raw.id),
-    paper_leg_id: String(raw.paper_leg_id),
-    symbol: String(raw.symbol),
+    user_id: String(raw.user_id),
+    symbol: normSymbol(String(raw.symbol)),
     side: String(raw.side ?? "LONG"),
     entry_price: num(raw.entry_price),
-    amount: num(raw.amount),
-    value_usdt: num(raw.value_usdt),
+    qty: num(raw.qty),
     peak_price: num(raw.peak_price),
-    stop_loss: num(raw.stop_loss),
-    trail_armed: raw.trail_armed === true,
-    status: String(raw.status ?? "open"),
+    trail_price: num(raw.trail_price),
+    layer: Math.max(0, Math.floor(num(raw.layer))),
+    opened_at: String(raw.opened_at ?? new Date().toISOString()),
   };
 }
 
 export async function loadOpenPaperPositions(
-  workspaceKey: string,
+  userId: string,
 ): Promise<PaperPositionRow[]> {
-  if (!supabaseAdmin) return [];
+  if (!supabaseAdmin || !userId) return [];
   const { data, error } = await supabaseAdmin
     .from("paper_positions")
     .select(
-      "id,paper_leg_id,symbol,side,entry_price,amount,value_usdt,peak_price,stop_loss,trail_armed,status",
+      "id,user_id,symbol,side,entry_price,qty,peak_price,trail_price,layer,opened_at",
     )
-    .eq("workspace_key", workspaceKey)
-    .eq("status", "open");
+    .eq("user_id", userId);
   if (error) {
     console.warn("[paper_positions] load open failed", {
-      workspaceKey,
+      userId,
       message: error.message,
     });
     return [];
@@ -62,38 +74,40 @@ export async function loadOpenPaperPositions(
 export async function upsertOpenPaperPosition(params: {
   ownerType: DemoWorkspaceOwnerType;
   ownerId: string;
-  workspaceKey: string;
   trade: DemoTrade;
 }): Promise<void> {
   if (!supabaseAdmin) return;
   const userId = resolvePaperTradesUserId(params.ownerType, params.ownerId);
   if (!userId) return;
 
-  const peak = trade.highestPriceReached ?? trade.entryPrice;
-  const { error } = await supabaseAdmin.from("paper_positions").upsert(
+  const symbol = normSymbol(params.trade.symbol);
+  const peak = params.trade.highestPriceReached ?? params.trade.entryPrice;
+  const trail = params.trade.stopLoss ?? params.trade.entryPrice;
+
+  await supabaseAdmin
+    .from("paper_positions")
+    .delete()
+    .eq("user_id", userId)
+    .eq("symbol", symbol);
+
+  const { error } = await supabaseAdmin.from("paper_positions").insert([
     {
       user_id: userId,
-      workspace_key: params.workspaceKey,
-      owner_type: params.ownerType,
-      owner_id: params.ownerId,
-      paper_leg_id: trade.id,
-      symbol: trade.symbol,
-      side: trade.direction ?? "LONG",
-      entry_price: trade.entryPrice,
-      amount: trade.amount,
-      value_usdt: trade.value,
+      symbol,
+      side: params.trade.direction ?? "LONG",
+      entry_price: params.trade.entryPrice,
+      qty: params.trade.amount,
       peak_price: peak,
-      stop_loss: trade.stopLoss,
-      trail_armed: false,
-      status: "open",
-      opened_at: trade.openedAt.toISOString(),
-      updated_at: new Date().toISOString(),
+      trail_price: trail,
+      layer: params.trade.pyramidLayers ?? 0,
+      opened_at: params.trade.openedAt.toISOString(),
     },
-    { onConflict: "workspace_key,paper_leg_id" },
-  );
+  ]);
+
   if (error) {
-    console.warn("[paper_positions] upsert failed", {
-      leg: trade.id,
+    console.warn("[paper_positions] insert failed", {
+      leg: params.trade.id,
+      symbol,
       message: error.message,
     });
   }
@@ -102,65 +116,85 @@ export async function upsertOpenPaperPosition(params: {
 export async function updatePaperPositionTrail(params: {
   id: string;
   peak_price: number;
-  stop_loss: number;
-  trail_armed: boolean;
+  trail_price: number;
 }): Promise<void> {
   if (!supabaseAdmin) return;
-  await supabaseAdmin
+  const { error } = await supabaseAdmin
     .from("paper_positions")
     .update({
       peak_price: params.peak_price,
-      stop_loss: params.stop_loss,
-      trail_armed: params.trail_armed,
-      updated_at: new Date().toISOString(),
+      trail_price: params.trail_price,
     })
     .eq("id", params.id);
+  if (error) {
+    console.warn("[paper_positions] trail update failed", {
+      id: params.id,
+      message: error.message,
+    });
+  }
 }
 
-export async function closePaperPositionRow(
-  id: string,
-  reason: string,
-): Promise<void> {
+export async function closePaperPositionRow(id: string): Promise<void> {
   if (!supabaseAdmin) return;
-  await supabaseAdmin
+  const { error } = await supabaseAdmin
     .from("paper_positions")
-    .update({
-      status: "closed",
-      closed_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      extra: { exit_reason: reason },
-    })
+    .delete()
     .eq("id", id);
+  if (error) {
+    console.warn("[paper_positions] delete failed", {
+      id,
+      message: error.message,
+    });
+  }
 }
 
 export function demoTradeFromPositionRow(row: PaperPositionRow): DemoTrade {
+  const isShort = row.side === "SHORT";
+  const value = row.qty * row.entry_price;
   return {
-    id: row.paper_leg_id,
+    id: row.id,
     signalId: "micro-acceleration",
     coinId: row.symbol.replace("USDT", ""),
     symbol: row.symbol,
-    type: "buy",
-    direction: row.side === "SHORT" ? "SHORT" : "LONG",
+    type: isShort ? "sell" : "buy",
+    direction: isShort ? "SHORT" : "LONG",
     entryPrice: row.entry_price,
-    amount: row.amount,
-    value: row.value_usdt,
+    amount: row.qty,
+    value,
     status: "open",
-    stopLoss: row.stop_loss,
+    stopLoss: row.trail_price,
     takeProfit: row.entry_price * 1.5,
     highestPriceReached: row.peak_price,
-    openedAt: new Date(),
+    openedAt: new Date(row.opened_at),
     followedSignal: false,
+    pyramidLayers: row.layer,
     tags: ["micro-scalp"],
   };
+}
+
+export function matchOpenLegToPositionRow(
+  openPositions: DemoTrade[],
+  row: PaperPositionRow,
+): DemoTrade | undefined {
+  const sym = normSymbol(row.symbol);
+  return openPositions.find((p) => {
+    if (normSymbol(p.symbol) !== sym) return false;
+    const ep = p.entryPrice;
+    return Math.abs(ep - row.entry_price) / Math.max(row.entry_price, 1e-9) < 0.002;
+  });
 }
 
 export async function syncOpenPositionsToDb(params: {
   ownerType: DemoWorkspaceOwnerType;
   ownerId: string;
-  workspaceKey: string;
   openTrades: DemoTrade[];
 }): Promise<void> {
+  if (!isSupabaseAdminConfigured) return;
   for (const trade of params.openTrades) {
-    await upsertOpenPaperPosition({ ...params, trade });
+    await upsertOpenPaperPosition({
+      ownerType: params.ownerType,
+      ownerId: params.ownerId,
+      trade,
+    });
   }
 }

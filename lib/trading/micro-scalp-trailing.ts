@@ -1,5 +1,6 @@
 import { closePaperScalpTrade } from "@/lib/trading/paper-scalp-positions";
 import { applyLiveProfileNav } from "@/lib/trading/paper-profile-live";
+import { syncPaperTradeImmediately } from "@/lib/trading/paper-trades-sync";
 import { resolvePaperLiveMarkPrice } from "@/lib/trading/paper-scalp-mark-price";
 import {
   computeTradeCloseEconomics,
@@ -7,9 +8,12 @@ import {
 import {
   closePaperPositionRow,
   demoTradeFromPositionRow,
+  isPaperPositionTrailArmed,
+  matchOpenLegToPositionRow,
   updatePaperPositionTrail,
   type PaperPositionRow,
 } from "@/lib/trading/paper-positions-db";
+import type { DemoWorkspaceOwnerType } from "@/lib/supabase-demo";
 import type { PaperWorkspaceDbCtx } from "@/lib/trading/paper-portfolio-db";
 import type { Scalp1mSnapshot, ScalpCandle } from "@/lib/trading/paper-scalp-indicators";
 import type { PaperAutomationTickResult } from "@/lib/trading/paper-scalp-types";
@@ -93,6 +97,8 @@ export type MicroTrailingContext = {
   account: DemoAccount;
   workspaceKey: string;
   userId: string;
+  ownerType: DemoWorkspaceOwnerType;
+  ownerId: string;
   marketCoins: CoinData[];
   snapshots: Map<string, Scalp1mSnapshot>;
   dbCtx?: PaperWorkspaceDbCtx | null;
@@ -123,32 +129,32 @@ export async function runMicroTrailingPass(
       row.entry_price,
     );
 
+    const priorArmed = isPaperPositionTrailArmed(row);
     const trail = computeMicroTrailState(
       row.entry_price,
       mark,
       row.peak_price,
-      row.stop_loss,
-      row.trail_armed,
+      row.trail_price,
+      priorArmed,
     );
 
     if (
       trail.peak !== row.peak_price ||
-      trail.stopLoss !== row.stop_loss ||
-      trail.armed !== row.trail_armed
+      trail.stopLoss !== row.trail_price ||
+      trail.armed !== priorArmed
     ) {
       stopAdjusted = true;
       await updatePaperPositionTrail({
         id: row.id,
         peak_price: trail.peak,
-        stop_loss: trail.stopLoss,
-        trail_armed: trail.armed,
+        trail_price: trail.stopLoss,
       });
     }
 
     if (mark > trail.stopLoss) continue;
 
     const leg =
-      account.openPositions.find((p) => p.id === row.paper_leg_id) ??
+      matchOpenLegToPositionRow(account.openPositions, row) ??
       demoTradeFromPositionRow(row);
 
     logMicroTrailClose(row.symbol, leg, mark, gapPct);
@@ -158,7 +164,17 @@ export async function runMicroTrailingPass(
     });
     account = exit.account;
     exits.push(exit);
-    await closePaperPositionRow(row.id, `micro-trail-${gapPct}pct`);
+    await closePaperPositionRow(row.id);
+
+    const closedLeg = account.tradeHistory[0];
+    if (closedLeg) {
+      await syncPaperTradeImmediately({
+        ownerType: context.ownerType,
+        ownerId: context.ownerId,
+        workspaceKey: context.workspaceKey,
+        trade: closedLeg,
+      });
+    }
 
     await applyLiveProfileNav({
       userId: context.userId,

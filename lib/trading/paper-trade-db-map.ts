@@ -12,66 +12,41 @@ function str(value: unknown, fallback = ""): string {
 }
 
 export function mapTradeRowToDemo(row: TradeDbRow): DemoTrade | null {
-  const extra =
-    row.extra && typeof row.extra === "object"
-      ? (row.extra as Record<string, unknown>)
-      : {};
-  const paperLegId = str(extra.paper_leg_id);
-  if (!paperLegId) return null;
+  const closedAt = row.closed_at ? new Date(String(row.closed_at)) : null;
+  if (!closedAt || Number.isNaN(closedAt.getTime())) return null;
 
-  const statusRaw = str(row.status, "open").toLowerCase();
-  const status =
-    statusRaw === "open"
-      ? "open"
-      : statusRaw === "stopped"
-        ? "stopped"
-        : "closed";
+  const id = str(row.id);
+  if (!id) return null;
 
-  const type = str(row.type, "buy") === "sell" ? "sell" : "buy";
-  const directionRaw = str(extra.direction).toUpperCase();
-  const direction: "LONG" | "SHORT" | undefined =
-    directionRaw === "SHORT" || directionRaw === "LONG"
-      ? directionRaw
-      : type === "sell"
-        ? "SHORT"
-        : "LONG";
-
-  const openedAt = row.opened_at ? new Date(String(row.opened_at)) : new Date();
-  const closedAt = row.closed_at ? new Date(String(row.closed_at)) : undefined;
+  const side = str(row.side, "LONG").toUpperCase();
+  const isShort = side === "SHORT";
+  const entryPrice = num(row.entry_price);
+  const exitPrice = num(row.exit_price, entryPrice);
+  const qty = num(row.qty);
+  const netPnl = num(row.net_pnl);
 
   return {
-    id: paperLegId,
-    signalId: str(row.signalId, "paper-scalp"),
-    coinId: str(row.coinId, str(row.symbol, "unknown")),
+    id,
+    signalId: str(row.strategy_executed, "paper-scalp"),
+    coinId: str(row.symbol, "unknown").replace("USDT", ""),
     symbol: str(row.symbol),
-    type,
-    direction,
-    leverage: num(extra.leverage, 1) || 1,
-    marginUsed: num(extra.margin_used_usdt, num(row.value)),
-    entryPrice: num(row.entryPrice),
-    exitPrice: row.exitPrice != null ? num(row.exitPrice) : undefined,
-    amount: num(row.amount),
-    value: num(row.value),
-    status,
-    pnl: row.pnl != null ? num(row.pnl) : undefined,
-    pnlPercent: row.pnlPercent != null ? num(row.pnlPercent) : undefined,
-    openedAt,
+    type: isShort ? "sell" : "buy",
+    direction: isShort ? "SHORT" : "LONG",
+    entryPrice,
+    exitPrice,
+    amount: qty,
+    value: qty * entryPrice,
+    status: netPnl >= 0 ? "closed" : "stopped",
+    pnl: netPnl,
+    pnlPercent:
+      entryPrice > 0 && qty > 0
+        ? Number(((netPnl / (qty * entryPrice)) * 100).toFixed(2))
+        : undefined,
+    openedAt: closedAt,
     closedAt,
-    stopLoss: num(row.stopLoss),
-    takeProfit: num(row.takeProfit),
-    highestPriceReached:
-      extra.highest_price_reached != null
-        ? num(extra.highest_price_reached)
-        : undefined,
-    lowestPriceReached:
-      extra.lowest_price_reached != null
-        ? num(extra.lowest_price_reached)
-        : undefined,
-    velocityTakeProfitSecured: extra.velocity_tp_secured === true,
-    pyramidLayers: num(extra.pyramid_layers, 0),
-    notes: row.notes != null ? str(row.notes) : undefined,
-    tags: Array.isArray(extra.tags) ? extra.tags.map(String) : ["paper-scalp"],
-    followedSignal: row.followedSignal === true,
+    notes: str(row.strategy_executed) || undefined,
+    tags: ["paper-scalp"],
+    followedSignal: false,
   };
 }
 
@@ -91,7 +66,8 @@ export function mergeDemoTradesById(
     if (nextClosed >= prevClosed) byId.set(trade.id, trade);
   }
   return [...byId.values()].sort(
-    (a, b) => (b.closedAt?.getTime() ?? b.openedAt.getTime()) -
+    (a, b) =>
+      (b.closedAt?.getTime() ?? b.openedAt.getTime()) -
       (a.closedAt?.getTime() ?? a.openedAt.getTime()),
   );
 }

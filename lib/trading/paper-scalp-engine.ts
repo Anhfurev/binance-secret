@@ -98,7 +98,7 @@ export async function runMicroScalpEngineTick(
   let nav = computePaperWorkspaceNav(account, context.marketCoins);
 
   const drawdown = await evaluate24hDrawdownPause({
-    workspaceKey: context.workspaceKey,
+    userId: context.userId,
     currentNavUsdt: nav.portfolio_nav_usdt,
   });
   account = applyDrawdownPauseAccount(account, drawdown);
@@ -106,15 +106,16 @@ export async function runMicroScalpEngineTick(
   await syncOpenPositionsToDb({
     ownerType: context.ownerType,
     ownerId: context.ownerId,
-    workspaceKey: context.workspaceKey,
     openTrades: account.openPositions,
   });
 
-  const openPositions = await loadOpenPaperPositions(context.workspaceKey);
+  const openPositions = await loadOpenPaperPositions(context.userId);
   const trailPass = await runMicroTrailingPass(openPositions, candles1m, {
     account,
     workspaceKey: context.workspaceKey,
     userId: context.userId,
+    ownerType: context.ownerType,
+    ownerId: context.ownerId,
     marketCoins: context.marketCoins,
     snapshots,
     dbCtx: context.dbCtx,
@@ -216,7 +217,6 @@ export async function runMicroScalpEngineTick(
   await upsertOpenPaperPosition({
     ownerType: context.ownerType,
     ownerId: context.ownerId,
-    workspaceKey: context.workspaceKey,
     trade,
   });
 

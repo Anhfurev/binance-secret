@@ -8,6 +8,17 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-19 — Unified paper DB layer (4-table schema)
+
+**Summary**
+
+- Rewrote `paper-positions-db`, `paper-portfolio-db`, `paper-trades-sync`, `paper-trade-db-map`, `paper-profile-live`, `micro-scalp-drawdown` for clean-slate tables: `profiles`, `paper_positions`, `paper_portfolio_snapshots`, `trades` (lowercase snake_case columns only).
+- Open legs → `paper_positions` (`qty`, `trail_price`, `layer`); closed legs → `trades` (`raw_pnl`, `fees`, `net_pnl`, `strategy_executed`, `closed_at`); NAV snapshots → `user_id` + `portfolio_nav_usdt`.
+- Removed queries to `paper_workspace_baselines`, `extra` JSON filters, and PascalCase table names.
+- Migration reference: `supabase/migrations/20260520120000_paper_schema_unified.sql`.
+
+---
+
 ## 2026-05-19 — Live profile NAV sync (fix frozen $28)
 
 **Summary**

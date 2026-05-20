@@ -1,6 +1,10 @@
 import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
 import type { DemoWorkspaceOwnerType } from "@/lib/supabase-demo";
 import {
+  demoTradeFromPositionRow,
+  loadOpenPaperPositions,
+} from "@/lib/trading/paper-positions-db";
+import {
   mapTradeRowToDemo,
   mergeDemoTradesById,
 } from "@/lib/trading/paper-trade-db-map";
@@ -34,6 +38,26 @@ export type PaperWorkspaceDbCtx = {
   metrics: PaperPortfolioDbMetrics | null;
 };
 
+export function resolvePaperSessionBaseline(
+  account: DemoAccount,
+  fallbackNav?: number | null,
+): number {
+  if (account.startingBalance > 0) return account.startingBalance;
+  if (fallbackNav != null && fallbackNav > 0) return fallbackNav;
+  return resolvePaperScalpWalletUsd();
+}
+
+/** Legacy hook — session baseline is in-memory / profiles; no separate baseline table. */
+export async function ensurePaperWorkspaceBaseline(params: {
+  ctx: PaperWorkspaceDbCtx;
+  account: DemoAccount;
+}): Promise<number> {
+  return resolvePaperSessionBaseline(
+    params.account,
+    params.ctx.metrics?.sessionBaselineUsdt,
+  );
+}
+
 export async function loadPaperWorkspaceDbContext(params: {
   ownerType: DemoWorkspaceOwnerType;
   ownerId: string;
@@ -42,16 +66,12 @@ export async function loadPaperWorkspaceDbContext(params: {
   const userId = resolvePaperTradesUserId(params.ownerType, params.ownerId);
   if (!userId || !isSupabaseAdminConfigured || !supabaseAdmin) return null;
 
-  const [baseline, metrics] = await Promise.all([
-    loadWorkspaceBaseline(params.workspaceKey),
-    loadPaperPortfolioMetrics({
-      userId,
-      workspaceKey: params.workspaceKey,
-    }),
-  ]);
+  const metrics = await loadPaperPortfolioMetrics({ userId });
 
-  const sessionBaselineUsdt =
-    baseline?.starting_balance_usdt ?? metrics?.sessionBaselineUsdt ?? resolvePaperScalpWalletUsd();
+  const sessionBaselineUsdt = resolvePaperSessionBaseline(
+    { startingBalance: 0 } as DemoAccount,
+    metrics?.sessionBaselineUsdt,
+  );
 
   return {
     userId,
@@ -70,93 +90,37 @@ export async function loadPaperWorkspaceDbContext(params: {
   };
 }
 
-async function loadWorkspaceBaseline(
-  workspaceKey: string,
-): Promise<{ starting_balance_usdt: number } | null> {
-  if (!supabaseAdmin) return null;
-  const { data, error } = await supabaseAdmin
-    .from("paper_workspace_baselines")
-    .select("starting_balance_usdt")
-    .eq("workspace_key", workspaceKey)
-    .maybeSingle();
-  if (error) {
-    console.warn("[paper-portfolio-db] baseline load failed", {
-      workspaceKey,
-      message: error.message,
-    });
-    return null;
-  }
-  if (!data) return null;
-  return { starting_balance_usdt: num(data.starting_balance_usdt) };
-}
-
-export async function ensurePaperWorkspaceBaseline(params: {
-  ctx: PaperWorkspaceDbCtx;
-  account: DemoAccount;
-}): Promise<number> {
-  if (!supabaseAdmin) return params.account.startingBalance;
-
-  const floor = resolvePaperScalpWalletUsd();
-  const starting = num(
-    params.account.startingBalance > 0
-      ? params.account.startingBalance
-      : params.ctx.metrics?.sessionBaselineUsdt ?? floor,
-    floor,
-  );
-
-  const { error } = await supabaseAdmin.from("paper_workspace_baselines").upsert(
-    {
-      workspace_key: params.ctx.workspaceKey,
-      user_id: params.ctx.userId,
-      owner_type: params.ctx.ownerType,
-      owner_id: params.ctx.ownerId,
-      starting_balance_usdt: starting,
-      wallet_floor_usdt: floor,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "workspace_key", ignoreDuplicates: false },
-  );
-
-  if (error) {
-    console.warn("[paper-portfolio-db] baseline upsert failed", {
-      workspaceKey: params.ctx.workspaceKey,
-      message: error.message,
-    });
-  }
-  return starting;
-}
-
 export async function loadPaperTradesForWorkspace(
   userId: string,
-  workspaceKey: string,
 ): Promise<{ open: DemoAccount["openPositions"]; closed: DemoAccount["tradeHistory"] }> {
   if (!supabaseAdmin) return { open: [], closed: [] };
 
-  const { data, error } = await supabaseAdmin
-    .from("trades")
-    .select("*")
-    .eq("user_id", userId)
-    .eq("extra->>workspace_key", workspaceKey)
-    .eq("extra->>paper_scalp", "true")
-    .order("opened_at", { ascending: false })
-    .limit(TRADE_LOAD_LIMIT);
+  const [positionRows, tradesRes] = await Promise.all([
+    loadOpenPaperPositions(userId),
+    supabaseAdmin
+      .from("trades")
+      .select(
+        "id,user_id,symbol,side,entry_price,exit_price,qty,raw_pnl,fees,net_pnl,strategy_executed,closed_at",
+      )
+      .eq("user_id", userId)
+      .not("closed_at", "is", null)
+      .order("closed_at", { ascending: false })
+      .limit(TRADE_LOAD_LIMIT),
+  ]);
 
-  if (error) {
-    console.warn("[paper-portfolio-db] trades load failed", {
-      workspaceKey,
-      message: error.message,
-    });
-    return { open: [], closed: [] };
-  }
-
-  const open: DemoAccount["openPositions"] = [];
+  const open = positionRows.map((row) => demoTradeFromPositionRow(row));
   const closed: DemoAccount["tradeHistory"] = [];
 
-  for (const row of data ?? []) {
-    const trade = mapTradeRowToDemo(row as Record<string, unknown>);
-    if (!trade) continue;
-    if (trade.status === "open") open.push(trade);
-    else closed.push(trade);
+  if (tradesRes.error) {
+    console.warn("[paper-portfolio-db] trades load failed", {
+      userId,
+      message: tradesRes.error.message,
+    });
+  } else {
+    for (const row of tradesRes.data ?? []) {
+      const trade = mapTradeRowToDemo(row as Record<string, unknown>);
+      if (trade) closed.push(trade);
+    }
   }
 
   return { open, closed };
@@ -168,14 +132,12 @@ export async function mergePaperAccountFromDatabase(params: {
 }): Promise<DemoAccount> {
   if (!params.ctx) return params.account;
 
-  const { open, closed } = await loadPaperTradesForWorkspace(
-    params.ctx.userId,
-    params.ctx.workspaceKey,
-  );
+  const { open, closed } = await loadPaperTradesForWorkspace(params.ctx.userId);
 
-  const baseline =
-    params.ctx.metrics?.sessionBaselineUsdt ??
-    (await ensurePaperWorkspaceBaseline({ ctx: params.ctx, account: params.account }));
+  const baseline = await ensurePaperWorkspaceBaseline({
+    ctx: params.ctx,
+    account: params.account,
+  });
 
   const tradeHistory = mergeDemoTradesById(
     params.account.tradeHistory,
@@ -197,7 +159,6 @@ export async function mergePaperAccountFromDatabase(params: {
 
 export async function loadPaperPortfolioMetrics(params: {
   userId: string;
-  workspaceKey: string;
 }): Promise<PaperPortfolioDbMetrics | null> {
   if (!supabaseAdmin) return null;
 
@@ -205,85 +166,82 @@ export async function loadPaperPortfolioMetrics(params: {
   const at24h = new Date(now - MS_24H).toISOString();
   const at7d = new Date(now - MS_7D).toISOString();
 
-  const [snap24, snap7, tradesRes, baseline] = await Promise.all([
-    loadNavSnapshotAtOrBefore(params.workspaceKey, at24h),
-    loadNavSnapshotAtOrBefore(params.workspaceKey, at7d),
+  const [snap24, snap7, tradesRes, profileRes] = await Promise.all([
+    loadNavSnapshotAtOrBefore(params.userId, at24h),
+    loadNavSnapshotAtOrBefore(params.userId, at7d),
     supabaseAdmin
       .from("trades")
-      .select("pnl,status")
+      .select("net_pnl")
       .eq("user_id", params.userId)
-      .eq("extra->>workspace_key", params.workspaceKey)
-      .eq("extra->>paper_scalp", "true")
-      .in("status", ["closed", "stopped"]),
-    loadWorkspaceBaseline(params.workspaceKey),
+      .not("closed_at", "is", null),
+    supabaseAdmin
+      .from("profiles")
+      .select("demo_balance,portfolio_nav_usdt")
+      .eq("id", params.userId)
+      .maybeSingle(),
   ]);
 
   let lifetimeRealizedPnlUsdt = 0;
   let closedTradeCount = 0;
   if (!tradesRes.error) {
     for (const row of tradesRes.data ?? []) {
-      lifetimeRealizedPnlUsdt += num(row.pnl);
+      lifetimeRealizedPnlUsdt += num(row.net_pnl);
       closedTradeCount += 1;
     }
   }
 
-  lifetimeRealizedPnlUsdt = Number(lifetimeRealizedPnlUsdt.toFixed(4));
+  const profileNav = num(
+    profileRes.data?.portfolio_nav_usdt,
+    num(profileRes.data?.demo_balance),
+  );
 
   return {
-    sessionBaselineUsdt: num(
-      baseline?.starting_balance_usdt,
-      resolvePaperScalpWalletUsd(),
+    sessionBaselineUsdt: resolvePaperSessionBaseline(
+      { startingBalance: 0 } as DemoAccount,
+      profileNav > 0 ? profileNav : null,
     ),
     nav24hAgoUsdt: snap24,
     nav7dAgoUsdt: snap7,
-    lifetimeRealizedPnlUsdt,
+    lifetimeRealizedPnlUsdt: Number(lifetimeRealizedPnlUsdt.toFixed(4)),
     closedTradeCount,
   };
 }
 
 async function loadNavSnapshotAtOrBefore(
-  workspaceKey: string,
+  userId: string,
   isoBefore: string,
 ): Promise<number | null> {
   if (!supabaseAdmin) return null;
   const { data, error } = await supabaseAdmin
     .from("paper_portfolio_snapshots")
-    .select("total_nav_usdt")
-    .eq("workspace_key", workspaceKey)
+    .select("portfolio_nav_usdt")
+    .eq("user_id", userId)
     .lte("recorded_at", isoBefore)
     .order("recorded_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error || !data) return null;
-  const nav = num(data.total_nav_usdt);
+  const nav = num(data.portfolio_nav_usdt);
   return nav > 0 ? nav : null;
 }
 
 export async function recordPaperPortfolioSnapshot(params: {
   ctx: PaperWorkspaceDbCtx;
   nav: PaperWorkspaceNav;
-  openLegCount: number;
 }): Promise<void> {
   if (!supabaseAdmin) return;
 
   const { error } = await supabaseAdmin.from("paper_portfolio_snapshots").insert([
     {
       user_id: params.ctx.userId,
-      workspace_key: params.ctx.workspaceKey,
-      owner_type: params.ctx.ownerType,
-      owner_id: params.ctx.ownerId,
-      free_cash_usdt: params.nav.available_usdt,
-      open_legs_value_usdt: params.nav.open_positions_usdt,
-      total_nav_usdt: params.nav.portfolio_nav_usdt,
-      open_leg_count: params.openLegCount,
-      session_baseline_usdt: params.nav.starting_usdt,
-      lifetime_realized_pnl_usdt: params.nav.lifetime_realized_pnl_usdt ?? 0,
+      portfolio_nav_usdt: params.nav.portfolio_nav_usdt,
+      recorded_at: new Date().toISOString(),
     },
   ]);
 
   if (error) {
     console.warn("[paper-portfolio-db] snapshot insert failed", {
-      workspaceKey: params.ctx.workspaceKey,
+      userId: params.ctx.userId,
       message: error.message,
     });
   }

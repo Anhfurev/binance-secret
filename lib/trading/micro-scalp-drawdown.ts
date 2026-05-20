@@ -9,27 +9,27 @@ export function readMicroMaxDrawdownPct(): number {
 }
 
 async function navSnapshotAtOrBefore24h(
-  workspaceKey: string,
+  userId: string,
 ): Promise<number | null> {
   if (!supabaseAdmin) return null;
   const cutoff = new Date(Date.now() - MS_24H).toISOString();
   const { data, error } = await supabaseAdmin
     .from("paper_portfolio_snapshots")
-    .select("total_nav_usdt,recorded_at")
-    .eq("workspace_key", workspaceKey)
+    .select("portfolio_nav_usdt,recorded_at")
+    .eq("user_id", userId)
     .lte("recorded_at", cutoff)
     .order("recorded_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error) {
     console.warn("[micro-drawdown] paper_portfolio_snapshots lookup failed", {
-      workspaceKey,
+      userId,
       message: error.message,
     });
     return null;
   }
   if (!data) return null;
-  const nav = Number(data.total_nav_usdt);
+  const nav = Number(data.portfolio_nav_usdt);
   return Number.isFinite(nav) && nav > 0 ? nav : null;
 }
 
@@ -40,14 +40,14 @@ export type DrawdownPauseState = {
 };
 
 export async function evaluate24hDrawdownPause(params: {
-  workspaceKey: string | null;
+  userId: string | null;
   currentNavUsdt: number;
 }): Promise<DrawdownPauseState> {
-  if (!params.workspaceKey || !isSupabaseAdminConfigured) {
+  if (!params.userId || !isSupabaseAdminConfigured) {
     return { paused: false, dropPct: 0, baselineNav: null };
   }
 
-  const baselineNav = await navSnapshotAtOrBefore24h(params.workspaceKey);
+  const baselineNav = await navSnapshotAtOrBefore24h(params.userId);
   if (baselineNav == null) {
     return { paused: false, dropPct: 0, baselineNav: null };
   }
@@ -67,7 +67,7 @@ export async function evaluate24hDrawdownPause(params: {
 }
 
 export async function checkMicroDrawdownCircuit(params: {
-  workspaceKey: string | null;
+  userId: string | null;
   currentNavUsdt: number;
 }): Promise<boolean> {
   const state = await evaluate24hDrawdownPause(params);

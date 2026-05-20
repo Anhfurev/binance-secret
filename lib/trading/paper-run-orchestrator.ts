@@ -15,7 +15,10 @@ import {
   resolveBtcCandles,
   resolveBtcSnapshot,
 } from "@/lib/trading/paper-scalp-regime";
-import { enrichNavWithDbMetrics } from "@/lib/trading/paper-portfolio-db";
+import {
+  enrichNavWithDbMetrics,
+  recordPaperPortfolioSnapshot,
+} from "@/lib/trading/paper-portfolio-db";
 import { resolvePaperEngineMode } from "@/lib/trading/paper-scalp-engine-mode";
 import {
   computePaperWorkspaceNav,
@@ -242,11 +245,7 @@ async function executePaperScalpOrchestrator(): Promise<
           workspaceKey: key,
           trade: closedLeg,
         });
-        void recordPaperPortfolioSnapshot({
-          ctx: dbCtx,
-          nav,
-          openLegCount: result.account.openPositions.length,
-        });
+        void recordPaperPortfolioSnapshot({ ctx: dbCtx, nav });
       }
     }
     if (result.velocityPartial || result.summary.startsWith("velocity-tp-70:")) {
