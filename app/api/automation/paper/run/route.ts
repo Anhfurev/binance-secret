@@ -13,6 +13,7 @@ import {
 import { resolvePaperEngineMode } from "@/lib/trading/paper-scalp-engine-mode";
 import { flushPendingManifestTelegram } from "@/lib/trading/paper-scalp-engine-manifest";
 import { runPaperScalpOrchestrator } from "@/lib/trading/paper-run-orchestrator";
+import { warnPaperTelegramEnvOnce } from "@/lib/trading/paper-telegram-env";
 import {
   writeServerLogAsync,
   writeServerLogFromError,
@@ -51,6 +52,7 @@ async function handlePaperRun(request: NextRequest): Promise<NextResponse> {
   }
 
   const engineMode = resolvePaperEngineMode();
+  warnPaperTelegramEnvOnce();
   console.log(
     `[paper-scalp-route] tick start mode=${engineMode} PAPER_ENGINE_MODE=${String(process.env.PAPER_ENGINE_MODE ?? "(default micro)")}`,
   );

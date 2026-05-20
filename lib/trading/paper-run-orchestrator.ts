@@ -333,7 +333,8 @@ async function executePaperScalpOrchestrator(): Promise<
     symbols: prepared.symbols,
     btcRegimeActive,
     apiDegraded: prepared.apiDegraded,
-    tacticalPulseSummary: notify.reason === "tactical_pulse",
+    tacticalPulseSummary:
+      notify.reason === "tactical_pulse" || notify.reason === "periodic_pulse",
   });
 
   return finalizePaperTickRun(outcome, manifest, notify);
@@ -352,7 +353,7 @@ function finalizePaperTickRun(
     );
   } else {
     console.log(
-      `[paper-scalp-manifest] silent scan completed | ${outcome.durationMs.toFixed(0)}ms | scanned=${outcome.scanned}`,
+      `[paper-scalp-manifest] silent (no Telegram) | ${notify.reason} | ${outcome.durationMs.toFixed(0)}ms | scanned=${outcome.scanned}`,
     );
   }
   return outcome;

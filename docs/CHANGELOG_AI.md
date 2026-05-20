@@ -8,6 +8,17 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-20 — Paper NAV double-count fix ($28 cash + $38 legs → $66)
+
+**Summary**
+
+- **Bug:** `mergeAccountWithLiveProfile` reset `currentBalance` to profile `available_usdt` ($28) while open legs stayed in memory → NAV = cash + marks double-counted (~$66).
+- **`paper-cash-reconcile.ts`:** `dedupeOpenPositionsBySymbol` + `reconcilePaperAccountCash` (free cash = starting − deployed at entry).
+- **`paper-portfolio-db.ts`:** DB legs refresh trails only; no merge-by-id duplicate symbols into one workspace.
+- **Telegram:** After deploy, expect ~$28 NAV (or ~$9 cash + ~$19 marks for 2 legs), not $66 with $28 free cash.
+
+---
+
 ## 2026-05-19 — Paper trades varchar(50) + $28 wallet baseline fix
 
 **Summary**

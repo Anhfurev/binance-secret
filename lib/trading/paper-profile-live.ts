@@ -1,4 +1,5 @@
 import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
+import { normalizePaperWorkspaceAccount } from "@/lib/trading/paper-cash-reconcile";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import { resolvePaperScalpWalletUsd } from "@/lib/trading/paper-scalp-wallet";
 import {
@@ -26,7 +27,8 @@ export async function applyLiveProfileNav(params: {
   marketCoins: CoinData[];
   dbCtx?: PaperWorkspaceDbCtx | null;
 }): Promise<LiveProfileNav> {
-  const nav = computePaperWorkspaceNav(params.account, params.marketCoins);
+  const account = normalizePaperWorkspaceAccount(params.account);
+  const nav = computePaperWorkspaceNav(account, params.marketCoins);
   const walletTarget = resolvePaperScalpWalletUsd();
   const patch: LiveProfileNav = {
     available_usdt: nav.available_usdt,
@@ -90,25 +92,18 @@ export async function loadLiveProfileNav(
   };
 }
 
-/** Prefer Supabase profile cash over stale JSON workspace payload. */
+/** Anchor starting balance to configured wallet; reconcile free cash vs open legs. */
 export async function mergeAccountWithLiveProfile(
   userId: string,
   account: DemoAccount,
 ): Promise<DemoAccount> {
-  const live = await loadLiveProfileNav(userId);
   const walletTarget = resolvePaperScalpWalletUsd();
-  if (!live) {
-    return {
-      ...account,
-      startingBalance:
-        account.startingBalance > 0 ? account.startingBalance : walletTarget,
-    };
-  }
-  return {
+  const withBaseline = {
     ...account,
-    currentBalance: live.available_usdt,
-    startingBalance: walletTarget,
+    startingBalance:
+      account.startingBalance > 0 ? account.startingBalance : walletTarget,
   };
+  return normalizePaperWorkspaceAccount(withBaseline);
 }
 
 export function accountFromLiveNav(

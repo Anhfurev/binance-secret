@@ -22,6 +22,7 @@ import {
   mergePaperAccountFromDatabase,
   type PaperWorkspaceDbCtx,
 } from "@/lib/trading/paper-portfolio-db";
+import { normalizePaperWorkspaceAccount } from "@/lib/trading/paper-cash-reconcile";
 import { mergeAccountWithLiveProfile } from "@/lib/trading/paper-profile-live";
 import { resolvePaperTradesUserId } from "@/lib/trading/paper-db-user";
 import { logPaperDbBinding } from "@/lib/trading/paper-trades-db-safe";
@@ -157,6 +158,7 @@ export async function preparePaperRun(
     if (userId) {
       merged = await mergeAccountWithLiveProfile(userId, merged);
     }
+    merged = normalizePaperWorkspaceAccount(merged);
 
     accountByKey.set(key, {
       workspaceKey: key,

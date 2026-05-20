@@ -3,6 +3,7 @@
 export type ManifestDispatchReason =
   | "high_signal"
   | "tactical_pulse"
+  | "periodic_pulse"
   | "silent";
 
 export type ManifestDispatchDecision = {
@@ -14,6 +15,23 @@ export type ManifestDispatchDecision = {
 const ULAT_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 let lastTacticalPulseUlatKey: string | null = null;
+let lastPeriodicPulseAtMs = 0;
+
+function readPeriodicPulseMs(): number {
+  const raw = String(process.env.PAPER_TELEGRAM_PULSE_EVERY_MS ?? "").trim();
+  const n = raw ? Number(raw) : 0;
+  if (!Number.isFinite(n) || n < 60_000) return 0;
+  return Math.min(n, 24 * 3_600_000);
+}
+
+function claimPeriodicPulseSlot(): boolean {
+  const intervalMs = readPeriodicPulseMs();
+  if (intervalMs <= 0) return false;
+  const now = Date.now();
+  if (now - lastPeriodicPulseAtMs < intervalMs) return false;
+  lastPeriodicPulseAtMs = now;
+  return true;
+}
 
 function getUlatParts(isoOrMs: string | number) {
   const ms = typeof isoOrMs === "string" ? Date.parse(isoOrMs) : isoOrMs;
@@ -65,6 +83,7 @@ export function isStateChangingSummary(summary: string): boolean {
   if (summary.startsWith("closed:")) return true;
   if (summary.startsWith("velocity-tp-70:")) return true;
   if (summary === "pyramid-layer-added") return true;
+  if (summary === "holding-position") return true;
   return false;
 }
 
@@ -79,6 +98,10 @@ export function evaluateManifestTelegramDispatch(params: {
 }): ManifestDispatchDecision {
   if (claimTacticalPulseManifestSlot(params.ranAt)) {
     return { dispatch: true, reason: "tactical_pulse" };
+  }
+
+  if (claimPeriodicPulseSlot()) {
+    return { dispatch: true, reason: "periodic_pulse" };
   }
 
   const highSignal =

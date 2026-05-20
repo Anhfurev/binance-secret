@@ -7,6 +7,7 @@ import type { DemoWorkspaceOwnerType } from "@/lib/supabase-demo";
 import {
   demoTradeFromPositionRow,
   loadOpenPaperPositions,
+  type PaperPositionRow,
 } from "@/lib/trading/paper-positions-db";
 import {
   mapTradeRowToDemo,
@@ -19,9 +20,28 @@ import {
   safeFetchPaperClosedTrades,
   safeFetchTradesPnlAggregate,
 } from "@/lib/trading/paper-trades-db-safe";
+import { normalizePaperWorkspaceAccount } from "@/lib/trading/paper-cash-reconcile";
 import type { PaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import { resolvePaperScalpWalletUsd } from "@/lib/trading/paper-scalp-wallet";
-import type { DemoAccount } from "@/lib/types";
+import type { DemoAccount, DemoTrade } from "@/lib/types";
+
+function normSymbol(symbol: string): string {
+  const s = symbol.toUpperCase().replace(/\//g, "");
+  return s.endsWith("USDT") ? s : `${s}USDT`;
+}
+
+function refreshLegFromDbRow(leg: DemoTrade, row: PaperPositionRow): DemoTrade {
+  const value = row.qty * row.entry_price;
+  return {
+    ...leg,
+    entryPrice: row.entry_price,
+    amount: row.qty,
+    value,
+    stopLoss: row.trail_price,
+    highestPriceReached: row.peak_price,
+    pyramidLayers: row.layer,
+  };
+}
 
 export type PaperPortfolioDbMetrics = {
   sessionBaselineUsdt: number;
@@ -174,17 +194,26 @@ export async function mergePaperAccountFromDatabase(params: {
     closed,
   ).slice(0, TRADE_LOAD_LIMIT);
 
-  const openPositions = mergeDemoTradesById(
-    params.account.openPositions,
-    open,
-  ).filter((t) => t.status === "open");
+  const dbBySymbol = new Map(
+    open.map((row) => [normSymbol(row.symbol), row] as const),
+  );
 
-  return {
+  let openPositions: DemoTrade[];
+  if (params.account.openPositions.length > 0) {
+    openPositions = params.account.openPositions.map((leg) => {
+      const row = dbBySymbol.get(normSymbol(leg.symbol));
+      return row ? refreshLegFromDbRow(leg, row) : leg;
+    });
+  } else {
+    openPositions = open.filter((t) => t.status === "open");
+  }
+
+  return normalizePaperWorkspaceAccount({
     ...params.account,
     startingBalance: baseline,
     openPositions,
     tradeHistory,
-  };
+  });
 }
 
 export async function loadPaperPortfolioMetrics(params: {

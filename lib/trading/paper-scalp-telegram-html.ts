@@ -4,6 +4,7 @@ import {
   formatSignedNavUsd,
 } from "@/lib/trading/paper-scalp-metrics-format";
 import type { PaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
+import { warnPaperTelegramEnvOnce } from "@/lib/trading/paper-telegram-env";
 
 /** Telegram HTML parse_mode — escape user/dynamic text only. */
 export function escapeTelegramHtml(raw: string): string {
@@ -81,9 +82,7 @@ export async function transmitManifestHtmlDashboard(
   const token = String(process.env.TELEGRAM_BOT_TOKEN ?? "").trim();
   const chatId = String(process.env.TELEGRAM_CHAT_ID ?? "").trim();
   if (!token || !chatId) {
-    console.warn(
-      "[paper-scalp-manifest] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing",
-    );
+    warnPaperTelegramEnvOnce();
     return;
   }
   if (!htmlBody.trim()) return;
@@ -119,4 +118,7 @@ export async function transmitManifestHtmlDashboard(
     );
   }
 
+  console.log("[paper-scalp-manifest] Telegram sent", {
+    messageId: payload.result?.message_id ?? null,
+  });
 }
