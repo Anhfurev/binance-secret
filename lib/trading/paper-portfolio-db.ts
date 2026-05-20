@@ -12,7 +12,7 @@ import {
   mapTradeRowToDemo,
   mergeDemoTradesById,
 } from "@/lib/trading/paper-trade-db-map";
-import { resolvePaperTradesUserId } from "@/lib/trading/paper-trades-sync";
+import { resolvePaperTradesUserId } from "@/lib/trading/paper-db-user";
 import {
   getPaperTradesSchemaMode,
   logPaperDbBinding,

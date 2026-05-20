@@ -25,7 +25,7 @@ import {
   type PaperScalpWorkspaceSettings,
 } from "@/lib/trading/paper-scalp-settings";
 import type { DemoWorkspaceOwnerType } from "@/lib/supabase-demo";
-import { resolvePaperTradesUserId } from "@/lib/trading/paper-trades-sync";
+import { getPaperDbUserId, resolvePaperTradesUserId } from "@/lib/trading/paper-db-user";
 import type { Scalp1mSnapshot, ScalpCandle } from "@/lib/trading/paper-scalp-indicators";
 import type { PaperAutomationTickResult } from "@/lib/trading/paper-scalp-types";
 import type { CoinData, DemoAccount } from "@/lib/types";
@@ -269,6 +269,7 @@ export async function runPaperScalp15mTick(
   const ownerType = params.ownerType ?? "device";
   const ownerId = params.ownerId ?? "local";
   const userId =
+    getPaperDbUserId() ??
     params.userId ??
     params.dbCtx?.userId ??
     resolvePaperTradesUserId(ownerType, ownerId) ??

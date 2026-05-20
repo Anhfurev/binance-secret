@@ -7,7 +7,7 @@ import { writeServerLogFromError } from "@/lib/server-logs";
 import type { PaperWorkspaceDbCtx } from "@/lib/trading/paper-portfolio-db";
 import { applyLiveProfileNav } from "@/lib/trading/paper-profile-live";
 import { queuePaperTradesSync } from "@/lib/trading/paper-trades-sync";
-import { resolvePaperTradesUserId } from "@/lib/trading/paper-trades-sync";
+import { resolvePaperTradesUserId } from "@/lib/trading/paper-db-user";
 import type { CoinData, DemoAccount } from "@/lib/types";
 
 export type PaperPersistOutcome = {

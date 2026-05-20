@@ -1,7 +1,11 @@
 import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
-import { resolvePaperTradesUserId } from "@/lib/trading/paper-trades-sync";
-import type { DemoTrade } from "@/lib/types";
 import type { DemoWorkspaceOwnerType } from "@/lib/supabase-demo";
+import {
+  ensurePaperDbUserReady,
+  getPaperDbUserId,
+  resolvePaperTradesUserId,
+} from "@/lib/trading/paper-db-user";
+import type { DemoTrade } from "@/lib/types";
 
 export type PaperPositionRow = {
   id: string;
@@ -51,29 +55,20 @@ function mapRow(raw: Record<string, unknown>): PaperPositionRow {
   };
 }
 
-async function profileExists(userId: string): Promise<boolean> {
-  if (!supabaseAdmin) return false;
-  const { data, error } = await supabaseAdmin
-    .from("profiles")
-    .select("id")
-    .eq("id", userId)
-    .maybeSingle();
-  return !error && Boolean(data?.id);
-}
-
 export async function loadOpenPaperPositions(
-  userId: string,
+  userId?: string | null,
 ): Promise<PaperPositionRow[]> {
-  if (!supabaseAdmin || !userId) return [];
+  const resolved = userId ?? getPaperDbUserId();
+  if (!supabaseAdmin || !resolved) return [];
   const { data, error } = await supabaseAdmin
     .from("paper_positions")
     .select(
       "id,user_id,symbol,side,entry_price,qty,peak_price,trail_price,layer,opened_at",
     )
-    .eq("user_id", userId);
+    .eq("user_id", resolved);
   if (error) {
     console.warn("[paper_positions] load open failed", {
-      userId: `${userId.slice(0, 8)}…`,
+      userId: `${resolved.slice(0, 8)}…`,
       message: error.message,
     });
     return [];
@@ -86,17 +81,12 @@ export async function upsertOpenPaperPosition(params: {
   ownerId: string;
   trade: DemoTrade;
 }): Promise<void> {
-  if (!supabaseAdmin) return;
-  const userId = resolvePaperTradesUserId(params.ownerType, params.ownerId);
-  if (!userId) return;
+  if (!supabaseAdmin || !isSupabaseAdminConfigured) return;
 
-  if (!(await profileExists(userId))) {
-    console.warn("[paper_positions] skip insert — profiles.id not found", {
-      userId: `${userId.slice(0, 8)}…`,
-      hint: "Set PAPER_TRADES_USER_ID to a valid public.profiles.id",
-    });
-    return;
-  }
+  if (!(await ensurePaperDbUserReady())) return;
+
+  const userId = getPaperDbUserId();
+  if (!userId) return;
 
   const symbol = normSymbol(params.trade.symbol);
   const peak = params.trade.highestPriceReached ?? params.trade.entryPrice;
@@ -217,3 +207,5 @@ export async function syncOpenPositionsToDb(params: {
     });
   }
 }
+
+export { resolvePaperTradesUserId };

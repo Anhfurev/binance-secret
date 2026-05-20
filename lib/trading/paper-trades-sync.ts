@@ -1,5 +1,6 @@
 import { isSupabaseAdminConfigured } from "@/lib/supabase-admin";
 import type { DemoWorkspaceOwnerType } from "@/lib/supabase-demo";
+import { resolvePaperTradesUserId } from "@/lib/trading/paper-db-user";
 import { resolvePaperLegSide } from "@/lib/trading/paper-scalp-leg-side";
 import {
   computeTradeCloseEconomics,
@@ -9,6 +10,8 @@ import {
   safeUpsertClosedTradeRow,
 } from "@/lib/trading/paper-trades-db-safe";
 import type { DemoAccount, DemoTrade } from "@/lib/types";
+
+export { resolvePaperTradesUserId } from "@/lib/trading/paper-db-user";
 
 const HISTORY_SYNC_LIMIT = 40;
 
@@ -30,17 +33,6 @@ function extractExitReason(trade: DemoTrade): string {
   if (match?.[1]) return match[1];
   const tag = trade.tags?.find((t) => t.includes("trail") || t.includes("exit"));
   return tag ?? "paper-scalp";
-}
-
-/** Canonical profiles.id for all paper DB rows — device + user workspaces share one wallet. */
-export function resolvePaperTradesUserId(
-  ownerType: DemoWorkspaceOwnerType,
-  ownerId: string,
-): string | null {
-  const mapped = String(process.env.PAPER_TRADES_USER_ID ?? "").trim();
-  if (mapped.length > 0) return mapped;
-  if (ownerType === "user" && ownerId.trim().length > 0) return ownerId.trim();
-  return null;
 }
 
 function buildUnifiedClosedRow(params: {
@@ -105,8 +97,7 @@ function buildLegacyClosedRow(params: {
   if (exitPrice <= 0 || trade.entryPrice <= 0) return null;
 
   const side = resolvePaperLegSide(trade);
-  const status =
-    trade.status === "stopped" ? "stopped" : "closed";
+  const status = trade.status === "stopped" ? "stopped" : "closed";
   const exitReason = extractExitReason(trade);
 
   return {
@@ -143,9 +134,6 @@ function buildLegacyClosedRow(params: {
   };
 }
 
-/**
- * Mirror closed paper-scalp legs into public.trades (open legs live in paper_positions).
- */
 export async function syncPaperAccountTrades(params: {
   ownerType: DemoWorkspaceOwnerType;
   ownerId: string;
@@ -194,7 +182,6 @@ export async function syncPaperAccountTrades(params: {
   return { synced, skipped: false };
 }
 
-/** Persist one closed leg immediately (e.g. micro trailing stop). */
 export async function syncPaperTradeImmediately(params: {
   ownerType: DemoWorkspaceOwnerType;
   ownerId: string;
