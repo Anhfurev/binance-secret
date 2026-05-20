@@ -1,9 +1,13 @@
-import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
+import { isSupabaseAdminConfigured } from "@/lib/supabase-admin";
 import type { DemoWorkspaceOwnerType } from "@/lib/supabase-demo";
 import { resolvePaperLegSide } from "@/lib/trading/paper-scalp-leg-side";
 import {
   computeTradeCloseEconomics,
 } from "@/lib/trading/paper-trade-economics";
+import {
+  logPaperDbBinding,
+  safeUpsertClosedTradeRow,
+} from "@/lib/trading/paper-trades-db-safe";
 import type { DemoAccount, DemoTrade } from "@/lib/types";
 
 const HISTORY_SYNC_LIMIT = 40;
@@ -38,7 +42,7 @@ export function resolvePaperTradesUserId(
   return mapped.length > 0 ? mapped : null;
 }
 
-function buildClosedTradeRow(params: {
+function buildUnifiedClosedRow(params: {
   trade: DemoTrade;
   userId: string;
 }): Record<string, unknown> | null {
@@ -83,59 +87,59 @@ function buildClosedTradeRow(params: {
   };
 }
 
-async function findClosedTradeRowId(
-  userId: string,
-  strategyKey: string,
-): Promise<string | null> {
-  if (!supabaseAdmin) return null;
-  const { data, error } = await supabaseAdmin
-    .from("trades")
-    .select("id")
-    .eq("user_id", userId)
-    .eq("strategy_executed", strategyKey)
-    .limit(1)
-    .maybeSingle();
-  if (error) {
-    console.warn("[paper-trades-sync] lookup failed", {
-      strategyKey,
-      error: error.message,
-    });
-    return null;
-  }
-  return typeof data?.id === "string" ? data.id : null;
-}
+function buildLegacyClosedRow(params: {
+  trade: DemoTrade;
+  userId: string;
+  workspaceKey: string;
+  ownerType: DemoWorkspaceOwnerType;
+  ownerId: string;
+}): Record<string, unknown> | null {
+  const { trade, userId, workspaceKey, ownerType, ownerId } = params;
+  if (trade.status === "open") return null;
 
-async function upsertClosedTradeRow(row: Record<string, unknown>): Promise<boolean> {
-  if (!supabaseAdmin) return false;
-  const userId = String(row.user_id);
-  const strategyKey = String(row.strategy_executed ?? "");
-  if (!strategyKey) return false;
+  const exitPrice =
+    trade.exitPrice != null && trade.exitPrice > 0
+      ? trade.exitPrice
+      : trade.entryPrice;
+  if (exitPrice <= 0 || trade.entryPrice <= 0) return null;
 
-  const existingId = await findClosedTradeRowId(userId, strategyKey);
-  if (existingId) {
-    const { error } = await supabaseAdmin
-      .from("trades")
-      .update(row)
-      .eq("id", existingId);
-    if (error) {
-      console.warn("[paper-trades-sync] update failed", {
-        strategyKey,
-        error: error.message,
-      });
-      return false;
-    }
-    return true;
-  }
+  const side = resolvePaperLegSide(trade);
+  const status =
+    trade.status === "stopped" ? "stopped" : "closed";
+  const exitReason = extractExitReason(trade);
 
-  const { error } = await supabaseAdmin.from("trades").insert([row]);
-  if (error) {
-    console.warn("[paper-trades-sync] insert failed", {
-      strategyKey,
-      error: error.message,
-    });
-    return false;
-  }
-  return true;
+  return {
+    user_id: userId,
+    signalId: trade.signalId,
+    exchange_order_id: `paper-${trade.id}`,
+    coinId: trade.coinId,
+    symbol: normalizeSymbol(trade.symbol),
+    type: trade.type,
+    entryPrice: trade.entryPrice,
+    exitPrice,
+    amount: trade.amount,
+    value: trade.value,
+    status,
+    pnl: trade.pnl ?? null,
+    pnlPercent: trade.pnlPercent ?? null,
+    opened_at: toIso(trade.openedAt) ?? new Date().toISOString(),
+    closed_at: toIso(trade.closedAt) ?? new Date().toISOString(),
+    stopLoss: trade.stopLoss,
+    takeProfit: trade.takeProfit,
+    followedSignal: trade.followedSignal ?? false,
+    exit_reason: exitReason,
+    notes: trade.notes ?? null,
+    extra: {
+      paper_leg_id: trade.id,
+      workspace_key: workspaceKey,
+      owner_type: ownerType,
+      owner_id: ownerId,
+      trade_mode: "paper",
+      is_paper: true,
+      paper_scalp: true,
+      direction: side,
+    },
+  };
 }
 
 /**
@@ -147,6 +151,7 @@ export async function syncPaperAccountTrades(params: {
   workspaceKey: string;
   account: DemoAccount;
 }): Promise<{ synced: number; skipped: boolean }> {
+  logPaperDbBinding();
   if (!isSupabaseAdminConfigured) {
     return { synced: 0, skipped: true };
   }
@@ -162,9 +167,16 @@ export async function syncPaperAccountTrades(params: {
   const pushTrade = async (trade: DemoTrade) => {
     if (seen.has(trade.id)) return;
     seen.add(trade.id);
-    const row = buildClosedTradeRow({ trade, userId });
-    if (!row) return;
-    if (await upsertClosedTradeRow(row)) synced += 1;
+    const unified = buildUnifiedClosedRow({ trade, userId });
+    const legacy = buildLegacyClosedRow({
+      trade,
+      userId,
+      workspaceKey: params.workspaceKey,
+      ownerType: params.ownerType,
+      ownerId: params.ownerId,
+    });
+    if (!unified || !legacy) return;
+    if (await safeUpsertClosedTradeRow(unified, legacy)) synced += 1;
   };
 
   const history = params.account.tradeHistory.slice(0, HISTORY_SYNC_LIMIT);
@@ -188,14 +200,22 @@ export async function syncPaperTradeImmediately(params: {
   workspaceKey: string;
   trade: DemoTrade;
 }): Promise<boolean> {
+  logPaperDbBinding();
   if (!isSupabaseAdminConfigured) return false;
   const userId = resolvePaperTradesUserId(params.ownerType, params.ownerId);
   if (!userId) return false;
 
-  const row = buildClosedTradeRow({ trade: params.trade, userId });
-  if (!row) return false;
+  const unified = buildUnifiedClosedRow({ trade: params.trade, userId });
+  const legacy = buildLegacyClosedRow({
+    trade: params.trade,
+    userId,
+    workspaceKey: params.workspaceKey,
+    ownerType: params.ownerType,
+    ownerId: params.ownerId,
+  });
+  if (!unified || !legacy) return false;
 
-  const ok = await upsertClosedTradeRow(row);
+  const ok = await safeUpsertClosedTradeRow(unified, legacy);
   if (ok) {
     console.log(
       `[paper-trades-sync] closed ${params.trade.symbol} net=${params.trade.pnl ?? 0} leg=${params.trade.id}`,
@@ -212,7 +232,7 @@ export function queuePaperTradesSync(params: {
 }): void {
   void syncPaperAccountTrades(params).catch((error: unknown) => {
     const err = error instanceof Error ? error : new Error(String(error));
-    console.warn("[paper-trades-sync] async failed", {
+    console.error("[paper-trades-sync] async failed", {
       workspaceKey: params.workspaceKey,
       message: err.message,
     });

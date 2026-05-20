@@ -24,6 +24,7 @@ import {
 } from "@/lib/trading/paper-portfolio-db";
 import { mergeAccountWithLiveProfile } from "@/lib/trading/paper-profile-live";
 import { resolvePaperTradesUserId } from "@/lib/trading/paper-trades-sync";
+import { logPaperDbBinding } from "@/lib/trading/paper-trades-db-safe";
 import type { CoinData, DemoAccount } from "@/lib/types";
 
 export type CachedWorkspaceAccount = {
@@ -81,6 +82,7 @@ export async function preparePaperRun(
   let candles1mBySymbol = new Map<string, ScalpCandle[]>();
   let candles3mBySymbol = new Map<string, ScalpCandle[]>();
 
+  logPaperDbBinding();
   console.log(
     `[preparePaperRun] engine=${engineMode} workspaces=${workspaces.length} symbols=${symbols.length}`,
   );

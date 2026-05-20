@@ -9,6 +9,11 @@ import {
   mergeDemoTradesById,
 } from "@/lib/trading/paper-trade-db-map";
 import { resolvePaperTradesUserId } from "@/lib/trading/paper-trades-sync";
+import {
+  logPaperDbBinding,
+  safeFetchPaperClosedTrades,
+  safeFetchTradesPnlAggregate,
+} from "@/lib/trading/paper-trades-db-safe";
 import type { PaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
 import { resolvePaperScalpWalletUsd } from "@/lib/trading/paper-scalp-wallet";
 import type { DemoAccount } from "@/lib/types";
@@ -93,37 +98,39 @@ export async function loadPaperWorkspaceDbContext(params: {
 export async function loadPaperTradesForWorkspace(
   userId: string,
 ): Promise<{ open: DemoAccount["openPositions"]; closed: DemoAccount["tradeHistory"] }> {
+  logPaperDbBinding();
   if (!supabaseAdmin) return { open: [], closed: [] };
 
-  const [positionRows, tradesRes] = await Promise.all([
-    loadOpenPaperPositions(userId),
-    supabaseAdmin
-      .from("trades")
-      .select(
-        "id,user_id,symbol,side,entry_price,exit_price,qty,raw_pnl,fees,net_pnl,strategy_executed,closed_at",
-      )
-      .eq("user_id", userId)
-      .not("closed_at", "is", null)
-      .order("closed_at", { ascending: false })
-      .limit(TRADE_LOAD_LIMIT),
-  ]);
+  try {
+    const [positionRows, tradeRows] = await Promise.all([
+      loadOpenPaperPositions(userId).catch((error: unknown) => {
+        const err = error instanceof Error ? error : new Error(String(error));
+        console.error("[paper-portfolio-db] paper_positions load exception", {
+          userId: `${userId.slice(0, 8)}…`,
+          message: err.message,
+        });
+        return [];
+      }),
+      safeFetchPaperClosedTrades(userId, TRADE_LOAD_LIMIT),
+    ]);
 
-  const open = positionRows.map((row) => demoTradeFromPositionRow(row));
-  const closed: DemoAccount["tradeHistory"] = [];
+    const open = positionRows.map((row) => demoTradeFromPositionRow(row));
+    const closed: DemoAccount["tradeHistory"] = [];
 
-  if (tradesRes.error) {
-    console.warn("[paper-portfolio-db] trades load failed", {
-      userId,
-      message: tradesRes.error.message,
-    });
-  } else {
-    for (const row of tradesRes.data ?? []) {
-      const trade = mapTradeRowToDemo(row as Record<string, unknown>);
+    for (const row of tradeRows) {
+      const trade = mapTradeRowToDemo(row);
       if (trade) closed.push(trade);
     }
-  }
 
-  return { open, closed };
+    return { open, closed };
+  } catch (error: unknown) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("[paper-portfolio-db] loadPaperTradesForWorkspace exception", {
+      userId: `${userId.slice(0, 8)}…`,
+      message: err.message,
+    });
+    return { open: [], closed: [] };
+  }
 }
 
 export async function mergePaperAccountFromDatabase(params: {
@@ -132,7 +139,20 @@ export async function mergePaperAccountFromDatabase(params: {
 }): Promise<DemoAccount> {
   if (!params.ctx) return params.account;
 
-  const { open, closed } = await loadPaperTradesForWorkspace(params.ctx.userId);
+  let open: DemoAccount["openPositions"] = [];
+  let closed: DemoAccount["tradeHistory"] = [];
+  try {
+    const loaded = await loadPaperTradesForWorkspace(params.ctx.userId);
+    open = loaded.open;
+    closed = loaded.closed;
+  } catch (error: unknown) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("[paper-portfolio-db] mergePaperAccountFromDatabase failed", {
+      userId: `${params.ctx.userId.slice(0, 8)}…`,
+      message: err.message,
+    });
+    return params.account;
+  }
 
   const baseline = await ensurePaperWorkspaceBaseline({
     ctx: params.ctx,
@@ -166,29 +186,37 @@ export async function loadPaperPortfolioMetrics(params: {
   const at24h = new Date(now - MS_24H).toISOString();
   const at7d = new Date(now - MS_7D).toISOString();
 
-  const [snap24, snap7, tradesRes, profileRes] = await Promise.all([
-    loadNavSnapshotAtOrBefore(params.userId, at24h),
-    loadNavSnapshotAtOrBefore(params.userId, at7d),
-    supabaseAdmin
-      .from("trades")
-      .select("net_pnl")
-      .eq("user_id", params.userId)
-      .not("closed_at", "is", null),
-    supabaseAdmin
+  logPaperDbBinding();
+
+  let profileRes: { data: Record<string, unknown> | null; error: Error | null } = {
+    data: null,
+    error: null,
+  };
+  try {
+    const res = await supabaseAdmin
       .from("profiles")
       .select("demo_balance,portfolio_nav_usdt")
       .eq("id", params.userId)
-      .maybeSingle(),
+      .maybeSingle();
+    profileRes = {
+      data: (res.data as Record<string, unknown> | null) ?? null,
+      error: res.error ? new Error(res.error.message) : null,
+    };
+  } catch (error: unknown) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("[paper-portfolio-db] profiles load exception", {
+      message: err.message,
+    });
+    profileRes = { data: null, error: err };
+  }
+
+  const [snap24, snap7, pnlAgg] = await Promise.all([
+    loadNavSnapshotAtOrBefore(params.userId, at24h),
+    loadNavSnapshotAtOrBefore(params.userId, at7d),
+    safeFetchTradesPnlAggregate(params.userId),
   ]);
 
-  let lifetimeRealizedPnlUsdt = 0;
-  let closedTradeCount = 0;
-  if (!tradesRes.error) {
-    for (const row of tradesRes.data ?? []) {
-      lifetimeRealizedPnlUsdt += num(row.net_pnl);
-      closedTradeCount += 1;
-    }
-  }
+  const { lifetimeRealizedPnlUsdt, closedTradeCount } = pnlAgg;
 
   const profileNav = num(
     profileRes.data?.portfolio_nav_usdt,
@@ -202,7 +230,7 @@ export async function loadPaperPortfolioMetrics(params: {
     ),
     nav24hAgoUsdt: snap24,
     nav7dAgoUsdt: snap7,
-    lifetimeRealizedPnlUsdt: Number(lifetimeRealizedPnlUsdt.toFixed(4)),
+    lifetimeRealizedPnlUsdt,
     closedTradeCount,
   };
 }

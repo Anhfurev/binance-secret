@@ -11,7 +11,7 @@ function str(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
-export function mapTradeRowToDemo(row: TradeDbRow): DemoTrade | null {
+function mapUnifiedTradeRow(row: TradeDbRow): DemoTrade | null {
   const closedAt = row.closed_at ? new Date(String(row.closed_at)) : null;
   if (!closedAt || Number.isNaN(closedAt.getTime())) return null;
 
@@ -48,6 +48,75 @@ export function mapTradeRowToDemo(row: TradeDbRow): DemoTrade | null {
     tags: ["paper-scalp"],
     followedSignal: false,
   };
+}
+
+function mapLegacyTradeRow(row: TradeDbRow): DemoTrade | null {
+  const extra =
+    row.extra && typeof row.extra === "object"
+      ? (row.extra as Record<string, unknown>)
+      : {};
+  const paperLegId = str(extra.paper_leg_id);
+  const id = paperLegId || str(row.id);
+  if (!id) return null;
+
+  const statusRaw = str(row.status, "closed").toLowerCase();
+  const status =
+    statusRaw === "open"
+      ? "open"
+      : statusRaw === "stopped"
+        ? "stopped"
+        : "closed";
+
+  if (status === "open") return null;
+
+  const type = str(row.type, "buy") === "sell" ? "sell" : "buy";
+  const directionRaw = str(extra.direction).toUpperCase();
+  const direction: "LONG" | "SHORT" | undefined =
+    directionRaw === "SHORT" || directionRaw === "LONG"
+      ? directionRaw
+      : type === "sell"
+        ? "SHORT"
+        : "LONG";
+
+  const openedAt = row.opened_at
+    ? new Date(String(row.opened_at))
+    : new Date();
+  const closedAt = row.closed_at ? new Date(String(row.closed_at)) : undefined;
+
+  return {
+    id,
+    signalId: str(row.signalId, "paper-scalp"),
+    coinId: str(row.coinId, str(row.symbol, "unknown")),
+    symbol: str(row.symbol),
+    type,
+    direction,
+    entryPrice: num(row.entryPrice),
+    exitPrice: row.exitPrice != null ? num(row.exitPrice) : undefined,
+    amount: num(row.amount),
+    value: num(row.value),
+    status,
+    pnl: row.pnl != null ? num(row.pnl) : undefined,
+    pnlPercent: row.pnlPercent != null ? num(row.pnlPercent) : undefined,
+    openedAt,
+    closedAt,
+    notes: row.notes != null ? str(row.notes) : undefined,
+    tags: Array.isArray(extra.tags) ? extra.tags.map(String) : ["paper-scalp"],
+    followedSignal: row.followedSignal === true,
+  };
+}
+
+/** Maps unified (snake_case) or legacy (camelCase) `trades` rows. */
+export function mapTradeRowToDemo(row: TradeDbRow): DemoTrade | null {
+  try {
+    if (row.entry_price != null || row.qty != null || row.net_pnl != null) {
+      return mapUnifiedTradeRow(row);
+    }
+    return mapLegacyTradeRow(row);
+  } catch (error: unknown) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("[paper-trade-db-map] map row failed", { message: err.message });
+    return null;
+  }
 }
 
 export function mergeDemoTradesById(

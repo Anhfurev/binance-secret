@@ -444,6 +444,20 @@ export async function runPaperScalpOrchestrator(): Promise<
     writeServerLogFromError("paper-scalp-orchestrator", error, {
       phase: "engine_crash",
     });
-    throw error;
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error("[paper-scalp-orchestrator] tick failed (non-fatal to process)", {
+      message: err.message,
+    });
+    return buildPartialResult(performance.now(), {
+      scanned: 0,
+      updated: 0,
+      actions: [`engine-error:${err.message.slice(0, 120)}`],
+      symbols: [],
+      snapshotsLoaded: 0,
+      snapshotSource: "mock",
+      marketSource: "mock-fallback",
+      partial: true,
+      partialReason: "orchestrator_exception",
+    });
   }
 }
