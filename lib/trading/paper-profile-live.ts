@@ -1,5 +1,6 @@
 import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
 import { computePaperWorkspaceNav } from "@/lib/trading/paper-scalp-nav";
+import { resolvePaperScalpWalletUsd } from "@/lib/trading/paper-scalp-wallet";
 import {
   recordPaperPortfolioSnapshot,
   type PaperWorkspaceDbCtx,
@@ -26,6 +27,7 @@ export async function applyLiveProfileNav(params: {
   dbCtx?: PaperWorkspaceDbCtx | null;
 }): Promise<LiveProfileNav> {
   const nav = computePaperWorkspaceNav(params.account, params.marketCoins);
+  const walletTarget = resolvePaperScalpWalletUsd();
   const patch: LiveProfileNav = {
     available_usdt: nav.available_usdt,
     portfolio_nav_usdt: nav.portfolio_nav_usdt,
@@ -40,6 +42,7 @@ export async function applyLiveProfileNav(params: {
       available_usdt: patch.available_usdt,
       portfolio_nav_usdt: patch.portfolio_nav_usdt,
       demo_balance: patch.demo_balance,
+      starting_balance: walletTarget,
       updated_at: new Date().toISOString(),
     })
     .eq("id", params.userId);
@@ -72,10 +75,11 @@ export async function loadLiveProfileNav(
   if (!supabaseAdmin) return null;
   const { data, error } = await supabaseAdmin
     .from("profiles")
-    .select("available_usdt,portfolio_nav_usdt,demo_balance")
+    .select("available_usdt,portfolio_nav_usdt,demo_balance,starting_balance")
     .eq("id", userId)
     .maybeSingle();
   if (error || !data) return null;
+  const walletTarget = resolvePaperScalpWalletUsd();
   const available = num(data.available_usdt, num(data.demo_balance));
   const nav = num(data.portfolio_nav_usdt, available);
   if (nav <= 0 && available <= 0) return null;
@@ -92,14 +96,18 @@ export async function mergeAccountWithLiveProfile(
   account: DemoAccount,
 ): Promise<DemoAccount> {
   const live = await loadLiveProfileNav(userId);
-  if (!live) return account;
+  const walletTarget = resolvePaperScalpWalletUsd();
+  if (!live) {
+    return {
+      ...account,
+      startingBalance:
+        account.startingBalance > 0 ? account.startingBalance : walletTarget,
+    };
+  }
   return {
     ...account,
     currentBalance: live.available_usdt,
-    startingBalance:
-      account.startingBalance > 0
-        ? account.startingBalance
-        : live.portfolio_nav_usdt,
+    startingBalance: walletTarget,
   };
 }
 

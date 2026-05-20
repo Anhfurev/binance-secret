@@ -339,10 +339,15 @@ export async function safeUpsertClosedTradeRow(
   if (!supabaseAdmin) return false;
 
   const userId = String(unifiedRow.user_id ?? legacyRow.user_id ?? "");
+  const legId = String(
+    (legacyRow.extra as Record<string, unknown> | undefined)?.paper_leg_id ?? "",
+  );
   const strategyForLookup =
     typeof unifiedRow.strategy_executed === "string"
       ? unifiedRow.strategy_executed
-      : `${String((legacyRow.extra as Record<string, unknown>)?.paper_leg_id ?? "")}|paper-scalp`;
+      : legId.length > 0
+        ? `${legId}|paper-scalp`
+        : "";
 
   try {
     await ensureTradesSchemaModeAsync();
@@ -350,7 +355,10 @@ export async function safeUpsertClosedTradeRow(
     const primary = mode === "legacy" ? legacyRow : unifiedRow;
     const fallback = mode === "legacy" ? unifiedRow : legacyRow;
 
-    const existingId = await safeFindClosedTradeRowId(userId, strategyForLookup);
+    const existingId =
+      mode === "legacy" && legId
+        ? await findLegacyRowId(userId, legId)
+        : await safeFindClosedTradeRowId(userId, strategyForLookup);
 
     if (existingId) {
       const { error } = await supabaseAdmin

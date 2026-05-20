@@ -6,6 +6,10 @@ import {
   computeTradeCloseEconomics,
 } from "@/lib/trading/paper-trade-economics";
 import {
+  buildPaperStrategyKey,
+  truncateDbText,
+} from "@/lib/trading/paper-trades-db-text";
+import {
   logPaperDbBinding,
   safeUpsertClosedTradeRow,
 } from "@/lib/trading/paper-trades-db-safe";
@@ -64,18 +68,19 @@ function buildUnifiedClosedRow(params: {
     trade.pnl != null && Number.isFinite(trade.pnl)
       ? Number(trade.pnl)
       : economics.netPnlUsdt;
+  const exitReason = extractExitReason(trade);
 
   return {
     user_id: userId,
-    symbol: normalizeSymbol(trade.symbol),
-    side: resolvePaperLegSide(trade),
+    symbol: truncateDbText(normalizeSymbol(trade.symbol)),
+    side: truncateDbText(resolvePaperLegSide(trade), 16),
     entry_price: trade.entryPrice,
     exit_price: exitPrice,
     qty: trade.amount,
     raw_pnl: Number(economics.rawPnlUsdt.toFixed(4)),
     fees: Number(fees.toFixed(4)),
     net_pnl: Number(netPnl.toFixed(4)),
-    strategy_executed: `${trade.id}|${extractExitReason(trade)}`,
+    strategy_executed: buildPaperStrategyKey(trade.id, exitReason),
     closed_at: closedAt,
   };
 }
@@ -99,19 +104,20 @@ function buildLegacyClosedRow(params: {
   const side = resolvePaperLegSide(trade);
   const status = trade.status === "stopped" ? "stopped" : "closed";
   const exitReason = extractExitReason(trade);
+  const exchangeOrderId = truncateDbText(`paper-${trade.id.slice(0, 32)}`);
 
   return {
     user_id: userId,
-    signalId: trade.signalId,
-    exchange_order_id: `paper-${trade.id}`,
-    coinId: trade.coinId,
-    symbol: normalizeSymbol(trade.symbol),
-    type: trade.type,
+    signalId: truncateDbText(trade.signalId),
+    exchange_order_id: exchangeOrderId,
+    coinId: truncateDbText(trade.coinId),
+    symbol: truncateDbText(normalizeSymbol(trade.symbol)),
+    type: truncateDbText(trade.type, 16),
     entryPrice: trade.entryPrice,
     exitPrice,
     amount: trade.amount,
     value: trade.value,
-    status,
+    status: truncateDbText(status, 16),
     pnl: trade.pnl ?? null,
     pnlPercent: trade.pnlPercent ?? null,
     opened_at: toIso(trade.openedAt) ?? new Date().toISOString(),
@@ -119,8 +125,8 @@ function buildLegacyClosedRow(params: {
     stopLoss: trade.stopLoss,
     takeProfit: trade.takeProfit,
     followedSignal: trade.followedSignal ?? false,
-    exit_reason: exitReason,
-    notes: trade.notes ?? null,
+    exit_reason: truncateDbText(exitReason),
+    notes: truncateDbText(trade.notes, 500),
     extra: {
       paper_leg_id: trade.id,
       workspace_key: workspaceKey,

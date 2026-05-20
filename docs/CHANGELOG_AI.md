@@ -8,6 +8,17 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-19 — Paper trades varchar(50) + $28 wallet baseline fix
+
+**Summary**
+
+- **`paper-trades-sync.ts` / `paper-trades-db-text.ts`:** Truncate legacy string fields before `trades` insert; short `strategy_executed` keys (fixes `varchar(50)` errors on prod legacy schema).
+- **`paper-trades-db-safe.ts`:** Legacy upsert lookup by full `extra.paper_leg_id` instead of truncated strategy key.
+- **`paper-portfolio-db.ts` / `paper-profile-live.ts` / `paper-scalp-wallet.ts`:** Session baseline uses configured `PAPER_SCALP_WALLET_USD` ($28), not inflated `portfolio_nav_usdt`; profile `starting_balance` synced on NAV write.
+- Migration: `20260520150000_trades_text_columns.sql` widens legacy `trades` string cols to `text`.
+
+---
+
 ## 2026-05-19 — Unified paper DB layer (4-table schema)
 
 **Summary**

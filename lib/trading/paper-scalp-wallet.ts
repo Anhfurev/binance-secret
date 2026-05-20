@@ -49,9 +49,12 @@ export function alignPaperScalpWallet(
   options?: { persistedStartingBalance?: number },
 ): DemoAccount {
   const target = resolvePaperScalpWalletUsd();
+  const configuredBaseline = target;
+  const persisted = options?.persistedStartingBalance;
   const baseline =
-    options?.persistedStartingBalance ??
-    (account.startingBalance > 0 ? account.startingBalance : target);
+    persisted != null && persisted > 0 && persisted <= target * 2
+      ? persisted
+      : configuredBaseline;
 
   if (account.openPositions.length > 0) {
     return { ...account, startingBalance: baseline };
