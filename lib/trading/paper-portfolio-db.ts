@@ -1,3 +1,7 @@
+/**
+ * Paper portfolio DB — profiles, snapshots, paper_positions only.
+ * ALL public.trades access goes through @/lib/trading/paper-trades-db-safe.
+ */
 import { isSupabaseAdminConfigured, supabaseAdmin } from "@/lib/supabase-admin";
 import type { DemoWorkspaceOwnerType } from "@/lib/supabase-demo";
 import {
@@ -10,6 +14,7 @@ import {
 } from "@/lib/trading/paper-trade-db-map";
 import { resolvePaperTradesUserId } from "@/lib/trading/paper-trades-sync";
 import {
+  getPaperTradesSchemaMode,
   logPaperDbBinding,
   safeFetchPaperClosedTrades,
   safeFetchTradesPnlAggregate,
@@ -95,24 +100,28 @@ export async function loadPaperWorkspaceDbContext(params: {
   };
 }
 
+/** Closed history via paper-trades-db-safe (never queries trades.side / entry_price here). */
 export async function loadPaperTradesForWorkspace(
   userId: string,
 ): Promise<{ open: DemoAccount["openPositions"]; closed: DemoAccount["tradeHistory"] }> {
   logPaperDbBinding();
-  if (!supabaseAdmin) return { open: [], closed: [] };
+  if (!isSupabaseAdminConfigured || !userId) {
+    return { open: [], closed: [] };
+  }
 
   try {
-    const [positionRows, tradeRows] = await Promise.all([
-      loadOpenPaperPositions(userId).catch((error: unknown) => {
+    const positionRows = await loadOpenPaperPositions(userId).catch(
+      (error: unknown) => {
         const err = error instanceof Error ? error : new Error(String(error));
         console.error("[paper-portfolio-db] paper_positions load exception", {
           userId: `${userId.slice(0, 8)}…`,
           message: err.message,
         });
         return [];
-      }),
-      safeFetchPaperClosedTrades(userId, TRADE_LOAD_LIMIT),
-    ]);
+      },
+    );
+
+    const tradeRows = await safeFetchPaperClosedTrades(userId, TRADE_LOAD_LIMIT);
 
     const open = positionRows.map((row) => demoTradeFromPositionRow(row));
     const closed: DemoAccount["tradeHistory"] = [];
@@ -127,6 +136,7 @@ export async function loadPaperTradesForWorkspace(
     const err = error instanceof Error ? error : new Error(String(error));
     console.error("[paper-portfolio-db] loadPaperTradesForWorkspace exception", {
       userId: `${userId.slice(0, 8)}…`,
+      tradesSchema: getPaperTradesSchemaMode(),
       message: err.message,
     });
     return { open: [], closed: [] };
@@ -180,34 +190,36 @@ export async function mergePaperAccountFromDatabase(params: {
 export async function loadPaperPortfolioMetrics(params: {
   userId: string;
 }): Promise<PaperPortfolioDbMetrics | null> {
-  if (!supabaseAdmin) return null;
+  if (!isSupabaseAdminConfigured || !supabaseAdmin) return null;
+
+  logPaperDbBinding();
 
   const now = Date.now();
   const at24h = new Date(now - MS_24H).toISOString();
   const at7d = new Date(now - MS_7D).toISOString();
 
-  logPaperDbBinding();
-
-  let profileRes: { data: Record<string, unknown> | null; error: Error | null } = {
-    data: null,
-    error: null,
-  };
+  let profileNav = 0;
   try {
     const res = await supabaseAdmin
       .from("profiles")
       .select("demo_balance,portfolio_nav_usdt")
       .eq("id", params.userId)
       .maybeSingle();
-    profileRes = {
-      data: (res.data as Record<string, unknown> | null) ?? null,
-      error: res.error ? new Error(res.error.message) : null,
-    };
+    if (res.error) {
+      console.warn("[paper-portfolio-db] profiles load failed", {
+        message: res.error.message,
+      });
+    } else {
+      profileNav = num(
+        res.data?.portfolio_nav_usdt,
+        num(res.data?.demo_balance),
+      );
+    }
   } catch (error: unknown) {
     const err = error instanceof Error ? error : new Error(String(error));
     console.error("[paper-portfolio-db] profiles load exception", {
       message: err.message,
     });
-    profileRes = { data: null, error: err };
   }
 
   const [snap24, snap7, pnlAgg] = await Promise.all([
@@ -216,13 +228,6 @@ export async function loadPaperPortfolioMetrics(params: {
     safeFetchTradesPnlAggregate(params.userId),
   ]);
 
-  const { lifetimeRealizedPnlUsdt, closedTradeCount } = pnlAgg;
-
-  const profileNav = num(
-    profileRes.data?.portfolio_nav_usdt,
-    num(profileRes.data?.demo_balance),
-  );
-
   return {
     sessionBaselineUsdt: resolvePaperSessionBaseline(
       { startingBalance: 0 } as DemoAccount,
@@ -230,8 +235,8 @@ export async function loadPaperPortfolioMetrics(params: {
     ),
     nav24hAgoUsdt: snap24,
     nav7dAgoUsdt: snap7,
-    lifetimeRealizedPnlUsdt,
-    closedTradeCount,
+    lifetimeRealizedPnlUsdt: pnlAgg.lifetimeRealizedPnlUsdt,
+    closedTradeCount: pnlAgg.closedTradeCount,
   };
 }
 
@@ -240,17 +245,21 @@ async function loadNavSnapshotAtOrBefore(
   isoBefore: string,
 ): Promise<number | null> {
   if (!supabaseAdmin) return null;
-  const { data, error } = await supabaseAdmin
-    .from("paper_portfolio_snapshots")
-    .select("portfolio_nav_usdt")
-    .eq("user_id", userId)
-    .lte("recorded_at", isoBefore)
-    .order("recorded_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (error || !data) return null;
-  const nav = num(data.portfolio_nav_usdt);
-  return nav > 0 ? nav : null;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("paper_portfolio_snapshots")
+      .select("portfolio_nav_usdt")
+      .eq("user_id", userId)
+      .lte("recorded_at", isoBefore)
+      .order("recorded_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error || !data) return null;
+    const nav = num(data.portfolio_nav_usdt);
+    return nav > 0 ? nav : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function recordPaperPortfolioSnapshot(params: {
