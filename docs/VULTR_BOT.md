@@ -23,8 +23,20 @@ Requires `scripts/.oracle-gateway.env` (or env): `REMOTE_HOST`, `SSH_KEY`, `BOT_
 ```bash
 chmod +x /root/binance-bot/scripts/vultr-bot-cron.sh
 crontab -e
+# Bot scan every minute; Telegram digest every 2 min (TELEGRAM_CRON_DIGEST_MS in .env):
 # * * * * * /root/binance-bot/scripts/vultr-bot-cron.sh >> /var/log/vultr-bot-cron.log 2>&1
 ```
+
+In `/root/binance-bot/.env`:
+
+```bash
+TELEGRAM_CRON_DIGEST=1
+TELEGRAM_CRON_DIGEST_MS=120000
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
+
+Then `pm2 restart binance-bot --update-env`.
 
 Loads symbols from `bot_settings` where `is_autopilot_enabled = true` (all 10).
 

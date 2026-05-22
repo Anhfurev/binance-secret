@@ -30,6 +30,8 @@ module.exports = {
       env: {
         BOT_HTTP_PORT: "8788",
         BINANCE_BOT_WAKE_URL: "http://127.0.0.1:8788",
+        TELEGRAM_CRON_DIGEST: "1",
+        TELEGRAM_CRON_DIGEST_MS: "120000",
       },
     },
     {

@@ -15,7 +15,7 @@ function readCronDigestEnabled(): boolean {
   return String(Deno.env.get("TELEGRAM_CRON_DIGEST") ?? "1").trim() !== "0";
 }
 
-/** 0 = send every cron (default). Set TELEGRAM_CRON_DIGEST_MS to e.g. 600000 to throttle. */
+/** 0 = send every cron. Vultr default in ecosystem: 120000 (2 min). Max 1 h. */
 function readCronDigestThrottleMs(): number {
   const raw = String(Deno.env.get("TELEGRAM_CRON_DIGEST_MS") ?? "").trim();
   if (raw === "") return 0;
