@@ -83,6 +83,9 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now binance-stream-hub.service
+systemctl enable binance-stream-hub.service
+systemctl restart binance-stream-hub.service
+sleep 2
 systemctl status binance-stream-hub --no-pager || true
-journalctl -u binance-stream-hub -n 20 --no-pager || true
+echo "==> Expect 10 symbols in log below:"
+journalctl -u binance-stream-hub -n 8 --no-pager | grep -E 'connecting symbols|ws-manager' || journalctl -u binance-stream-hub -n 8 --no-pager
