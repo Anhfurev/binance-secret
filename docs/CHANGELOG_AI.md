@@ -102,6 +102,7 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ## 2026-05-22 — Live Binance connect + trades schema restore
 
+- **`cron-telegram-digest.ts`:** 2-min digest lines now include live WS price, WS age, AI action/confidence, RSI, and hold reason (not just `hold` + short code).
 - Deployed `binance-bot` Edge to `emviaygygylosvmtsvlq` (`--no-verify-jwt`).
 - Migration `20260522120000_restore_trades_bot_schema.sql`: adds `extra`, `status`, camelCase bot columns on `trades` (fixes `42703 column trades.extra does not exist`).
 - `.env.example`: Binance API + gateway IP whitelist notes.

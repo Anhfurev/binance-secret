@@ -46,8 +46,18 @@ function asCount(value: unknown): number {
   return Number.isFinite(Number(value)) ? Number(value) : 0;
 }
 
+const ENV_ALIASES: Record<string, string[]> = {
+  SUPABASE_URL: ["SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL"],
+  SUPABASE_SERVICE_ROLE_KEY: ["SUPABASE_SERVICE_ROLE_KEY", "DB_SERVICE_ROLE_KEY"],
+  BOT_SECRET: ["BOT_SECRET", "BINANCE_BOT_SECRET", "CRON_SECRET"],
+  BINANCE_API_KEY: ["BINANCE_API_KEY"],
+  BINANCE_SECRET: ["BINANCE_SECRET", "BINANCE_API_SECRET", "BINANCE_SECRET_KEY"],
+  TELEGRAM_CHAT_ID: ["TELEGRAM_CHAT_ID", "TELEGRAM_BOT_CHAT_ID"],
+};
+
 function hasEnv(name: string): boolean {
-  return String(Deno.env.get(name) ?? "").trim().length > 0;
+  const keys = ENV_ALIASES[name] ?? [name];
+  return keys.some((k) => String(Deno.env.get(k) ?? "").trim().length > 0);
 }
 
 export async function runDebuggerHealthAndFix(params: {

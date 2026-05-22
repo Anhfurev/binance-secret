@@ -81,6 +81,26 @@ bash scripts/vultr-gateway-test.sh
 
 Expect `HTTP 200` and account JSON. If `401` / `-2015`, fix API key IP list or secret mismatch.
 
+## Debugger `MISSING_REQUIRED_ENV` / `ERRORS_RECENT`
+
+Run on VPS:
+
+```bash
+bash scripts/vultr-env-check-debugger.sh
+```
+
+Every line must be `OK`. Common fixes:
+
+| MISS | Add to `.env` |
+|------|----------------|
+| `SUPABASE_URL` | `SUPABASE_URL=` or `NEXT_PUBLIC_SUPABASE_URL=https://….supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY` | same name or `DB_SERVICE_ROLE_KEY` |
+| `BOT_SECRET` | `BOT_SECRET=` (same as cron header) |
+| `GEMINI_API_KEY` | copy from Mac `.env.local` |
+| `TELEGRAM_*` | token + chat id |
+
+`ERRORS_RECENT` warn = old errors in DB (e.g. FAPI `-2015`). After `FAST_BOUNCE_FUTURES_LANE=0` + `git pull`, it clears as new cycles succeed.
+
 ## Env on VPS `.env`
 
 - `BOT_HTTP_PORT=8788`

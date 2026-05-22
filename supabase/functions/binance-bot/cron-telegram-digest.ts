@@ -2,7 +2,9 @@
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import type { AiAnalysis, BotActionResult } from "./types.ts";
 import { escapeHtml } from "./bot-shared.ts";
+import { formatIndicatorForLog } from "./indicator-precision.ts";
 import { formatCycleReason } from "./index-decision-format.ts";
+import { getWsMarketCacheEntry } from "./market-cache-ws.ts";
 import { sendTelegramAlert } from "./notifier.ts";
 import {
   formatWalletDigestSection,
@@ -48,6 +50,49 @@ function extractHoldReasonCode(strategyReason: string): string {
   return "";
 }
 
+function formatDigestLivePrice(symbol: string): string {
+  const entry = getWsMarketCacheEntry(symbol);
+  const px = entry?.tick.last ?? 0;
+  if (!(px > 0)) return "";
+  return `$${formatIndicatorForLog(px, px)}`;
+}
+
+function formatDigestWsAge(symbol: string): string {
+  const entry = getWsMarketCacheEntry(symbol);
+  if (!entry?.ready) return "WS—";
+  const ageSec = Math.round((Date.now() - entry.updatedAtMs) / 1000);
+  if (ageSec <= 45) return `WS ${ageSec}s`;
+  return `WS ${ageSec}s old`;
+}
+
+function formatDigestAiChip(action: BotActionResult): string {
+  const ai = action.ai ?? FALLBACK_DIGEST_AI;
+  const conf = Number(ai.ai_confidence);
+  const confStr = Number.isFinite(conf) ? `${conf.toFixed(0)}%` : "—";
+  return `AI ${String(ai.action ?? "HOLD")} ${confStr}`;
+}
+
+function formatDigestRsiChip(action: BotActionResult): string {
+  const rsi = Number(action.indicators?.rsi);
+  if (!Number.isFinite(rsi)) return "";
+  return `RSI ${rsi.toFixed(0)}`;
+}
+
+export function formatCronDigestSymbolLine(action: BotActionResult): string {
+  const sym = escapeHtml(action.symbol);
+  const decision = escapeHtml(String(action.decision ?? "HOLD"));
+  const act = escapeHtml(action.action);
+  const chips = [
+    formatDigestLivePrice(action.symbol),
+    formatDigestWsAge(action.symbol),
+    formatDigestAiChip(action),
+    formatDigestRsiChip(action),
+    escapeHtml(formatCronDigestActionDetail(action)),
+  ].filter(Boolean);
+  const chipStr = chips.length ? ` — ${chips.join(" · ")}` : "";
+  return `• <b>${sym}</b> <b>${decision}</b>/${act}${chipStr}`;
+}
+
 export function formatCronDigestActionDetail(action: BotActionResult): string {
   const detail = String(action.detail ?? "").trim();
   if (action.action !== "hold") {
@@ -85,18 +130,15 @@ export async function maybeSendCronDigestTelegram(params: {
     ? formatWalletDigestSection(await loadWalletSummary(supabase))
     : "";
 
-  const lines = allActions.slice(0, 14).map((a) => {
-    const sym = escapeHtml(a.symbol);
-    const act = escapeHtml(a.action);
-    const det = escapeHtml(formatCronDigestActionDetail(a));
-    return `• <b>${sym}</b> ${act}${det ? ` · ${det}` : ""}`;
-  });
+  const lines = allActions.slice(0, 14).map((a) => formatCronDigestSymbolLine(a));
   const more =
     allActions.length > 14 ? `\n… +${allActions.length - 14} more` : "";
   const walletPrefix = walletSection ? `${walletSection}\n\n` : "";
+  const liveNote =
+    "⚡ <i>Prices from Binance WS cache (stream hub). Bot scans ~every 1 min; this digest every 2 min.</i>\n\n";
   await sendTelegramAlert(
     `📋 <b>Cron digest</b> <code>${escapeHtml(batchId.slice(0, 8))}</code>\n` +
-      `${walletPrefix}${lines.join("\n")}${more}\n` +
+      `${walletPrefix}${liveNote}${lines.join("\n")}${more}\n` +
       `<i>${totalScanned} bot(s) scanned · ${totalExecutionMs}ms</i>`,
   );
 }
