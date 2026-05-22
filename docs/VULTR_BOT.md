@@ -7,7 +7,7 @@
 | **Trading bot** | Vultr — `deno` + PM2 `binance-bot` → `supabase/functions/binance-bot/index.ts` on **:8788** |
 | **Next UI** | Vultr — PM2 `binance-app` :3000 |
 | **Binance REST** | Vultr gateway nginx → `api.binance.com` (IP whitelist) |
-| **Stream hub** | Vultr — `binance-stream-hub` :8787, wicks wake **local** bot |
+| **Stream hub** | Vultr — `binance-stream-hub` :8787, **real-time** wakes local bot on moves |
 | **Postgres** | Supabase — `bot_settings`, `trades`, secrets |
 
 ## Deploy from Mac
@@ -17,6 +17,42 @@ bash scripts/redeploy-vultr-bot.sh
 ```
 
 Requires `scripts/.oracle-gateway.env` (or env): `REMOTE_HOST`, `SSH_KEY`, `BOT_SECRET`, Supabase keys in VPS `.env`.
+
+## Event-driven wake (not only 1-min cron)
+
+Binance **aggTrade** WebSocket on the stream hub can POST to your bot **immediately** when price moves enough (cooldown ~30s per symbol):
+
+| Trigger | When |
+|--------|------|
+| `stream_wick` | Fast drop from ~90s rolling high (e.g. BTC −0.35%, PEPE −2.5%) |
+| `stream_move` | Any sharp move vs last wake price, up or down (e.g. BTC ±0.25%) |
+| `vultr_cron` | Backup scan every minute for all autopilot symbols |
+
+Required on stream hub systemd (`fix-vultr-stream-hub-deno.sh`):
+
+```bash
+BINANCE_BOT_WAKE_URL=http://127.0.0.1:8788
+BOT_WAKE_SECRET=<same as BOT_SECRET in /root/binance-bot/.env>
+```
+
+Reinstall hub after pull:
+
+```bash
+cd /root/binance-bot
+source .env
+BOT_WAKE_SECRET="$BOT_SECRET" BINANCE_BOT_WAKE_URL=http://127.0.0.1:8788 \
+  bash scripts/fix-vultr-stream-hub-deno.sh
+bash scripts/vultr-verify-stream-wake.sh
+```
+
+Tune thresholds in `/etc/systemd/system/binance-stream-hub.service` (then `systemctl daemon-reload && systemctl restart binance-stream-hub`):
+
+- `WICK_WAKE_DROP_PCT_BTCUSDT=0.35` — fast dump wake
+- `MOVE_WAKE_PCT_ETHUSDT=0.25` — pump/dump wake
+- `WICK_WAKE_COOLDOWN_MS=30000` — min gap between wakes per symbol
+- `MOVE_WAKE_ENABLED=0` — disable bidirectional move wake (wick only)
+
+Cron + 2-min Telegram remain as **backup** summaries; live reactions come from stream wakes.
 
 ## Cron on Vultr (10 symbols)
 

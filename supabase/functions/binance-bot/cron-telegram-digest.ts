@@ -135,7 +135,7 @@ export async function maybeSendCronDigestTelegram(params: {
     allActions.length > 14 ? `\n… +${allActions.length - 14} more` : "";
   const walletPrefix = walletSection ? `${walletSection}\n\n` : "";
   const liveNote =
-    "⚡ <i>Prices from Binance WS cache (stream hub). Bot scans ~every 1 min; this digest every 2 min.</i>\n\n";
+    "⚡ <i>WS prices · wakes on moves (stream_wick/move) + 1m cron backup · digest every 2m</i>\n\n";
   await sendTelegramAlert(
     `📋 <b>Cron digest</b> <code>${escapeHtml(batchId.slice(0, 8))}</code>\n` +
       `${walletPrefix}${liveNote}${lines.join("\n")}${more}\n` +

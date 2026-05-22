@@ -194,7 +194,7 @@ export async function routeRequest(params: {
   if (!symbols.length) return jsonResponse({ ok: true, skipped: true, reason: "Missing symbol or symbols in request body", ...(tvWant ? { hint: "For TradingView, add symbol or ticker in JSON or ?symbol= / ?ticker= on the URL." } : {}) });
   attachServerBackgroundLifeline(symbols);
   const wakeTrigger = toStringValue((parsedBody as any)?.trigger);
-  const streamWake = wakeTrigger === "stream_wick";
+  const streamWake = wakeTrigger === "stream_wick" || wakeTrigger === "stream_move";
   let edgeLeaseClaimed = false;
   if (!streamWake) {
     const leaseTtlSec = Math.max(

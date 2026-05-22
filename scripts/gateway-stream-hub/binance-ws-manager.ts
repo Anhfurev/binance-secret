@@ -8,6 +8,7 @@ import { readSymbols } from "./config.ts";
 import { applyKlineWsEvent } from "./kline-store.ts";
 import { refreshMarketCacheEntry, patchMiniTicker } from "./market-cache.ts";
 import { updateAggTrade, updateBookTicker } from "./symbol-store.ts";
+import { maybeWakeBotOnMove } from "./move-wake.ts";
 import { maybeWakeBotOnWick } from "./wick-wake.ts";
 
 const WS_BASE = "wss://stream.binance.com:9443/stream?streams=";
@@ -55,6 +56,7 @@ function handlePayload(payload: Record<string, unknown>) {
     const ts = toNumber(payload.E) || Date.now();
     updateAggTrade(symbol, price, ts);
     void maybeWakeBotOnWick(symbol, price, ts);
+    void maybeWakeBotOnMove(symbol, price);
     refreshMarketCacheEntry(symbol);
     return;
   }

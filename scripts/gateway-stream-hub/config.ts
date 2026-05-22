@@ -53,14 +53,75 @@ export function readWakeCooldownMs(): number {
   return Math.min(10 * 60_000, Math.max(10_000, Math.floor(n)));
 }
 
-export function readWickDropPct(symbol: string): number | null {
-  const sym = String(symbol ?? "").toUpperCase();
-  const key = `WICK_WAKE_DROP_PCT_${sym}`;
-  const raw = (Deno.env.get(key) ?? Deno.env.get("WICK_WAKE_DROP_PCT") ?? "").trim();
+/** Default fast-drop % from ~90s rolling high (aggTrade wick). Override per symbol via env. */
+const DEFAULT_WICK_DROP_PCT: Record<string, number> = {
+  BTCUSDT: 0.35,
+  ETHUSDT: 0.35,
+  BNBUSDT: 0.45,
+  SOLUSDT: 0.55,
+  XRPUSDT: 0.65,
+  ADAUSDT: 0.75,
+  LINKUSDT: 0.75,
+  AVAXUSDT: 0.8,
+  DOGEUSDT: 1.2,
+  PEPEUSDT: 2.5,
+};
+
+/** Default |move| % vs last wake price (bidirectional pump/dump). */
+const DEFAULT_MOVE_WAKE_PCT: Record<string, number> = {
+  BTCUSDT: 0.25,
+  ETHUSDT: 0.25,
+  BNBUSDT: 0.3,
+  SOLUSDT: 0.4,
+  XRPUSDT: 0.45,
+  ADAUSDT: 0.5,
+  LINKUSDT: 0.5,
+  AVAXUSDT: 0.55,
+  DOGEUSDT: 0.9,
+  PEPEUSDT: 1.8,
+};
+
+function readPctFromEnv(
+  sym: string,
+  perSymbolKey: string,
+  globalKey: string,
+  defaults: Record<string, number>,
+  fallback: number,
+): number | null {
+  const raw = (Deno.env.get(perSymbolKey) ?? Deno.env.get(globalKey) ?? "").trim();
   const n = Number(raw);
   if (Number.isFinite(n) && n > 0) {
-    return Math.min(25, Math.max(0.2, n));
+    return Math.min(25, Math.max(0.15, n));
   }
-  if (sym.includes("PEPE")) return 2.5;
-  return null;
+  const tier = defaults[sym];
+  if (tier != null) return tier;
+  return fallback;
+}
+
+export function readMoveWakeEnabled(): boolean {
+  return String(Deno.env.get("MOVE_WAKE_ENABLED") ?? "1").trim() !== "0";
+}
+
+export function readWickDropPct(symbol: string): number | null {
+  const sym = String(symbol ?? "").toUpperCase();
+  if (String(Deno.env.get("WICK_WAKE_ENABLED") ?? "1").trim() === "0") return null;
+  return readPctFromEnv(
+    sym,
+    `WICK_WAKE_DROP_PCT_${sym}`,
+    "WICK_WAKE_DROP_PCT",
+    DEFAULT_WICK_DROP_PCT,
+    0.8,
+  );
+}
+
+export function readMoveWakePct(symbol: string): number | null {
+  const sym = String(symbol ?? "").toUpperCase();
+  if (!readMoveWakeEnabled()) return null;
+  return readPctFromEnv(
+    sym,
+    `MOVE_WAKE_PCT_${sym}`,
+    "MOVE_WAKE_PCT",
+    DEFAULT_MOVE_WAKE_PCT,
+    0.5,
+  );
 }

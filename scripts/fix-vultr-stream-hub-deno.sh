@@ -54,7 +54,7 @@ fi
   exit 1
 }
 
-BINANCE_BOT_WAKE_URL="${BINANCE_BOT_WAKE_URL:-https://emviaygygylosvmtsvlq.supabase.co/functions/v1/binance-bot}"
+BINANCE_BOT_WAKE_URL="${BINANCE_BOT_WAKE_URL:-http://127.0.0.1:8788}"
 if [[ -z "${BOT_WAKE_SECRET:-}" ]]; then
   echo "WARN: BOT_WAKE_SECRET unset — stream wick wakes to binance-bot are disabled until set (same value as Edge BOT_SECRET)." >&2
 fi
@@ -72,6 +72,8 @@ Environment=BINANCE_GATEWAY_SECRET=${BINANCE_GATEWAY_SECRET}
 Environment=STREAM_HUB_PORT=8787
 Environment=STREAM_SYMBOLS=ADAUSDT,AVAXUSDT,BNBUSDT,BTCUSDT,DOGEUSDT,ETHUSDT,LINKUSDT,PEPEUSDT,SOLUSDT,XRPUSDT
 Environment=WICK_WAKE_DROP_PCT_PEPEUSDT=2.5
+Environment=WICK_WAKE_COOLDOWN_MS=30000
+Environment=MOVE_WAKE_ENABLED=1
 Environment=BINANCE_BOT_WAKE_URL=${BINANCE_BOT_WAKE_URL:-}
 Environment=BOT_WAKE_SECRET=${BOT_WAKE_SECRET:-}
 ExecStart=${DENO_BIN} run --no-config --allow-net --allow-env ${HUB_DIR}/hub.ts
