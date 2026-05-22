@@ -16,7 +16,7 @@ module.exports = {
       name: "binance-bot",
       cwd: appDir,
       script: botWrapper,
-      interpreter: "bash",
+      interpreter: "/bin/bash",
       instances: 1,
       exec_mode: "fork",
       autorestart: true,
