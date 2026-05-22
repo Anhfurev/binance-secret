@@ -56,11 +56,37 @@ Loads symbols from `bot_settings` where `is_autopilot_enabled = true` (all 10).
 - It does **not** hardcode 3 coins — it `jsonb_agg`s every autopilot symbol.
 - If the bot runs on **Vultr**, either point `v_url` in that function to `http://<your-vps>:8788` or **disable** job `bot-heartbeat-all-symbols` and use `vultr-bot-cron.sh` instead.
 
+## Binance gateway (IP whitelist)
+
+Your Binance key only allows the **Vultr public IP**. Every signed REST call must use the gateway, not `https://api.binance.com` directly.
+
+On `/root/binance-bot/.env`:
+
+```bash
+BINANCE_REST_GATEWAY_URL=http://45.76.115.143
+BINANCE_GATEWAY_SECRET=<same value configured in nginx on this VM>
+BINANCE_API_KEY=...
+BINANCE_API_SECRET=...
+```
+
+- No trailing slash on the gateway URL.
+- `BINANCE_GATEWAY_SECRET` must match `scripts/vultr-stable-gateway-setup.sh` / nginx `X-Binance-Gateway-Secret`.
+- Bot + Next app on the **same** VPS still use this URL (Binance sees egress IP `45.76.115.143`).
+
+Test from the VPS:
+
+```bash
+bash scripts/vultr-gateway-test.sh
+```
+
+Expect `HTTP 200` and account JSON. If `401` / `-2015`, fix API key IP list or secret mismatch.
+
 ## Env on VPS `.env`
 
 - `BOT_HTTP_PORT=8788`
-- `BINANCE_BOT_WAKE_URL=http://127.0.0.1:8788`
+- `BINANCE_BOT_WAKE_URL=http://127.0.0.1:8788` (local Deno bot only — not Binance)
 - `BOT_SECRET` / `BOT_WAKE_SECRET` — same value
-- `BINANCE_REST_GATEWAY_URL`, `BINANCE_API_KEY`, `BINANCE_API_SECRET`, `BINANCE_GATEWAY_SECRET`
+- `BINANCE_REST_GATEWAY_URL=http://45.76.115.143` (your gateway — **not** `127.0.0.1` unless you know nginx answers there)
 - `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 - Do **not** set `IS_PAPER_TRADING=1` for real spot
+- `FAST_BOUNCE_FUTURES_LANE=0` (optional; auto-off when `BINANCE_REST_GATEWAY_URL` is set). Futures uses `fapi.binance.com` directly and will fail `-2015` on IP-restricted spot keys.

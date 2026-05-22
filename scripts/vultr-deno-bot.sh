@@ -34,6 +34,13 @@ for req in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY BOT_SECRET; do
   fi
 done
 
+GW="${BINANCE_REST_GATEWAY_URL:-}"
+if [[ -z "$GW" ]]; then
+  log "WARN: BINANCE_REST_GATEWAY_URL unset — live Binance will fail if API key is IP-restricted"
+else
+  log "gateway=${GW} (Binance REST via nginx)"
+fi
+
 log "starting deno bot port=${BOT_HTTP_PORT} supabase=${SUPABASE_URL:0:40}..."
 
 exec deno run \

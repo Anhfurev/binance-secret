@@ -2,6 +2,7 @@
 /** Cached `bot_global_settings` row — read once per symbol tick (no LLM). */
 
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import { isBinanceRestGatewayEnabled } from "./binance-rest-base.ts";
 
 export type BotGlobalSettingsRow = {
   market_regime: string;
@@ -26,8 +27,12 @@ let cycleCache: { atMs: number; row: BotGlobalSettingsRow } | null = null;
 const CACHE_TTL_MS = 5000;
 
 export function readFastBounceFuturesLaneEnabled(): boolean {
-  const raw = String(Deno.env.get("FAST_BOUNCE_FUTURES_LANE") ?? "1").trim().toLowerCase();
-  return raw !== "0" && raw !== "false" && raw !== "no";
+  const raw = String(Deno.env.get("FAST_BOUNCE_FUTURES_LANE") ?? "").trim().toLowerCase();
+  if (raw === "1" || raw === "true" || raw === "yes") return true;
+  if (raw === "0" || raw === "false" || raw === "no") return false;
+  // Spot REST gateway (IP whitelist) does not proxy fapi.binance.com — avoid FAPI -2015 alerts.
+  if (isBinanceRestGatewayEnabled()) return false;
+  return true;
 }
 
 export function readFastBounceAccountUsd(): number {
