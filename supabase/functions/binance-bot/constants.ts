@@ -19,9 +19,31 @@ export const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
 export const BINANCE_BASE_URL = "https://api.binance.com";
 
 export const DEFAULT_SYMBOL = "BTCUSDT";
-export const SUPPORTED_SYMBOLS = ["BTCUSDT", "PEPEUSDT", "SOLUSDT"] as const;
+export const SUPPORTED_SYMBOLS = [
+  "ADAUSDT",
+  "AVAXUSDT",
+  "BNBUSDT",
+  "BTCUSDT",
+  "DOGEUSDT",
+  "ETHUSDT",
+  "LINKUSDT",
+  "PEPEUSDT",
+  "SOLUSDT",
+  "XRPUSDT",
+] as const;
 /** pg_cron heartbeat order — provider matrix index follows this, not SUPPORTED_SYMBOLS sort. */
-export const CRON_SYMBOL_MATRIX_ORDER = ["BTCUSDT", "SOLUSDT", "PEPEUSDT"] as const;
+export const CRON_SYMBOL_MATRIX_ORDER = [
+  "BTCUSDT",
+  "ETHUSDT",
+  "SOLUSDT",
+  "BNBUSDT",
+  "PEPEUSDT",
+  "DOGEUSDT",
+  "XRPUSDT",
+  "ADAUSDT",
+  "LINKUSDT",
+  "AVAXUSDT",
+] as const;
 export const KLINE_INTERVAL = "1m";
 export const KLINE_LIMIT = 120;
 

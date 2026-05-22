@@ -42,7 +42,7 @@ export function readDefaultStreamSymbols(): string[] {
   const raw = String(
     Deno.env.get("STREAM_SYMBOLS") ??
       Deno.env.get("BOT_SYMBOLS") ??
-      "BTCUSDT,SOLUSDT,PEPEUSDT",
+      "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,PEPEUSDT,DOGEUSDT,XRPUSDT,ADAUSDT,LINKUSDT,AVAXUSDT",
   ).trim();
   return [...new Set(raw.split(/[,\s]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))];
 }

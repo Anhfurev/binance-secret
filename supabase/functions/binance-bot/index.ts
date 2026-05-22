@@ -24,7 +24,14 @@ const EDGE_GLOBAL_TIMEOUT_MS = readEdgeGlobalTimeoutMs();
 
 export { marketCache, cachedTimeOffset, lastSyncTime };
 
-Deno.serve(async (req: Request) =>
+const botPortRaw = (Deno.env.get("BOT_HTTP_PORT") ?? Deno.env.get("PORT") ?? "").trim();
+const botPort = botPortRaw ? Number(botPortRaw) : NaN;
+const serveOpts =
+  Number.isFinite(botPort) && botPort > 0
+    ? { port: Math.floor(botPort), hostname: "0.0.0.0" as const }
+    : undefined;
+
+Deno.serve(serveOpts ?? {}, async (req: Request) =>
   await withFatalBoundary(sharedSupabase, () =>
     routeRequest({
       req,

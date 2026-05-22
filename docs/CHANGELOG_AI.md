@@ -100,6 +100,12 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-22 — Live Binance connect + trades schema restore
+
+- Deployed `binance-bot` Edge to `emviaygygylosvmtsvlq` (`--no-verify-jwt`).
+- Migration `20260522120000_restore_trades_bot_schema.sql`: adds `extra`, `status`, camelCase bot columns on `trades` (fixes `42703 column trades.extra does not exist`).
+- `.env.example`: Binance API + gateway IP whitelist notes.
+
 ## 2026-05-19 — Live profile NAV sync (fix frozen $28)
 
 **Summary**

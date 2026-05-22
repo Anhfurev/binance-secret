@@ -1,4 +1,15 @@
-const DEFAULT_SYMBOLS = ["BTCUSDT", "SOLUSDT", "PEPEUSDT"];
+const DEFAULT_SYMBOLS = [
+  "ADAUSDT",
+  "AVAXUSDT",
+  "BNBUSDT",
+  "BTCUSDT",
+  "DOGEUSDT",
+  "ETHUSDT",
+  "LINKUSDT",
+  "PEPEUSDT",
+  "SOLUSDT",
+  "XRPUSDT",
+];
 
 export function readGatewaySecret(): string {
   return (Deno.env.get("BINANCE_GATEWAY_SECRET") ?? "").trim();
