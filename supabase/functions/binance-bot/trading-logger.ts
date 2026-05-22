@@ -1,5 +1,7 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import { fireAndForgetLogsInsert } from "./async-supabase-writes.ts";
+import { fireAndForgetSideEffect } from "./edge-runtime.ts";
 import { toStringValue } from "./utils.ts";
 import { sendTelegramAlert } from "./notifier.ts";
 
@@ -52,10 +54,7 @@ export async function logTradeAction(params: {
     created_at: timestamp,
   };
 
-  const result = await supabase.from("logs").insert([payload]);
-  if (result.error) {
-    console.error(`[binance-bot] failed to write logs table: ${result.error.message}`);
-  }
+  fireAndForgetLogsInsert(supabase, payload, source);
 }
 
 export async function logCcxtOrderError(params: {
@@ -71,7 +70,7 @@ export async function logCcxtOrderError(params: {
   const errorMessage = toStringValue((error as any)?.message) ?? String(error);
   const handled = HANDLED_CCXT_ERROR_NAMES.has(errorName);
 
-  await logTradeAction({
+  logTradeAction({
     supabase,
     action: `[${errorName}] ${errorMessage}`,
     level: handled ? "error" : "warn",
@@ -88,14 +87,14 @@ export async function logCcxtOrderError(params: {
 
   if (!handled) return;
 
-  await sendTelegramAlert(
+  const alert =
     `*Critical Trading Error*\n` +
-      `Symbol: \`${symbol}\`\n` +
-      `Side: \`${side}\`\n` +
-      `Amount: \`${amount}\`\n` +
-      `Error: \`${errorName}\`\n` +
-      `Detail: ${errorMessage}`,
-  );
+    `Symbol: \`${symbol}\`\n` +
+    `Side: \`${side}\`\n` +
+    `Amount: \`${amount}\`\n` +
+    `Error: \`${errorName}\`\n` +
+    `Detail: ${errorMessage}`;
+  fireAndForgetSideEffect("ccxt_critical_telegram", () => sendTelegramAlert(alert));
 }
 
 export async function sendNotification(message: string) {

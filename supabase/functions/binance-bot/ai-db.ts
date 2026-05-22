@@ -5,6 +5,7 @@ import { SUPABASE_CLIENT_OPTIONS } from "./supabase-client-options.ts";
 import type { AiAnalysis } from "./types.ts";
 import { toNumber } from "./utils.ts";
 import { computeWeightedConfidence } from "./ai-scoring.ts";
+import { fireAndForgetLogsInsert } from "./async-supabase-writes.ts";
 import {
   shouldPersistAiCacheHitLog,
   shouldPersistAiKeySuccessLog,
@@ -20,27 +21,7 @@ function clamp01to100(value: number) {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
-export async function getRecentAiCache(
-  symbol: string,
-  cacheWindowMs: number,
-): Promise<{ analysis: AiAnalysis; ageMs: number } | null> {
-  const supabase = getAiCacheClient();
-  if (!supabase) return null;
-  const minCreatedAt = new Date(Date.now() - cacheWindowMs).toISOString();
-  const result = await supabase
-    .from("ai_cache")
-    .select("confidence, trend, action, trend_alignment, trend_score, momentum_score, volume_score, order_book_score, sentiment_haircut_applied, sentiment_penalty_factor, created_at")
-    .eq("symbol", symbol)
-    .gte("created_at", minCreatedAt)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (result.error) {
-    console.warn(`[binance-bot] ai_cache read failed: ${result.error.message}`);
-    return null;
-  }
-  const row = result.data as any;
-  if (!row) return null;
+function mapAiCacheRow(row: Record<string, unknown>, ageMs: number): { analysis: AiAnalysis; ageMs: number } {
   const confidence = clamp01to100(toNumber(row.confidence, 0));
   const trendRaw = String(row.trend ?? "neutral").toLowerCase();
   const trend =
@@ -50,10 +31,6 @@ export async function getRecentAiCache(
     ? actionRaw
     : "HOLD";
   const trendAlignment = Boolean(row.trend_alignment);
-  const createdAtMs = Date.parse(String(row.created_at ?? ""));
-  const ageMs = Number.isFinite(createdAtMs)
-    ? Math.max(0, Date.now() - createdAtMs)
-    : cacheWindowMs;
   const trendScoreRaw = Number(row.trend_score);
   const momentumScoreRaw = Number(row.momentum_score);
   const volumeScoreRaw = Number(row.volume_score);
@@ -78,10 +55,62 @@ export async function getRecentAiCache(
     pro_tip: "",
   };
   base.ai_confidence = computeWeightedConfidence(base);
-  return {
-    analysis: base,
-    ageMs,
-  };
+  return { analysis: base, ageMs };
+}
+
+const AI_CACHE_SELECT =
+  "confidence, trend, action, trend_alignment, trend_score, momentum_score, volume_score, order_book_score, sentiment_haircut_applied, sentiment_penalty_factor, created_at";
+
+/** Most recent cached verdict for a symbol (any age) — interval gate + stale reads. */
+export async function getLatestAiCacheEntry(
+  symbol: string,
+): Promise<{ analysis: AiAnalysis; ageMs: number } | null> {
+  const supabase = getAiCacheClient();
+  if (!supabase) return null;
+  const result = await supabase
+    .from("ai_cache")
+    .select(AI_CACHE_SELECT)
+    .eq("symbol", symbol)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (result.error) {
+    console.warn(`[binance-bot] ai_cache latest read failed: ${result.error.message}`);
+    return null;
+  }
+  const row = result.data as Record<string, unknown> | null;
+  if (!row) return null;
+  const createdAtMs = Date.parse(String(row.created_at ?? ""));
+  const ageMs = Number.isFinite(createdAtMs) ? Math.max(0, Date.now() - createdAtMs) : 0;
+  return mapAiCacheRow(row, ageMs);
+}
+
+export async function getRecentAiCache(
+  symbol: string,
+  cacheWindowMs: number,
+): Promise<{ analysis: AiAnalysis; ageMs: number } | null> {
+  const supabase = getAiCacheClient();
+  if (!supabase) return null;
+  const minCreatedAt = new Date(Date.now() - cacheWindowMs).toISOString();
+  const result = await supabase
+    .from("ai_cache")
+    .select(AI_CACHE_SELECT)
+    .eq("symbol", symbol)
+    .gte("created_at", minCreatedAt)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (result.error) {
+    console.warn(`[binance-bot] ai_cache read failed: ${result.error.message}`);
+    return null;
+  }
+  const row = result.data as Record<string, unknown> | null;
+  if (!row) return null;
+  const createdAtMs = Date.parse(String(row.created_at ?? ""));
+  const ageMs = Number.isFinite(createdAtMs)
+    ? Math.max(0, Date.now() - createdAtMs)
+    : cacheWindowMs;
+  return mapAiCacheRow(row, ageMs);
 }
 
 export async function saveAiCache(symbol: string, ai: AiAnalysis) {
@@ -368,24 +397,19 @@ export async function patchAiQuotaState(
   }
 }
 
-export async function logAiCacheHit(symbol: string, ageMs: number) {
+export function logAiCacheHit(symbol: string, ageMs: number) {
   const supabase = getAiCacheClient();
   if (!supabase || !shouldPersistAiCacheHitLog()) return;
   const ageSeconds = Math.max(0, Math.round(ageMs / 1000));
-  const result = await supabase.from("logs").insert([
-    {
-      user_id: null,
-      symbol,
-      level: "info",
-      source: "ai",
-      message: `[Cache Hit - ${ageSeconds}s old] Reusing full verdict for ${symbol}`,
-      meta: { event: "ai_cache_hit", symbol, cache_age_ms: ageMs },
-      created_at: new Date().toISOString(),
-    },
-  ]);
-  if (result.error) {
-    console.warn(`[binance-bot] failed to log cache hit: ${result.error.message}`);
-  }
+  fireAndForgetLogsInsert(supabase, {
+    user_id: null,
+    symbol,
+    level: "info",
+    source: "ai",
+    message: `[Cache Hit - ${ageSeconds}s old] Reusing full verdict for ${symbol}`,
+    meta: { event: "ai_cache_hit", symbol, cache_age_ms: ageMs },
+    created_at: new Date().toISOString(),
+  }, "ai_cache_hit");
 }
 
 /**
@@ -434,30 +458,25 @@ async function emitThrottledKeyRotation(params: {
     suppressedSinceEmit: 0,
     totalKeys,
   });
-  const result = await supabase.from("logs").insert([
-    {
-      user_id: null,
-      symbol: null,
-      level: "warn",
-      source: "ai",
-      message,
-      meta: {
-        event,
-        key_index: index,
-        total_keys: totalKeys,
-        suppressed_in_prev_window: suppressedFromLastWindow,
-        window_ms: KEY_ROTATION_LOG_WINDOW_MS,
-      },
-      created_at: new Date().toISOString(),
+  fireAndForgetLogsInsert(supabase, {
+    user_id: null,
+    symbol: null,
+    level: "warn",
+    source: "ai",
+    message,
+    meta: {
+      event,
+      key_index: index,
+      total_keys: totalKeys,
+      suppressed_in_prev_window: suppressedFromLastWindow,
+      window_ms: KEY_ROTATION_LOG_WINDOW_MS,
     },
-  ]);
-  if (result.error) {
-    console.warn(`[binance-bot] failed to log ${provider} key rotation: ${result.error.message}`);
-  }
+    created_at: new Date().toISOString(),
+  }, `${provider}_key_rotated`);
 }
 
-export async function logGeminiKeyLimit(index: number, totalKeys: number) {
-  await emitThrottledKeyRotation({
+export function logGeminiKeyLimit(index: number, totalKeys: number) {
+  void emitThrottledKeyRotation({
     provider: "gemini",
     index,
     totalKeys,
@@ -466,27 +485,22 @@ export async function logGeminiKeyLimit(index: number, totalKeys: number) {
   });
 }
 
-export async function logGeminiKeySuccess(index: number, totalKeys: number) {
+export function logGeminiKeySuccess(index: number, totalKeys: number) {
   const supabase = getAiCacheClient();
   if (!supabase || !shouldPersistAiKeySuccessLog()) return;
-  const result = await supabase.from("logs").insert([
-    {
-      user_id: null,
-      symbol: null,
-      level: "info",
-      source: "ai",
-      message: `[Key #${index + 1}] Success`,
-      meta: { event: "gemini_key_success", key_index: index, total_keys: totalKeys },
-      created_at: new Date().toISOString(),
-    },
-  ]);
-  if (result.error) {
-    console.warn(`[binance-bot] failed to log key success: ${result.error.message}`);
-  }
+  fireAndForgetLogsInsert(supabase, {
+    user_id: null,
+    symbol: null,
+    level: "info",
+    source: "ai",
+    message: `[Key #${index + 1}] Success`,
+    meta: { event: "gemini_key_success", key_index: index, total_keys: totalKeys },
+    created_at: new Date().toISOString(),
+  }, "gemini_key_success");
 }
 
-export async function logGroqKeyLimit(index: number, totalKeys: number) {
-  await emitThrottledKeyRotation({
+export function logGroqKeyLimit(index: number, totalKeys: number) {
+  void emitThrottledKeyRotation({
     provider: "groq",
     index,
     totalKeys,
@@ -495,40 +509,30 @@ export async function logGroqKeyLimit(index: number, totalKeys: number) {
   });
 }
 
-export async function logGroqKeySuccess(index: number, totalKeys: number) {
+export function logGroqKeySuccess(index: number, totalKeys: number) {
   const supabase = getAiCacheClient();
   if (!supabase || !shouldPersistAiKeySuccessLog()) return;
-  const result = await supabase.from("logs").insert([
-    {
-      user_id: null,
-      symbol: null,
-      level: "info",
-      source: "ai",
-      message: `[Groq Key #${index + 1}] Success`,
-      meta: { event: "groq_key_success", key_index: index, total_keys: totalKeys },
-      created_at: new Date().toISOString(),
-    },
-  ]);
-  if (result.error) {
-    console.warn(`[binance-bot] failed to log groq key success: ${result.error.message}`);
-  }
+  fireAndForgetLogsInsert(supabase, {
+    user_id: null,
+    symbol: null,
+    level: "info",
+    source: "ai",
+    message: `[Groq Key #${index + 1}] Success`,
+    meta: { event: "groq_key_success", key_index: index, total_keys: totalKeys },
+    created_at: new Date().toISOString(),
+  }, "groq_key_success");
 }
 
-export async function logGroqVeto(symbol: string, reason: string) {
+export function logGroqVeto(symbol: string, reason: string) {
   const supabase = getAiCacheClient();
   if (!supabase) return;
-  const result = await supabase.from("logs").insert([
-    {
-      user_id: null,
-      symbol,
-      level: "warn",
-      source: "ai",
-      message: "groq_buy_veto",
-      meta: { event: "groq_buy_veto", reason },
-      created_at: new Date().toISOString(),
-    },
-  ]);
-  if (result.error) {
-    console.warn(`[binance-bot] failed to log groq veto: ${result.error.message}`);
-  }
+  fireAndForgetLogsInsert(supabase, {
+    user_id: null,
+    symbol,
+    level: "warn",
+    source: "ai",
+    message: "groq_buy_veto",
+    meta: { event: "groq_buy_veto", reason },
+    created_at: new Date().toISOString(),
+  }, "groq_buy_veto");
 }

@@ -1,8 +1,9 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import { fireAndForgetLogsInsert } from "./async-supabase-writes.ts";
 import { extractLegFeeUsd } from "./fill-fees.ts";
 
-export async function insertSellFillQualityLog(params: {
+export function insertSellFillQualityLog(params: {
   supabase: ReturnType<typeof createClient>;
   userId: string;
   symbol: string;
@@ -28,7 +29,7 @@ export async function insertSellFillQualityLog(params: {
     isTestMode,
     partialFill,
   } = params;
-  await supabase.from("logs").insert([{
+  fireAndForgetLogsInsert(supabase, {
     user_id: userId,
     symbol,
     level: "info",
@@ -48,5 +49,5 @@ export async function insertSellFillQualityLog(params: {
       partial_fill: partialFill,
     },
     created_at: new Date().toISOString(),
-  }]);
+  }, "sell_fill_quality");
 }

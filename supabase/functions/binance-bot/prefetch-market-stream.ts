@@ -87,6 +87,27 @@ async function ensureWsCacheBootstrapped(
   await bootstrapPromise;
 }
 
+function applyHubBulkToCache(
+  cache: Map<string, IndicatorSnapshot>,
+  normalized: string[],
+  bulk: Map<string, import("./market-stream-payload.ts").StreamMarketPayload>,
+): number {
+  let hits = 0;
+  for (const sym of normalized) {
+    const payload = bulk.get(sym);
+    if (!payload) continue;
+    try {
+      cache.set(sym, assembleIndicatorSnapshotFromStream(payload));
+      hits += 1;
+    } catch (error) {
+      console.warn(
+        `[prefetch_market] hub assemble failed ${sym}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return hits;
+}
+
 export async function prefetchMarketIntoCache(
   cache: Map<string, IndicatorSnapshot>,
   symbols: string[],
@@ -98,31 +119,21 @@ export async function prefetchMarketIntoCache(
   let streamHits = 0;
   let restFallbacks = 0;
 
-  let misses: string[];
-  if (isNativeBinanceWsMarketCacheEnabled()) {
-    ensureBinanceStreamManager(normalized);
-    await ensureWsCacheBootstrapped(normalized, signal);
-    const ws = prefetchMarketsFromWsCache(cache, normalized);
-    streamHits += ws.wsHits;
-    misses = ws.cold.filter((sym) => !cache.has(sym));
-  } else {
-    misses = [...normalized];
+  /** Vultr: one hub round-trip (~100ms) before per-symbol REST bootstrap (was ~17s for 10 coins). */
+  if (isStreamMarketPrefetchEnabled()) {
+    const bulk = await fetchStreamMarketsBulk(normalized, signal);
+    streamHits += applyHubBulkToCache(cache, normalized, bulk);
   }
 
-  if (!isNativeBinanceWsMarketCacheEnabled() && isStreamMarketPrefetchEnabled()) {
-    const bulk = await fetchStreamMarketsBulk(misses.length ? misses : normalized, signal);
-    for (const sym of normalized) {
-      const payload = bulk.get(sym);
-      if (!payload) continue;
-      try {
-        cache.set(sym, assembleIndicatorSnapshotFromStream(payload));
-        streamHits += 1;
-      } catch (error) {
-        console.warn(
-          `[prefetch_market] hub assemble failed ${sym}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
+  let misses = normalized.filter((sym) => !cache.has(sym));
+
+  if (isNativeBinanceWsMarketCacheEnabled()) {
+    ensureBinanceStreamManager(normalized);
+    if (misses.length) {
+      await ensureWsCacheBootstrapped(misses, signal);
     }
+    const ws = prefetchMarketsFromWsCache(cache, misses.length ? misses : normalized);
+    streamHits += ws.wsHits;
     misses = normalized.filter((sym) => !cache.has(sym));
   }
 
@@ -135,7 +146,7 @@ export async function prefetchMarketIntoCache(
   }
 
   console.log(
-    `[prefetch_market] ws_hits=${streamHits} rest_fallbacks=${restFallbacks} total=${normalized.length} native_ws=${isNativeBinanceWsMarketCacheEnabled() ? 1 : 0}`,
+    `[prefetch_market] stream_hits=${streamHits} rest_fallbacks=${restFallbacks} total=${normalized.length} native_ws=${isNativeBinanceWsMarketCacheEnabled() ? 1 : 0}`,
   );
   return { streamHits, restFallbacks };
 }

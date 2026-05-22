@@ -3,6 +3,7 @@
  * Pre-AI technical gate transparency: scorecard, FAIL_* codes, war_room_audits payload.
  */
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import { fireAndForgetTableInsert } from "./async-supabase-writes.ts";
 import { decideHybridMatrix } from "./index-decision.ts";
 import type { AiAnalysis, IndicatorSnapshot, SignalDecision } from "./types.ts";
 import { allowsEma200HybridBypass } from "./strategy-hybrid-gates.ts";
@@ -235,20 +236,15 @@ export async function insertWarRoomAudit(params: {
 }): Promise<void> {
   const { supabase, user_id, symbol, bot_id, cycle_id, veto_details, final_decision, technical_score, ai_confidence } =
     params;
-  const { error } = await supabase.from("war_room_audits").insert([
-    {
-      user_id,
-      symbol,
-      bot_id,
-      cycle_id,
-      veto_details,
-      final_decision,
-      technical_score,
-      ai_confidence,
-      created_at: new Date().toISOString(),
-    },
-  ]);
-  if (error) {
-    console.warn(`[war_room_audits] insert skipped: ${error.message}`);
-  }
+  fireAndForgetTableInsert(supabase, "war_room_audits", {
+    user_id,
+    symbol,
+    bot_id,
+    cycle_id,
+    veto_details,
+    final_decision,
+    technical_score,
+    ai_confidence,
+    created_at: new Date().toISOString(),
+  }, `war_room_${symbol}`);
 }

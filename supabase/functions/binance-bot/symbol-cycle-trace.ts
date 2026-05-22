@@ -1,5 +1,6 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import { fireAndForgetTableUpsert } from "./async-supabase-writes.ts";
 import type { DebugRawAiResponse } from "./types.ts";
 import { toFixedNoExponents } from "./utils.ts";
 
@@ -119,12 +120,26 @@ export async function persistDebugTrace(params: {
     final_decision: decision,
     raw_ai_response: rawPayload,
   };
-  const { error } = await supabase
-    .from("bot_debug_traces")
-    .upsert(payload, { onConflict: "cycle_id,symbol,user_id" });
-  if (error) {
-    console.error(`[binance-bot] failed to persist debug trace ${symbol}/${cycleId}: ${error.message}`);
-  }
+  fireAndForgetTableUpsert(
+    supabase,
+    "bot_debug_traces",
+    payload,
+    { onConflict: "cycle_id,symbol,user_id" },
+    `debug_trace_${symbol}`,
+  );
+}
+
+export function enqueueTraceReasonOnly(params: {
+  supabase: ReturnType<typeof createClient>;
+  userId: string | null;
+  botId: string | null;
+  cycleId: string;
+  symbol: string;
+  decision: "BUY" | "SELL" | "HOLD";
+  reason: string;
+  perfMetadata?: Record<string, unknown>;
+}): void {
+  void captureTraceReasonOnly(params);
 }
 
 export async function captureTraceReasonOnly(params: {
@@ -138,20 +153,23 @@ export async function captureTraceReasonOnly(params: {
   perfMetadata?: Record<string, unknown>;
 }) {
   const { supabase, userId, botId, cycleId, symbol, decision, reason, perfMetadata } = params;
-  const { error } = await supabase.from("bot_debug_traces").upsert({
-    user_id: userId,
-    bot_id: botId,
-    cycle_id: cycleId,
-    symbol,
-    final_decision: decision,
-    raw_ai_response: buildDebugRawAiResponse({
-      discriminator: "timeout",
-      reason,
-      perfMetadata,
-      ai: { ai_provider: "runtime" },
-    }),
-  }, { onConflict: "cycle_id,symbol,user_id" });
-  if (error) {
-    console.error(`[binance-bot] failed to capture reason-only trace for ${symbol}: ${error.message}`);
-  }
+  fireAndForgetTableUpsert(
+    supabase,
+    "bot_debug_traces",
+    {
+      user_id: userId,
+      bot_id: botId,
+      cycle_id: cycleId,
+      symbol,
+      final_decision: decision,
+      raw_ai_response: buildDebugRawAiResponse({
+        discriminator: "timeout",
+        reason,
+        perfMetadata,
+        ai: { ai_provider: "runtime" },
+      }),
+    },
+    { onConflict: "cycle_id,symbol,user_id" },
+    `trace_reason_${symbol}`,
+  );
 }

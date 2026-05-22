@@ -8,6 +8,25 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 ---
 
+## 2026-05-22 — 15m AI outbound interval gate (fix mid-cycle cascade leak)
+
+**Summary**
+
+- **`ai-llm-interval-gate.ts`:** Per-symbol bucket blocks Gemini/Groq HTTP until `AI_LLM_INTERVAL_MS` (default **15m**, falls back to `AI_CACHE_WINDOW_MS`) elapses since last `ai_cache` write.
+- **`cycle-decider`:** Math may pass tier-1, but `getAiVerdict` is skipped when the bucket is closed — uses stale `ai_cache` or local math `HOLD` (`resolveIntervalHeldAiVerdict`).
+- **`ai-core` / `ai-cascade-pipeline`:** Cache-miss cascade and cache-hit Groq veto also respect the gate; default `AI_CACHE_WINDOW_MS` raised to **900000** (15m).
+
+---
+
+## 2026-05-22 — Compounding size (40% wallet) + macro bounce gate (ACTIVE_SHORT / BTC 4h EMA21)
+
+**Summary**
+
+- **`compound-position-sizing.ts` / `trade-store.ts`:** Default `COMPOUND_POSITION_PCT=40` sizes each entry as 40% of available wallet (replaces fixed `trade_size_usd=11` on ~$28 accounts). Set `COMPOUND_POSITION_PCT=0` to fall back to DB `trade_size_usd` / `risk_percent`.
+- **`macro-bounce-regime-gate.ts`:** Blocks all `strategy_oversold_bounce_entry` BUY paths when macro regime is `ACTIVE_SHORT` or BTC trades below 4h EMA21; wired through cron preflight → `cycle-decider` (incl. fast bounce lane).
+
+---
+
 ## 2026-05-20 — Paper snapshot learning columns (what we hold / why P&L)
 
 **Summary**
@@ -104,6 +123,9 @@ Append-only log so **future chats** can see what changed in large working sessio
 
 - **`cron-telegram-digest.ts`:** 2-min digest lines now include live WS price, WS age, AI action/confidence, RSI, and hold reason (not just `hold` + short code).
 - **Stream hub:** `move-wake` + default wick/move % for all 10 symbols; shared `bot-wake-client` cooldown; `stream_move` skips Edge lease like `stream_wick`. Vultr default wake URL `http://127.0.0.1:8788`.
+- **`prefetch-market-stream.ts`:** hub `/stream/market/bulk` before REST kline bootstrap (fixes ~17s cron with 10 symbols on Vultr). `CRON_LATENCY_WARN_MS` env; Vultr defaults `BINANCE_WS_MARKET_CACHE=0` + hub URL in `vultr-deno-bot.sh`.
+- **Async DB/Telegram:** `async-supabase-writes.ts`; cron returns before vitality/balance sync/logs flush; pre/post execution telemetry non-blocking; `POST_BATCH_BALANCE_SYNC_BLOCKING=0` default.
+- **`trades` hygiene:** migration `20260522150000` clears `closed_at` on open rows; `insertTrade` forces `closed_at` null for open; `GET /api/trades?userId=` for buy/cost/PnL summary.
 - Deployed `binance-bot` Edge to `emviaygygylosvmtsvlq` (`--no-verify-jwt`).
 - Migration `20260522120000_restore_trades_bot_schema.sql`: adds `extra`, `status`, camelCase bot columns on `trades` (fixes `42703 column trades.extra does not exist`).
 - `.env.example`: Binance API + gateway IP whitelist notes.

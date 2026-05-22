@@ -15,7 +15,16 @@ import { prefetchMarketIntoCache } from "./prefetch-market-stream.ts";
 import { safeExecute, safeExecuteBackground, safeExecuteDetached } from "./safe-execute.ts";
 import { detachCronTailSideEffects } from "./cron-tail-side-effects.ts";
 import { runCronSymbolBatchesParallel } from "./cron-symbol-batches.ts";
-import { mergeBalanceSyncTargets, runPostBatchBalanceSync, runSymbolBatch } from "./run-symbol-batch.ts";
+import {
+  edgeWaitUntil,
+  fireAndForgetSideEffect,
+} from "./edge-runtime.ts";
+import {
+  mergeBalanceSyncTargets,
+  readPostBatchBalanceSyncBlocking,
+  runPostBatchBalanceSync,
+  runSymbolBatch,
+} from "./run-symbol-batch.ts";
 import { readCronMathTraceTelegramEnabled, sendCronMathTraceTelegram } from "./telegram-math-trace.ts";
 import { readPaperWalletReconcileEnabled, reconcilePaperProfilesForUserIds } from "./paper-wallet-reconcile.ts";
 import { shouldLogCronBatchStartRow } from "./log-policy.ts";
@@ -23,7 +32,6 @@ import { clearCycleLogBuffer, enqueueCycleLog } from "./cycle-log-buffer.ts";
 import { recordCronCycleSummary } from "./cron-runner-telemetry.ts";
 import { tryRunCronJanitor } from "./cron-janitor.ts";
 import { runFunctionVitalityCheck } from "./function-health.ts";
-import { edgeWaitUntil } from "./edge-runtime.ts";
 import { flushLlmBatchKeyRegistryToDatabase } from "./llm-batch-key-sync.ts";
 import {
   clearCronBatchLlmKeyPools,
@@ -33,6 +41,7 @@ import {
 import { isCronLlmKeyPoolHydrated } from "./llm-key-pool.ts";
 import { attachServerBackgroundLifeline } from "./server-lifecycle.ts";
 import { resolveBtcOverboughtFromMarketCache } from "./market-anchor.ts";
+import { resolveBtcMacroBounceGateFromMarketCache } from "./macro-bounce-regime-gate.ts";
 import { getAiQuotaState, patchAiQuotaState } from "./ai-db.ts";
 import { buildPayload } from "./ai-core.ts";
 import { isSnapshotMathPrimedForLlm } from "./math-guard.ts";
@@ -151,6 +160,14 @@ export async function handleAuthenticatedCron(
     if (cycleSignal?.aborted) return edgeCycleAbortedResponse(batchId, opts, startedAtMs);
     botDebug("index", "time_sync_ok", { n_symbols: symbols.length, batchId, prefetch_symbols: prefetchSymbols.length });
     const btcOverbought = resolveBtcOverboughtFromMarketCache(sharedMarketCache);
+    const btcMacroBounceGate = resolveBtcMacroBounceGateFromMarketCache(sharedMarketCache);
+    if (btcMacroBounceGate.blocked) {
+      console.log("[MACRO_BOUNCE_GATE] cycle_preflight", {
+        regime: btcMacroBounceGate.regimeLabel,
+        reason: btcMacroBounceGate.reason,
+        btc_ema21_4h: btcMacroBounceGate.btcEma21_4h,
+      });
+    }
     const groqPoolN = batchLlmPools.groqPlan.scanKeys.length;
     const gemPoolN = batchLlmPools.geminiSlots.filter((s) => s.value).length;
     console.log(
@@ -265,6 +282,7 @@ export async function handleAuthenticatedCron(
       lastAiPriceBySymbol,
       marketCache: sharedMarketCache,
       btcOverbought,
+      btcMacroBounceGate,
       batchId,
       matrixRouting,
       groqPoolN,
@@ -281,22 +299,26 @@ export async function handleAuthenticatedCron(
     if (totalScanned === 0) {
       recordCronCycleSummary({ at: new Date().toISOString(), trigger: opts.trigger ?? "cron", scanned: 0, actions: 0 });
       const totalExecutionMs = Date.now() - startedAtMs;
-      const functionHealth = await safeExecute(
-        "function_vitality",
-        () => runFunctionVitalityCheck({ supabase, batchId, runDebugger: false }),
-        null,
-      );
       detachCronTailSideEffects({
         supabase,
         batchId,
         totalScanned: 0,
         totalExecutionMs,
         allActions: [],
-        functionHealth,
+        functionHealth: { deferred: true },
       });
-      return jsonResponse({ ok: true, skipped: true, message: "No active bot for requested symbol(s)", symbols, symbol_results: perSymbol, batch_id: batchId, execution_ms_total: totalExecutionMs, trigger: opts.trigger ?? "cron", lite_cycle: liteCycle, function_health: functionHealth });
+      fireAndForgetSideEffect("function_vitality", () =>
+        runFunctionVitalityCheck({ supabase, batchId, runDebugger: false })
+      );
+      return jsonResponse({ ok: true, skipped: true, message: "No active bot for requested symbol(s)", symbols, symbol_results: perSymbol, batch_id: batchId, execution_ms_total: totalExecutionMs, trigger: opts.trigger ?? "cron", lite_cycle: liteCycle, function_health: { deferred: true } });
     }
-    await runPostBatchBalanceSync({ supabase, balanceSyncTargets: mergedTargets, fallbackSymbol: symbols[0] ?? DEFAULT_SYMBOL });
+    if (readPostBatchBalanceSyncBlocking()) {
+      await runPostBatchBalanceSync({ supabase, balanceSyncTargets: mergedTargets, fallbackSymbol: symbols[0] ?? DEFAULT_SYMBOL });
+    } else {
+      fireAndForgetSideEffect("post_batch_balance_sync", () =>
+        runPostBatchBalanceSync({ supabase, balanceSyncTargets: mergedTargets, fallbackSymbol: symbols[0] ?? DEFAULT_SYMBOL })
+      );
+    }
     if (readPaperWalletReconcileEnabled()) {
       const paperUserIds = [...mergedTargets.entries()]
         .filter(([, target]) => target.hasPaperMode)
@@ -310,11 +332,6 @@ export async function handleAuthenticatedCron(
     const hasLiveTrading = [...mergedTargets.values()].some((t) => t.isLiveMode);
     recordCronCycleSummary({ at: new Date().toISOString(), trigger: opts.trigger ?? "cron", scanned: totalScanned, actions: allActions.length });
     const totalExecutionMs = Date.now() - startedAtMs;
-    const functionHealth = await safeExecute(
-      "function_vitality",
-      () => runFunctionVitalityCheck({ supabase, batchId, runDebugger: false }),
-      null,
-    );
     detachCronTailSideEffects({
       supabase,
       batchId,
@@ -322,8 +339,11 @@ export async function handleAuthenticatedCron(
       totalExecutionMs,
       allActions,
       hasLiveTrading,
-      functionHealth,
+      functionHealth: { deferred: true },
     });
+    fireAndForgetSideEffect("function_vitality", () =>
+      runFunctionVitalityCheck({ supabase, batchId, runDebugger: false })
+    );
     return jsonResponse({
       ok: true,
       status: "success",
@@ -338,7 +358,7 @@ export async function handleAuthenticatedCron(
       execution_ms_total: totalExecutionMs,
       trigger: opts.trigger ?? "cron",
       lite_cycle: liteCycle,
-      function_health: functionHealth,
+      function_health: { deferred: true },
     });
   } catch (error) {
     if (

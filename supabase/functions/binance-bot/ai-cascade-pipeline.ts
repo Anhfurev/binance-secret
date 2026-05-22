@@ -8,6 +8,10 @@ import {
   readTier2GeminiMinConfidence,
 } from "./ai-cascade-config.ts";
 import { buildGeminiStructuralSummary } from "./ai-cascade-summary.ts";
+import {
+  buildAiIntervalGateLog,
+  evaluateAiLlmOutboundGate,
+} from "./ai-llm-interval-gate.ts";
 import { assertLlmDispatchConvictionCeiling } from "./llm-gatekeeper-prefilter.ts";
 import type { TradeRegime } from "./regime-scaling.ts";
 
@@ -105,6 +109,18 @@ export async function runCascadeAiAnalysis(params: CascadeAiParams): Promise<AiA
     return withTrace(neutralFallback(), {
       provider: "fallback",
       providerPath: "cascade_gatekeeper_blocked",
+      cacheStatus: "miss",
+    });
+  }
+
+  const outboundGate = await evaluateAiLlmOutboundGate(symbol);
+  if (!outboundGate.allowOutbound) {
+    console.log(buildAiIntervalGateLog(symbol, outboundGate));
+    const held = neutralFallback();
+    held.action = "HOLD";
+    return withTrace(held, {
+      provider: "fallback",
+      providerPath: "cascade_interval_gate_hold",
       cacheStatus: "miss",
     });
   }

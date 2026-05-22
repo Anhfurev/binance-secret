@@ -10,7 +10,12 @@ import {
   resolveGroqKeyPlanForRuntime,
 } from "./llm-api-keys-resolve.ts";
 import {
+  buildAiIntervalGateLog,
+  evaluateAiLlmOutboundGate,
+} from "./ai-llm-interval-gate.ts";
+import {
   getAiQuotaState,
+  getLatestAiCacheEntry,
   getRecentAiCache,
   logAiCacheHit,
   logGeminiKeyLimit,
@@ -409,7 +414,9 @@ export async function getAiAnalysis(
       await logAiCacheHit(symbol, cached.ageMs);
       const quota = await getAiQuotaState();
       let analysis = applyStaleSignalBuyVeto(snapshot, cached.analysis);
-      const needsGroqGate = analysis.action === "BUY" && !hasFinalGroqBuyVeto(analysis) &&
+      const outboundGate = await evaluateAiLlmOutboundGate(symbol);
+      const needsGroqGate = outboundGate.allowOutbound &&
+        analysis.action === "BUY" && !hasFinalGroqBuyVeto(analysis) &&
         (cascadePipeline || GLOBAL_BOT_CONFIG.GROQ_VETO_ON_CACHE_HIT);
       if (needsGroqGate) {
         const reviewed = await applyGroqBuyVeto({
@@ -442,6 +449,16 @@ export async function getAiAnalysis(
     }
   } else {
     console.log(`[Cache Bypass] ${symbol} reason=${options?.cacheBypassReason ?? "manual_bypass"}`);
+  }
+
+  const intervalHold = await shortCircuitOutboundLlmIfIntervalClosed({
+    symbol,
+    snapshot,
+    shouldBypassCache,
+    scoreWeights: sw,
+  });
+  if (intervalHold) {
+    return await applySentimentVibeCheck(intervalHold, snapshot, sw, await sentimentPrefetch);
   }
 
   const assertGeminiDispatchPhase3 = (): boolean => {
@@ -697,6 +714,59 @@ export async function getAiAnalysis(
     snapshot,
     sw,
   );
+}
+
+/** Stale or fresh cache read — used when the 15m outbound bucket is closed. */
+export async function resolveIntervalHeldAiVerdict(params: {
+  symbol: string;
+  snapshot: IndicatorSnapshot;
+  scoreWeights?: ScoreWeightsRecord | null;
+}): Promise<AiAnalysis> {
+  const sym = String(params.symbol ?? "").trim().toUpperCase();
+  const latest = await getLatestAiCacheEntry(sym);
+  const sw = params.scoreWeights ?? null;
+  if (latest) {
+    const refreshed = applyStaleSignalBuyVeto(params.snapshot, latest.analysis);
+    const ageSeconds = Math.max(0, Math.round(latest.ageMs / 1000));
+    return await applySentimentVibeCheck(
+      withAiTrace(refreshed, {
+        provider: "cache",
+        providerPath: `interval_hold_stale_${ageSeconds}s`,
+        cacheStatus: "hit",
+        cacheAgeMs: latest.ageMs,
+      }),
+      params.snapshot,
+      sw,
+    );
+  }
+  const technical = buildTechnicalIndicatorFallback(params.snapshot);
+  technical.action = "HOLD";
+  return await applySentimentVibeCheck(
+    withAiTrace(technical, {
+      provider: "fallback",
+      providerPath: "interval_gate_math_hold",
+      cacheStatus: "miss",
+    }),
+    params.snapshot,
+    sw,
+  );
+}
+
+async function shortCircuitOutboundLlmIfIntervalClosed(params: {
+  symbol: string;
+  snapshot: IndicatorSnapshot;
+  shouldBypassCache: boolean;
+  scoreWeights?: ScoreWeightsRecord | null;
+}): Promise<AiAnalysis | null> {
+  if (params.shouldBypassCache) return null;
+  const gate = await evaluateAiLlmOutboundGate(params.symbol);
+  if (gate.allowOutbound) return null;
+  console.log(buildAiIntervalGateLog(params.symbol, gate));
+  return resolveIntervalHeldAiVerdict({
+    symbol: params.symbol,
+    snapshot: params.snapshot,
+    scoreWeights: params.scoreWeights,
+  });
 }
 
 export async function getRecentAiCacheForSymbol(symbol: string): Promise<AiAnalysis | null> {

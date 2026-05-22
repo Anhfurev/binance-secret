@@ -1,20 +1,16 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
+import { fireAndForgetLogsInsert } from "./async-supabase-writes.ts";
 import type { MarketRegime } from "./types.ts";
 import type { WarRoomConsensus } from "./war-room.ts";
 
-/** Insert into `public.logs`; failures surface in Edge Function logs (Dashboard → Functions → binance-bot → Logs). */
-export async function safeInsertLog(
+/** Non-blocking insert into `public.logs`. */
+export function safeInsertLog(
   supabase: ReturnType<typeof createClient>,
   row: Record<string, unknown>,
   context: string,
 ) {
-  const { error } = await supabase.from("logs").insert([row]);
-  if (error) {
-    console.error(
-      `[binance-bot] public.logs insert failed (${context}): ${error.message} code=${error.code ?? ""}`,
-    );
-  }
+  fireAndForgetLogsInsert(supabase, row, context);
 }
 
 /** Ghost/paper execution audit row for BUY decisions (no exchange side effect). */
@@ -28,7 +24,7 @@ export async function logMockTrade(params: {
   strategyNotes: string;
 }) {
   const { supabase, userId, symbol, tradeUsd, price, qty, strategyNotes } = params;
-  await safeInsertLog(
+  safeInsertLog(
     supabase,
     {
       user_id: userId,
@@ -62,7 +58,7 @@ export async function logWarRoomGhostSnapshot(params: {
 }) {
   const { supabase, userId, symbol, warRoom, rawWeighted, effectiveChart, regime, detail } =
     params;
-  await safeInsertLog(
+  safeInsertLog(
     supabase,
     {
       user_id: userId,
@@ -98,7 +94,7 @@ export async function logBuyFlowFailure(params: {
   meta?: Record<string, unknown>;
 }) {
   const { supabase, userId, symbol, message, meta } = params;
-  await safeInsertLog(
+  safeInsertLog(
     supabase,
     {
       user_id: userId,

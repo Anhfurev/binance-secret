@@ -5,6 +5,7 @@ import { botError } from "./bot-debug.ts";
 import { getTotalAccountBalanceUsdt } from "./binance.ts";
 import { updateProfileBalance } from "./trade-store.ts";
 import { setActiveTelegramCycleId } from "./bot-shared.ts";
+import { fireAndForgetLogsInsert, fireAndForgetTableInsert } from "./async-supabase-writes.ts";
 import { safeExecute } from "./safe-execute.ts";
 import { formatUnknownError } from "./utils.ts";
 import { validateSymbolBatchInput } from "./batch-validator.ts";
@@ -51,6 +52,12 @@ export function readPostBatchBalanceSyncEnabled(): boolean {
   return raw !== "0" && raw !== "false";
 }
 
+/** When false (default on Vultr), balance sync runs after HTTP response. */
+export function readPostBatchBalanceSyncBlocking(): boolean {
+  const raw = String(Deno.env.get("POST_BATCH_BALANCE_SYNC_BLOCKING") ?? "0").trim().toLowerCase();
+  return raw === "1" || raw === "true";
+}
+
 export async function runSymbolBatch(params: {
   supabase: ReturnType<typeof createClient>;
   symbolFilter: string;
@@ -59,6 +66,7 @@ export async function runSymbolBatch(params: {
   paperScenario?: { name: import("./paper-scenario-snapshot.ts").PaperScenarioName; execute: boolean } | null;
   symbolMatrixIndex?: number;
   btcOverbought?: boolean;
+  btcMacroBounceGate?: import("./macro-bounce-regime-gate.ts").BtcMacroBounceGate;
   /** Staging / single-symbol runs: skip BTC anchor snapshot and treat alts as not BTC-gated. */
   skipBtcMarketAnchor?: boolean;
   skipFrictionSpreadRefresh?: boolean;
@@ -74,6 +82,7 @@ export async function runSymbolBatch(params: {
     paperScenario,
     symbolMatrixIndex,
     btcOverbought: btcOverboughtHint,
+    btcMacroBounceGate: btcMacroBounceGateHint,
     skipBtcMarketAnchor,
     skipFrictionSpreadRefresh,
     maxActiveBots,
@@ -97,10 +106,19 @@ export async function runSymbolBatch(params: {
     symbolFilter,
     marketCache,
     btcOverbought: btcOverboughtHint,
+    btcMacroBounceGate: btcMacroBounceGateHint,
     skipBtcMarketAnchor,
   });
   if (validated.empty) return validated.result;
-  const { activeBots, symbolCache, cycleId, btcOverbought, botCycleTimeoutMs, balanceSyncTargets } = validated;
+  const {
+    activeBots,
+    symbolCache,
+    cycleId,
+    btcOverbought,
+    btcMacroBounceGate,
+    botCycleTimeoutMs,
+    balanceSyncTargets,
+  } = validated;
   const ownsMarketCache = !marketCache;
   setActiveTelegramCycleId(cycleId);
   try {
@@ -113,6 +131,7 @@ export async function runSymbolBatch(params: {
       paperScenario,
       cycleId,
       btcOverbought,
+      btcMacroBounceGate,
       botCycleTimeoutMs,
       symbolMatrixIndex,
       cycleSignal: signal,
@@ -171,7 +190,7 @@ export async function runPostBatchBalanceSync(params: {
   } catch (error) {
     const detail = formatUnknownError(error);
     botError("index", "balance_sync_prefetch_failed", { detail, live_users: liveTargets.length });
-    await safeExecute("catch_balance_sync_prefetch_failed_log", () => supabase.from("logs").insert([{
+    fireAndForgetLogsInsert(supabase, {
       user_id: null,
       symbol: fallbackSymbol,
       level: "warn",
@@ -179,7 +198,7 @@ export async function runPostBatchBalanceSync(params: {
       message: "profile_balance_sync_prefetch_failed",
       meta: { event: "profile_balance_sync_prefetch_failed", detail, live_users: liveTargets.length },
       created_at: new Date().toISOString(),
-    }]), undefined);
+    }, "balance_sync_prefetch_failed");
     return { synced: 0, skipped: true };
   }
 
@@ -196,7 +215,7 @@ export async function runPostBatchBalanceSync(params: {
     const logSymbol = [...target.symbols][0] ?? fallbackSymbol;
     try {
       await updateProfileBalance(supabase, userId, liveTotalBalance);
-      await supabase.from("account_balances").insert([{
+      fireAndForgetTableInsert(supabase, "account_balances", {
         user_id: userId,
         balance: roundedBalance,
         timestamp: syncedAt,
@@ -206,8 +225,8 @@ export async function runPostBatchBalanceSync(params: {
           shared_wallet: sharedWallet,
           live_users_in_batch: liveTargets.length,
         },
-      }]);
-      await supabase.from("logs").insert([{
+      }, "balance_sync_snapshot");
+      fireAndForgetLogsInsert(supabase, {
         user_id: userId,
         symbol: logSymbol,
         level: "info",
@@ -220,12 +239,12 @@ export async function runPostBatchBalanceSync(params: {
           live_users_in_batch: liveTargets.length,
         },
         created_at: syncedAt,
-      }]);
+      }, "balance_sync_ok");
       synced += 1;
     } catch (error) {
       const detail = formatUnknownError(error);
       botError("index", "balance_sync_failed", { userId, symbol: logSymbol, detail });
-      await safeExecute("catch_balance_sync_failed_log", () => supabase.from("logs").insert([{
+      fireAndForgetLogsInsert(supabase, {
         user_id: userId,
         symbol: logSymbol,
         level: "warn",
@@ -233,7 +252,7 @@ export async function runPostBatchBalanceSync(params: {
         message: "profile_balance_sync_failed",
         meta: { event: "profile_balance_sync_failed", detail },
         created_at: new Date().toISOString(),
-      }]), undefined);
+      }, "balance_sync_failed");
     }
   }
 

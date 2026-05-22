@@ -1,6 +1,8 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import type { AiAnalysis } from "./types.ts";
+import { fireAndForgetLogsInsert } from "./async-supabase-writes.ts";
+import { fireAndForgetSideEffect } from "./edge-runtime.ts";
 import { sendTelegramAlert } from "./notifier.ts";
 import { adjustPaperDemoBalance, insertTrade } from "./trade-store.ts";
 import { logMockTrade } from "./buy-logging.ts";
@@ -154,7 +156,7 @@ export async function finalizeBuyExecution(params: {
       `Edge BUY | orderId=${buyOrderId ?? "n/a"} | strategy=${strategyNotes} | tech=${technical} ai=${ai.trend} effective=${effectiveConfidence.toFixed(2)}% raw=${rawWeighted.toFixed(2)}%`,
   }, `BOUGHT: ${strategyNotes}`, { skipTradeRowTelegram: true });
 
-  await supabase.from("logs").insert([{
+  fireAndForgetLogsInsert(supabase, {
     user_id: userId,
     symbol,
     level: "info",
@@ -173,7 +175,7 @@ export async function finalizeBuyExecution(params: {
       trade_mode: ghostMode ? "ghost" : isTestMode ? "paper" : "live",
     },
     created_at: new Date().toISOString(),
-  }]);
+  }, "buy_fill_quality");
 
   if (shouldApplyPaperDemoLedgerDelta(isTestMode, ghostMode)) {
     if (shouldInitializeStartingBalance && Number.isFinite(resolvedStartingBalance)) {
@@ -202,15 +204,17 @@ export async function finalizeBuyExecution(params: {
     });
   }
 
-  await persistRunTelemetry({ supabase, userId, symbol, action: "buy", detail: `BUY ${filledQty} @ ${formatTelegramPrice(snapshotPrice)}`, balance: nextBalance });
-  await syncProfilePortfolioHoldings({
-    supabase,
-    userId,
-    availableUsdt: nextBalance,
-    priceByBase: { [symbol.replace(/USDT$/, "")]: snapshotPrice },
-  });
+  persistRunTelemetry({ supabase, userId, symbol, action: "buy", detail: `BUY ${filledQty} @ ${formatTelegramPrice(snapshotPrice)}`, balance: nextBalance });
+  fireAndForgetSideEffect("sync_portfolio_holdings_buy", () =>
+    syncProfilePortfolioHoldings({
+      supabase,
+      userId,
+      availableUsdt: nextBalance,
+      priceByBase: { [symbol.replace(/USDT$/, "")]: snapshotPrice },
+    })
+  );
   if (ghostMode) {
-    await logMockTrade({
+    logMockTrade({
       supabase,
       userId,
       symbol,
@@ -229,14 +233,15 @@ export async function finalizeBuyExecution(params: {
     bearish1hCap && rawWeighted > effectiveConfidence
       ? ` (capped from ${rawWeighted.toFixed(2)}%)`
       : "";
-  await sendTelegramAlert(
+  const buyTelegram =
     `${buyModeTitle}: Bought $${formatUsdAlertAmount(valueUsd)} of ${escapeHtml(boughtAsset)} · ` +
-      `<b>conf</b> ${effectiveConfidence.toFixed(2)}%${confTail}${proTipLine}\n\n` +
-      buyOrderLabel +
-      `<b>Symbol:</b> ${escapeHtml(symbol)}\n` +
-      `<b>Price:</b> ${formatTelegramPrice(snapshotPrice)} · <b>Qty:</b> ${filledQty}\n` +
-      `<b>Notional:</b> ${valueUsd.toFixed(2)} USDT · <b>Balance after:</b> ${nextBalance.toFixed(2)} USDT\n` +
-      `<b>Strategy:</b> ${escapeHtml(strategyNotes)}`,
+    `<b>conf</b> ${effectiveConfidence.toFixed(2)}%${confTail}${proTipLine}\n\n` +
+    buyOrderLabel +
+    `<b>Symbol:</b> ${escapeHtml(symbol)}\n` +
+    `<b>Price:</b> ${formatTelegramPrice(snapshotPrice)} · <b>Qty:</b> ${filledQty}\n` +
+    `<b>Notional:</b> ${valueUsd.toFixed(2)} USDT · <b>Balance after:</b> ${nextBalance.toFixed(2)} USDT\n` +
+    `<b>Strategy:</b> ${escapeHtml(strategyNotes)}`;
+  fireAndForgetSideEffect("buy_fill_telegram", () => sendTelegramAlert(buyTelegram));
   );
   botDebug("buyFlow", "buy_completed", {
     userId,

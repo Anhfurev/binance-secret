@@ -7,8 +7,10 @@ import { calculateTechnicalScore, checkEntryConditions, checkExitConditions } fr
 import { canFireSoftSignalExit } from "./strategy-stop-hold.ts";
 import {
   isOversoldBounceContext,
+  isOversoldBounceStrategyReason,
   resolveMinTechForOversoldBounce,
 } from "./strategy-oversold-bounce.ts";
+import type { BtcMacroBounceGate } from "./macro-bounce-regime-gate.ts";
 import { evaluateMoneyMachineExits } from "./money-machine-guard.ts";
 import { decideHybridMatrix } from "./index-decision.ts";
 import { passesMeanReversionBuyGate } from "./regime-detection.ts";
@@ -19,6 +21,12 @@ import { blockedByBuyReentryGuards } from "./stop-reentry-cooldown.ts";
 import { readMinAdxForNonTrendingBuy } from "./buy-helpers.ts";
 import { evaluateChopBuyBlock } from "./chop-entry-guard.ts";
 import { resolveSessionAwareMinAiConfidence, resolveVolumeSpikeMultiplier } from "./decision-tuning.ts";
+import { getResolvedScoreWeightsPack } from "./ai-scoring.ts";
+import { resolveIntervalHeldAiVerdict } from "./ai-core.ts";
+import {
+  buildAiIntervalGateLog,
+  evaluateAiLlmOutboundGate,
+} from "./ai-llm-interval-gate.ts";
 import { getAiVerdict } from "./index-ai.ts";
 import { evaluateLlmGatekeeperPrefilter } from "./llm-gatekeeper-prefilter.ts";
 import { resolveGhostMode, resolveTestMode } from "./bot-shared.ts";
@@ -95,6 +103,7 @@ export async function decideSymbolCycleOutcome(params: {
   lastAiPriceBySymbol: Map<string, number>;
   paperScenario?: { name: import("./paper-scenario-snapshot.ts").PaperScenarioName; execute: boolean } | null;
   btcOverbought: boolean;
+  btcMacroBounceGate?: BtcMacroBounceGate;
   /** Tests / drills: skip LLM and use this verdict (production callers omit). */
   prefetchedAiVerdict?: { ai: import("./types.ts").AiAnalysis; aiQuotaFallback: boolean } | null;
   symbolMatrixIndex?: number;
@@ -111,6 +120,7 @@ export async function decideSymbolCycleOutcome(params: {
     lastAiPriceBySymbol,
     paperScenario,
     btcOverbought,
+    btcMacroBounceGate,
     prefetchedAiVerdict,
     globalSettings = null,
   } = params;
@@ -257,6 +267,27 @@ export async function decideSymbolCycleOutcome(params: {
       : `FAIL_STRATEGY:${String(strategyEntry.strategy_fail_detail ?? "NO_BUY")}`;
   }
   const strategyReasonEarly = strategyEntry.strategy_reason ?? null;
+  if (
+    btcMacroBounceGate?.blocked &&
+    isOversoldBounceStrategyReason(strategyReasonEarly)
+  ) {
+    console.log("[MACRO_BOUNCE_GATE]", {
+      symbol,
+      userId,
+      reason: btcMacroBounceGate.reason,
+      regime: btcMacroBounceGate.regimeLabel,
+      active_short: btcMacroBounceGate.activeShort ? 1 : 0,
+      btc_below_4h_ema21: btcMacroBounceGate.btcBelow4hEma21 ? 1 : 0,
+      btc_ema21_4h: btcMacroBounceGate.btcEma21_4h,
+    });
+    strategyEntry = {
+      signal: "HOLD",
+      strategy_reason: "strategy_no_entry_signal",
+      strategy_fail_detail: btcMacroBounceGate.reason ?? "FAIL_MACRO_BOUNCE_GATE",
+    };
+    strategySignal = "HOLD";
+    strategyFailDetail = `FAIL_MACRO:${btcMacroBounceGate.reason ?? "BOUNCE_BLOCKED"}`;
+  }
   let fastBounceLane = false;
   if (
     globalSettings &&
@@ -265,7 +296,10 @@ export async function decideSymbolCycleOutcome(params: {
     !isHighRiskCrashRegime(globalSettings.market_regime)
   ) {
     const mathHit = evaluateFastMathBounceEntry(snapshot, row as BotSettingsRow);
-    if (mathHit?.strategy_reason === "strategy_oversold_bounce_entry") {
+    if (
+      mathHit?.strategy_reason === "strategy_oversold_bounce_entry" &&
+      !btcMacroBounceGate?.blocked
+    ) {
       fastBounceLane = true;
       console.log(`[FAST_MATH] ${symbol} bounce_lane=1 skip_inline_llm=1`);
     }
@@ -367,6 +401,48 @@ export async function decideSymbolCycleOutcome(params: {
     aiVerdict = prefetchedAiVerdict!;
   } else if (!shouldInvokeAi) {
     aiVerdict = { ai: safetyAi, aiQuotaFallback: false };
+  } else if (!paperLiveAiDrill) {
+    const outboundGate = await evaluateAiLlmOutboundGate(symbol);
+    if (!outboundGate.allowOutbound) {
+      console.log(buildAiIntervalGateLog(symbol, outboundGate));
+      const heldAi = await resolveIntervalHeldAiVerdict({
+        symbol,
+        snapshot,
+        scoreWeights: getResolvedScoreWeightsPack(row as Record<string, unknown>),
+      });
+      aiVerdict = { ai: heldAi, aiQuotaFallback: false };
+      aiVerdictMs = 0;
+    } else {
+      const aiVerdictStarted = performance.now();
+      aiVerdict = await safeExecute(`ai_verdict_${symbol}`, async () => {
+        try {
+          return await getAiVerdict({
+            shouldInvokeAi: llmGatekeeper.allowLlm,
+            snapshot,
+            symbol,
+            row,
+            supabase,
+            safetyAi,
+            userId,
+            signal,
+            paperScenarioLiveAi: paperLiveAiDrill,
+            symbolMatrixIndex: params.symbolMatrixIndex,
+            llmGatekeeper,
+            llmDispatchConvictionFloor: minAiConfidence,
+            buyPreflightBlocked: buyPreflightBlock.blocked,
+          });
+        } catch (e) {
+          aiVerdictErrorDetail = formatUnknownError(e);
+          throw e;
+        }
+      }, { ai: safetyAi, aiQuotaFallback: false });
+      aiVerdictMs = Math.round(performance.now() - aiVerdictStarted);
+      const perfAiWarnMs = Number(Deno.env.get("PERF_AI_VERDICT_WARN_MS") ?? "18000");
+      const warnMs = Number.isFinite(perfAiWarnMs) && perfAiWarnMs >= 1500 ? perfAiWarnMs : 18_000;
+      if (aiVerdictMs > warnMs) {
+        console.warn(`[PERF] ai_verdict slow ${aiVerdictMs}ms symbol=${symbol} user=${userId} (warn_if>${warnMs}ms)`);
+      }
+    }
   } else {
     const aiVerdictStarted = performance.now();
     aiVerdict = await safeExecute(`ai_verdict_${symbol}`, async () => {
@@ -392,9 +468,6 @@ export async function decideSymbolCycleOutcome(params: {
       }
     }, { ai: safetyAi, aiQuotaFallback: false });
     aiVerdictMs = Math.round(performance.now() - aiVerdictStarted);
-    const perfAiWarnMs = Number(Deno.env.get("PERF_AI_VERDICT_WARN_MS") ?? "18000");
-    const warnMs = Number.isFinite(perfAiWarnMs) && perfAiWarnMs >= 1500 ? perfAiWarnMs : 18_000;
-    if (aiVerdictMs > warnMs) console.warn(`[PERF] ai_verdict slow ${aiVerdictMs}ms symbol=${symbol} user=${userId} (warn_if>${warnMs}ms)`);
   }
   let ai = aiVerdict.ai;
   const aiQuotaFallback = aiVerdict.aiQuotaFallback;
@@ -648,6 +721,16 @@ export async function decideSymbolCycleOutcome(params: {
     dynRegimeDiag,
   );
   if (executionUsdScale != null && executionUsdScale < 1) combinedStrategyReason = `${combinedStrategyReason}|execution_usd_scale=${executionUsdScale}`;
+  if (
+    btcMacroBounceGate?.blocked &&
+    decision === "BUY" &&
+    isOversoldBounceStrategyReason(strategyEntry.strategy_reason)
+  ) {
+    decision = "HOLD";
+    reason = btcMacroBounceGate.reason ?? "hold_macro_bounce_gate";
+    executionUsdScale = undefined;
+    demoProbeBuyFlag = false;
+  }
   if (paperScenario?.name === "force_paper_buy") {
     decision = "BUY";
     reason = "paper_scenario_force_paper_buy";
@@ -663,13 +746,23 @@ export async function decideSymbolCycleOutcome(params: {
     demoProbeBuyFlag = false;
   }
   if (fastBounceLane && !hasOpenPosition) {
-    decision = "BUY";
-    reason = "fast_math_bounce_futures_lane";
-    strategySignal = "BUY";
-    strategyEntry.signal = "BUY";
-    strategyEntry.strategy_reason = "strategy_oversold_bounce_entry";
-    executionUsdScale = undefined;
-    demoProbeBuyFlag = false;
+    if (btcMacroBounceGate?.blocked) {
+      decision = "HOLD";
+      reason = btcMacroBounceGate.reason ?? "hold_macro_bounce_gate";
+      strategySignal = "HOLD";
+      strategyEntry.signal = "HOLD";
+      strategyEntry.strategy_reason = "strategy_no_entry_signal";
+      strategyEntry.strategy_fail_detail = btcMacroBounceGate.reason ?? "FAIL_MACRO_BOUNCE_GATE";
+      fastBounceLane = false;
+    } else {
+      decision = "BUY";
+      reason = "fast_math_bounce_futures_lane";
+      strategySignal = "BUY";
+      strategyEntry.signal = "BUY";
+      strategyEntry.strategy_reason = "strategy_oversold_bounce_entry";
+      executionUsdScale = undefined;
+      demoProbeBuyFlag = false;
+    }
   }
   return {
     ai,

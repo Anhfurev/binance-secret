@@ -92,6 +92,40 @@ Loads symbols from `bot_settings` where `is_autopilot_enabled = true` (all 10).
 - It does **not** hardcode 3 coins — it `jsonb_agg`s every autopilot symbol.
 - If the bot runs on **Vultr**, either point `v_url` in that function to `http://<your-vps>:8788` or **disable** job `bot-heartbeat-all-symbols` and use `vultr-bot-cron.sh` instead.
 
+## Cron speed (~1s vs ~17s)
+
+The digest line `10 bot(s) scanned · 17626ms` is **whole-batch wall time**, not one trade.
+
+Slowness was usually **cold REST bootstrap**: 10 symbols × 7 kline REST calls **sequentially** (~17s) when the bot opened its own Binance WS instead of reading the **stream hub** (`:8787`).
+
+Defaults in `scripts/vultr-deno-bot.sh` after pull:
+
+```bash
+BINANCE_WS_MARKET_CACHE=0          # hub feeds klines; no duplicate WS+REST in bot
+MARKET_STREAM_PREFETCH_ENABLED=1
+BINANCE_STREAM_TICK_GATEWAY_URL=http://127.0.0.1:8787
+```
+
+Optional faster AI path (fewer LLM calls, less “smart”):
+
+```bash
+AI_CASCADE_PIPELINE=0
+GROQ_MULTI_SYMBOL_BATCH=1
+LLM_API_KEYS_DB=0   # if keys are only in .env, not llm_api_keys table
+```
+
+Raise warn threshold if needed: `CRON_LATENCY_WARN_MS=25000`
+
+**Async logging (scan returns fast):** cron HTTP response no longer waits on `logs` inserts, debug traces, war-room audits, post-batch balance sync, or function vitality. Optional in `.env`:
+
+```bash
+POST_BATCH_BALANCE_SYNC_BLOCKING=0   # default — sync runs in background
+DECISION_TRACE_DB_LOGS=0           # skip per-symbol decision rows
+EXECUTION_OUTCOME_DB_LOGS=0        # skip execution-outcome rows
+```
+
+**15m candles** in the snapshot are indicator math (RSI/trend), not a “15-minute AI cron.”
+
 ## Binance gateway (IP whitelist)
 
 Your Binance key only allows the **Vultr public IP**. Every signed REST call must use the gateway, not `https://api.binance.com` directly.

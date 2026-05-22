@@ -34,6 +34,7 @@ export async function runCronSymbolBatchesParallel(params: {
   lastAiPriceBySymbol: Map<string, number>;
   marketCache: Map<string, import("./types.ts").IndicatorSnapshot>;
   btcOverbought: boolean;
+  btcMacroBounceGate: import("./macro-bounce-regime-gate.ts").BtcMacroBounceGate;
   batchId: string;
   matrixRouting: boolean;
   groqPoolN: number;
@@ -46,6 +47,7 @@ export async function runCronSymbolBatchesParallel(params: {
     lastAiPriceBySymbol,
     marketCache,
     btcOverbought,
+    btcMacroBounceGate,
     batchId,
     matrixRouting,
     groqPoolN,
@@ -99,6 +101,7 @@ export async function runCronSymbolBatchesParallel(params: {
           marketCache,
           symbolMatrixIndex,
           btcOverbought,
+          btcMacroBounceGate,
           signal,
         }),
       );

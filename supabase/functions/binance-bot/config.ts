@@ -68,7 +68,7 @@ function parseMemeStrategySymbols(): readonly string[] {
 export const GLOBAL_BOT_CONFIG = {
   get AI_CACHE_WINDOW_MS(): number {
     if (IS_TEST_MODE) return 0;
-    return finiteEnvInt("AI_CACHE_WINDOW_MS", 600_000, 30_000, 900_000);
+    return finiteEnvInt("AI_CACHE_WINDOW_MS", 900_000, 30_000, 3_600_000);
   },
 
   get GEMINI_MAX_KEY_ATTEMPTS_PER_CALL(): number {

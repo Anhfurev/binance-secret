@@ -1,10 +1,63 @@
 // @ts-nocheck
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import type { AiAnalysis, BotSettingsRow, IndicatorSnapshot, SignalDecision } from "./types.ts";
+import { fireAndForgetSideEffect } from "./edge-runtime.ts";
 import { logCycleSummary, logDecisionTrace, logExecutionOutcome } from "./index-logging.ts";
 import { insertWarRoomAudit } from "./veto-transparency.ts";
 import { persistDebugTrace } from "./symbol-cycle-trace.ts";
 import { toStringValue } from "./utils.ts";
+
+/** Hot path: do not block `processBot` on audit DB writes. */
+export function enqueuePreExecutionCycleTelemetry(params: {
+  supabase: ReturnType<typeof createClient>;
+  row: BotSettingsRow;
+  userId: string;
+  symbol: string;
+  cycleId: string;
+  snapshot: IndicatorSnapshot;
+  outcome: {
+    ai: AiAnalysis;
+    bbPosition: number;
+    decision: SignalDecision;
+    reason?: string;
+    strategyFailDetail?: string | null;
+    technicalScore: number;
+    strategySignal: SignalDecision;
+    technical: SignalDecision;
+    minAiConfidence: number;
+    openTrade: unknown;
+    dbLoadOpenTradeMs: number;
+    aiVerdictMs: number;
+    vetoDetailsPayload: unknown;
+    forceBuyReason?: string | null;
+  };
+}): void {
+  fireAndForgetSideEffect(
+    "pre_execution_cycle_telemetry",
+    () => persistPreExecutionCycleTelemetry(params),
+  );
+}
+
+export function enqueuePostExecutionCycleLogs(params: {
+  supabase: ReturnType<typeof createClient>;
+  row: BotSettingsRow;
+  symbol: string;
+  technicalScore: number;
+  strategySignal: SignalDecision;
+  ai: AiAnalysis;
+  reason?: string;
+  decision: SignalDecision;
+  minAiConfidence: number;
+  marketRegime: string;
+  resultAction?: string;
+  resultDetail?: string;
+  exitReason?: string;
+}): void {
+  fireAndForgetSideEffect(
+    "post_execution_cycle_logs",
+    () => persistPostExecutionCycleLogs(params),
+  );
+}
 
 export async function persistPreExecutionCycleTelemetry(params: {
   supabase: ReturnType<typeof createClient>;

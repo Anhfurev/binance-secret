@@ -8,6 +8,7 @@ import {
 } from "./utils.ts";
 import { formatCycleReason } from "./index-decision-format.ts";
 import { resolveStrategyBuyRsiMax } from "./config.ts";
+import { fireAndForgetLogsInsert } from "./async-supabase-writes.ts";
 import {
   shouldPersistDecisionAuditLogs,
   shouldPersistExecutionOutcomeLog,
@@ -92,7 +93,7 @@ export async function logDecisionTrace(params: {
     ? `${baseReason} (Order Book Imbalance Boost)`
     : baseReason;
   if (!shouldPersistDecisionAuditLogs()) return;
-  const result = await supabase.from("logs").insert([{
+  fireAndForgetLogsInsert(supabase, {
     user_id: userId ?? null,
     symbol,
     level: "info",
@@ -115,10 +116,7 @@ export async function logDecisionTrace(params: {
       reason: mappedReason,
     },
     created_at: new Date().toISOString(),
-  }]);
-  if (result.error) {
-    console.warn(`[binance-bot] decision trace log skipped: ${result.error.message}`);
-  }
+  }, "decision_trace");
 }
 
 export async function logCycleSummary(params: {
@@ -163,7 +161,7 @@ export async function logCycleSummary(params: {
     `[AI FLOW] symbol=${symbol} provider=${aiProvider} path=${aiProviderPath} cache=${aiCacheStatus} final=${finalDecision}`,
   );
   if (!shouldPersistDecisionAuditLogs()) return;
-  const result = await supabase.from("logs").insert([{
+  fireAndForgetLogsInsert(supabase, {
     user_id: userId ?? null,
     symbol,
     level: "info",
@@ -182,10 +180,7 @@ export async function logCycleSummary(params: {
       reason: formattedReason,
     },
     created_at: new Date().toISOString(),
-  }]);
-  if (result.error) {
-    console.warn(`[binance-bot] cycle summary log skipped: ${result.error.message}`);
-  }
+  }, "cycle_summary");
 }
 
 export async function logExecutionOutcome(params: {
@@ -211,7 +206,7 @@ export async function logExecutionOutcome(params: {
   const userId = toStringValue((row as any)?.user_id);
   const action = String(resultAction ?? "unknown");
   if (!shouldPersistExecutionOutcomeLog()) return;
-  const result = await supabase.from("logs").insert([{
+  fireAndForgetLogsInsert(supabase, {
     user_id: userId ?? null,
     symbol,
     level: "info",
@@ -229,8 +224,5 @@ export async function logExecutionOutcome(params: {
         (intendedDecision === "HOLD" && (action === "hold" || action === "skip")),
     },
     created_at: new Date().toISOString(),
-  }]);
-  if (result.error) {
-    console.warn(`[binance-bot] execution outcome log skipped: ${result.error.message}`);
-  }
+  }, "execution_outcome");
 }

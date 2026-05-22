@@ -56,6 +56,7 @@ export async function orchestrateSymbolBatch(params: {
   paperScenario?: { name: import("./paper-scenario-snapshot.ts").PaperScenarioName; execute: boolean } | null;
   cycleId: string;
   btcOverbought: boolean;
+  btcMacroBounceGate: import("./macro-bounce-regime-gate.ts").BtcMacroBounceGate;
   botCycleTimeoutMs: number;
   symbolMatrixIndex?: number;
   cycleSignal?: AbortSignal;
@@ -71,6 +72,7 @@ export async function orchestrateSymbolBatch(params: {
     paperScenario,
     cycleId,
     btcOverbought,
+    btcMacroBounceGate,
     botCycleTimeoutMs,
     symbolMatrixIndex,
     cycleSignal,
@@ -106,6 +108,7 @@ export async function orchestrateSymbolBatch(params: {
           paperScenario,
           cycleId,
           btcOverbought,
+          btcMacroBounceGate,
           symbolMatrixIndex,
         }),
       botCycleTimeoutMs,

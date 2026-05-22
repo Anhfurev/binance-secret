@@ -5,11 +5,18 @@ import { botDebug } from "./bot-debug.ts";
 import { getTotalAccountBalanceUsdt } from "./binance.ts";
 import { escapeHtml } from "./bot-shared.ts";
 import { safeExecute } from "./safe-execute.ts";
+import { fireAndForgetSideEffect } from "./edge-runtime.ts";
 import { sendTelegramAlert } from "./notifier.ts";
 
 const FOUR_HOUR_MS = 4 * 60 * 60 * 1000;
 const LATENCY_WARN_THROTTLE_MS = 5 * 60 * 1000;
-const LATENCY_WARN_THRESHOLD_MS = 15_000;
+
+function readLatencyWarnThresholdMs(): number {
+  const raw = String(Deno.env.get("CRON_LATENCY_WARN_MS") ?? "15000").trim();
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1000) return 15_000;
+  return Math.min(120_000, Math.floor(n));
+}
 let lastFourHourOpsHeartbeatAt = 0;
 let lastLatencyAlertAtMs = 0;
 let lastCycleSummary: {
@@ -132,18 +139,21 @@ export async function maybeSendFourHourOpsHeartbeat(
 
 export function emitLatencyTelemetry(params: { batchId: string; totalExecutionMs: number }) {
   const { batchId, totalExecutionMs } = params;
+  const thresholdMs = readLatencyWarnThresholdMs();
   console.log(
-    `[LATENCY] batch=${batchId} total_execution_ms=${totalExecutionMs} threshold_warn_ms=${LATENCY_WARN_THRESHOLD_MS}`,
+    `[LATENCY] batch=${batchId} total_execution_ms=${totalExecutionMs} threshold_warn_ms=${thresholdMs}`,
   );
-  if (totalExecutionMs <= LATENCY_WARN_THRESHOLD_MS) return;
+  if (totalExecutionMs <= thresholdMs) return;
   const now = Date.now();
   if (now - lastLatencyAlertAtMs < LATENCY_WARN_THROTTLE_MS) return;
   lastLatencyAlertAtMs = now;
-  void sendTelegramAlert(
-    `⚠️ <b>LATENCY WARNING</b>\n` +
-      `<b>batch</b>: <code>${escapeHtml(batchId)}</code>\n` +
-      `<b>duration_ms</b>: ${totalExecutionMs}\n` +
-      `<b>threshold_ms</b>: ${LATENCY_WARN_THRESHOLD_MS}\n` +
-      `Early warning before platform timeout threshold.`,
+  fireAndForgetSideEffect("latency_warning_telegram", () =>
+    sendTelegramAlert(
+      `⚠️ <b>LATENCY WARNING</b>\n` +
+        `<b>batch</b>: <code>${escapeHtml(batchId)}</code>\n` +
+        `<b>duration_ms</b>: ${totalExecutionMs}\n` +
+        `<b>threshold_ms</b>: ${thresholdMs}\n` +
+        `Early warning before platform timeout threshold.`,
+    )
   );
 }

@@ -8,6 +8,7 @@ import { CRON_SYMBOL_MATRIX_ORDER, DEFAULT_SYMBOL } from "./constants.ts";
 import { normalizeSymbol, toStringValue } from "./utils.ts";
 import { readCronSerialSymbolCyclesEnabled, readSymbolMatrixGapMs } from "./ai-provider-matrix.ts";
 import { resolveBtcOverboughtFromMarketCache } from "./market-anchor.ts";
+import { resolveBtcMacroBounceGateFromMarketCache } from "./macro-bounce-regime-gate.ts";
 
 export function readBotCycleTimeoutMs(): number {
   const raw = String(Deno.env.get("BOT_CYCLE_TIMEOUT_MS") ?? "").trim();
@@ -68,6 +69,7 @@ export async function validateSymbolBatchInput(params: {
   marketCache?: Map<string, import("./types.ts").IndicatorSnapshot>;
   /** Cron preflight BTC anchor — skips redundant BTCUSDT snapshot work per symbol. */
   btcOverbought?: boolean;
+  btcMacroBounceGate?: import("./macro-bounce-regime-gate.ts").BtcMacroBounceGate;
   /** Single-symbol staging (e.g. test-sol-loop): no BTCUSDT fetch or cache entries. */
   skipBtcMarketAnchor?: boolean;
 }) {
@@ -76,6 +78,7 @@ export async function validateSymbolBatchInput(params: {
     symbolFilter,
     marketCache,
     btcOverbought: btcOverboughtHint,
+    btcMacroBounceGate: btcMacroBounceGateHint,
     skipBtcMarketAnchor,
   } = params;
   const botsQuery = await safeExecute("db_bot_settings_for_symbol", async () => {
@@ -102,6 +105,7 @@ export async function validateSymbolBatchInput(params: {
   }
   const symbolCache = marketCache ?? new Map<string, import("./types.ts").IndicatorSnapshot>();
   let btcOverbought: boolean;
+  let btcMacroBounceGate: import("./macro-bounce-regime-gate.ts").BtcMacroBounceGate;
   if (shouldPrefetchBtcMarketAnchor({ btcOverboughtHint, skipBtcMarketAnchor })) {
     if (!symbolCache.has("BTCUSDT")) {
       await safeExecute(
@@ -111,8 +115,11 @@ export async function validateSymbolBatchInput(params: {
       );
     }
     btcOverbought = resolveBtcOverboughtFromMarketCache(symbolCache);
+    btcMacroBounceGate = resolveBtcMacroBounceGateFromMarketCache(symbolCache);
   } else {
     btcOverbought = btcOverboughtHint ?? false;
+    btcMacroBounceGate = btcMacroBounceGateHint ??
+      resolveBtcMacroBounceGateFromMarketCache(symbolCache);
   }
   const balanceSyncTargets = new Map<string, { isLiveMode: boolean; hasPaperMode: boolean; symbols: Set<string> }>();
   for (const row of activeBots) {
@@ -130,6 +137,7 @@ export async function validateSymbolBatchInput(params: {
     activeBots,
     symbolCache,
     btcOverbought,
+    btcMacroBounceGate,
     balanceSyncTargets,
     cycleId: crypto.randomUUID(),
     botCycleTimeoutMs: readBotCycleTimeoutMs(),

@@ -2,13 +2,14 @@
 import type { createClient } from "npm:@supabase/supabase-js@2";
 import { processBot } from "./bot.ts";
 import { logDecisionTrace, logExecutionOutcome } from "./index-logging.ts";
+import { fireAndForgetLogsInsert } from "./async-supabase-writes.ts";
 import { maybeSendDecisionTraceTelegram } from "./telegram-decision-trace.ts";
 import { safeExecute, safeExecuteDetached } from "./safe-execute.ts";
 import { toStringValue } from "./utils.ts";
-import { captureTraceReasonOnly } from "./symbol-cycle-trace.ts";
+import { enqueueTraceReasonOnly } from "./symbol-cycle-trace.ts";
 import {
-  persistPostExecutionCycleLogs,
-  persistPreExecutionCycleTelemetry,
+  enqueuePostExecutionCycleLogs,
+  enqueuePreExecutionCycleTelemetry,
 } from "./cycle-telemetry-persist.ts";
 import { indicatorFieldsForLogMeta } from "./indicator-precision.ts";
 
@@ -80,7 +81,7 @@ export async function executeSymbolCycleActions(params: {
     aiVerdictErrorDetail: aiVerdictErrorDetail ?? null,
   };
 
-  await persistPreExecutionCycleTelemetry({
+  enqueuePreExecutionCycleTelemetry({
     supabase,
     row,
     userId,
@@ -162,7 +163,7 @@ export async function executeSymbolCycleActions(params: {
   }
 
   if (demoProbeBuyFlag && decision === "BUY") {
-    void safeExecute("demo_paper_probe_activated_log", () => supabase.from("logs").insert([{
+    fireAndForgetLogsInsert(supabase, {
       user_id: userId,
       symbol,
       level: "info",
@@ -170,7 +171,7 @@ export async function executeSymbolCycleActions(params: {
       message: "demo_paper_probe_activated",
       meta: { event: "demo_paper_probe_activated", paper_only: true },
       created_at: new Date().toISOString(),
-    }]), undefined);
+    }, "demo_paper_probe");
   }
 
   const result = await processBot({
@@ -192,7 +193,7 @@ export async function executeSymbolCycleActions(params: {
     globalSettings: (outcome as { globalSettings?: import("./bot-global-settings.ts").BotGlobalSettingsRow | null }).globalSettings ?? null,
   });
 
-  await persistPostExecutionCycleLogs({
+  enqueuePostExecutionCycleLogs({
     supabase,
     row,
     symbol,
@@ -227,39 +228,37 @@ export async function handleCriticalSnapshotError(params: {
     "emaSlow",
     "ema200",
   ]);
-  await Promise.all([
-    captureTraceReasonOnly({
-      supabase,
-      userId,
-      botId: toStringValue((row as any)?.id) ?? null,
-      cycleId,
-      symbol,
-      decision: "HOLD",
-      reason,
-      perfMetadata: { is_timeout: false },
-    }),
-    supabase.from("logs").insert([{
-      user_id: userId,
-      symbol,
-      level: "error",
-      source: "market-data",
-      message: reason === "CRITICAL_PRICE_ZERO" ? "critical_price_zero" : "critical_indicator_invalid",
-      meta: reason === "CRITICAL_PRICE_ZERO"
-        ? {
-          event: "critical_price_zero",
-          symbol,
-          latest_price: indicatorMeta.latestPrice,
-          action: "execution_stopped",
-        }
-        : {
-          event: "critical_indicator_invalid",
-          symbol,
-          emaFast: indicatorMeta.emaFast,
-          emaSlow: indicatorMeta.emaSlow,
-          ema200: indicatorMeta.ema200,
-          action: "execution_stopped",
-        },
-      created_at: new Date().toISOString(),
-    }]),
-  ]);
+  enqueueTraceReasonOnly({
+    supabase,
+    userId,
+    botId: toStringValue((row as any)?.id) ?? null,
+    cycleId,
+    symbol,
+    decision: "HOLD",
+    reason,
+    perfMetadata: { is_timeout: false },
+  });
+  fireAndForgetLogsInsert(supabase, {
+    user_id: userId,
+    symbol,
+    level: "error",
+    source: "market-data",
+    message: reason === "CRITICAL_PRICE_ZERO" ? "critical_price_zero" : "critical_indicator_invalid",
+    meta: reason === "CRITICAL_PRICE_ZERO"
+      ? {
+        event: "critical_price_zero",
+        symbol,
+        latest_price: indicatorMeta.latestPrice,
+        action: "execution_stopped",
+      }
+      : {
+        event: "critical_indicator_invalid",
+        symbol,
+        emaFast: indicatorMeta.emaFast,
+        emaSlow: indicatorMeta.emaSlow,
+        ema200: indicatorMeta.ema200,
+        action: "execution_stopped",
+      },
+    created_at: new Date().toISOString(),
+  }, "critical_snapshot");
 }

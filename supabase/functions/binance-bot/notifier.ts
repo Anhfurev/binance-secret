@@ -5,6 +5,7 @@ import { SERVICE_ROLE_KEY, SUPABASE_URL } from "./constants.ts";
 import { SUPABASE_CLIENT_OPTIONS } from "./supabase-client-options.ts";
 import { formatTelegramCycleFooter } from "./bot-shared.ts";
 import { describeThrownValue } from "./utils.ts";
+import { fireAndForgetLogsInsert } from "./async-supabase-writes.ts";
 import { postTelegramSendMessage } from "./telegram-post-message.ts";
 
 const TELEGRAM_MAX_RETRIES = 4;
@@ -51,14 +52,14 @@ function stripHtmlForPlainTelegram(html: string): string {
     .replace(/&amp;/g, "&");
 }
 
-async function logTelegramFailureToDb(params: {
+function logTelegramFailureToDb(params: {
   status: number;
   detail: string;
 }) {
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) return;
   try {
     const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, SUPABASE_CLIENT_OPTIONS);
-    await supabase.from("logs").insert([{
+    fireAndForgetLogsInsert(supabase, {
       level: "warn",
       source: "telegram",
       message: "telegram_send_failed",
@@ -68,7 +69,7 @@ async function logTelegramFailureToDb(params: {
         detail: params.detail.slice(0, 900),
       },
       created_at: new Date().toISOString(),
-    }]);
+    }, "telegram_send_failed");
   } catch {
     // best-effort only
   }

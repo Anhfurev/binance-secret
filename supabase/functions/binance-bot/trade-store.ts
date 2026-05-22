@@ -8,6 +8,7 @@ import type {
 } from "./types.ts";
 import { clamp, toNumber } from "./utils.ts";
 import { DEFAULT_RISK_PERCENT } from "./constants.ts";
+import { resolveCompoundTradeSizeUsd } from "./compound-position-sizing.ts";
 import { sendTradeRowNotification } from "./notifier.ts";
 import { withPostgrestRetry } from "./postgrest-errors.ts";
 
@@ -179,6 +180,11 @@ export async function insertTrade(
   if (!normalized.opened_at) {
     normalized.opened_at = new Date().toISOString();
   }
+  const status = String(normalized.status ?? "open").toLowerCase();
+  if (status === "open") {
+    normalized.closed_at = null;
+    normalized.exitPrice = normalized.exitPrice ?? null;
+  }
   const result = await supabase
     .from("trades")
     .insert([normalized])
@@ -198,6 +204,11 @@ export function resolveTradeSizeUsd(
   row: BotSettingsRow,
   currentBalance: number,
 ): number {
+  const compoundUsd = resolveCompoundTradeSizeUsd(currentBalance);
+  if (compoundUsd != null && compoundUsd > 0) {
+    return Math.min(currentBalance, compoundUsd);
+  }
+
   const fixedUsd = toNumber(row.trade_size_usd ?? row.fixed_trade_usd, 0);
   if (fixedUsd > 0) return Math.min(currentBalance, fixedUsd);
 

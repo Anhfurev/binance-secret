@@ -36,6 +36,8 @@ import {
 } from "./bot-shared.ts";
 import { resolvePaperSimulationLiquidityUsdt } from "./paper-balance.ts";
 import { isPaperTradingEnvForced } from "./paper-trade-interceptor.ts";
+import { fireAndForgetLogsInsert } from "./async-supabase-writes.ts";
+import { fireAndForgetSideEffect } from "./edge-runtime.ts";
 import { persistRunTelemetry } from "./bot-telemetry.ts";
 import { canFireSoftSignalExit } from "./strategy-stop-hold.ts";
 import {
@@ -55,7 +57,7 @@ import { botDebug, botError } from "./bot-debug.ts";
 import { assertExpectedEgressIpOrThrow } from "./exchange-client.ts";
 import { VOL_BURST_MAX_ATR_BONUS } from "./constants.ts";
 
-async function logSkipReason(params: {
+function logSkipReason(params: {
   supabase: ReturnType<typeof createClient>;
   userId: string;
   symbol: string;
@@ -63,25 +65,15 @@ async function logSkipReason(params: {
 }) {
   const { supabase, userId, symbol, reason } = params;
   if (!shouldPersistBotSkipLog()) return;
-  const result = await supabase.from("logs").insert([
-    {
-      user_id: userId,
-      symbol,
-      level: "info",
-      source: "bot-skip",
-      message: `Action: Skip | Reason: ${reason}`,
-      meta: {
-        event: "bot_trade_skipped",
-        reason,
-      },
-      created_at: new Date().toISOString(),
-    },
-  ]);
-  if (result.error) {
-    console.warn(
-      `[binance-bot] skip log insert failed: ${result.error.message}`,
-    );
-  }
+  fireAndForgetLogsInsert(supabase, {
+    user_id: userId,
+    symbol,
+    level: "info",
+    source: "bot-skip",
+    message: `Action: Skip | Reason: ${reason}`,
+    meta: { event: "bot_trade_skipped", reason },
+    created_at: new Date().toISOString(),
+  }, "bot_skip");
 }
 
 export async function processBot(params: {
@@ -379,7 +371,7 @@ export async function processBot(params: {
             `<b>Strategy:</b> ${escapeHtml(strategyNotes)}`,
         );
       }
-      await persistRunTelemetry({
+      persistRunTelemetry({
         supabase,
         userId,
         symbol: snapshot.symbol,
@@ -503,13 +495,13 @@ export async function processBot(params: {
           symbol: snapshot.symbol,
           detail: buyResult.detail,
         });
-        await logSkipReason({
+        logSkipReason({
           supabase,
           userId,
           symbol: snapshot.symbol,
           reason: buyResult.detail,
         });
-        await persistRunTelemetry({
+        persistRunTelemetry({
           supabase,
           userId,
           symbol: snapshot.symbol,
@@ -550,7 +542,7 @@ export async function processBot(params: {
     }
 
     if (!openTrade) {
-      await persistRunTelemetry({
+      persistRunTelemetry({
         supabase,
         userId,
         symbol: snapshot.symbol,
@@ -607,7 +599,7 @@ export async function processBot(params: {
         symbol: snapshot.symbol,
         reason: sellResult.detail,
       });
-      await persistRunTelemetry({
+      persistRunTelemetry({
         supabase,
         userId,
         symbol: snapshot.symbol,
