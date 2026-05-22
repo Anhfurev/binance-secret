@@ -36,7 +36,17 @@ TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
 ```
 
-Then `pm2 restart binance-bot --update-env`.
+PM2 does **not** read `.env` by itself. Use `scripts/vultr-deno-bot.sh` (via `ecosystem.vultr.config.cjs`) so token/chat load on start.
+
+```bash
+chmod +x scripts/vultr-deno-bot.sh scripts/vultr-test-telegram.sh
+pm2 delete binance-bot
+pm2 start ecosystem.vultr.config.cjs --only binance-bot
+pm2 save
+bash scripts/vultr-test-telegram.sh
+```
+
+Test message should appear in Telegram immediately. Cron digest every 2 min after that.
 
 Loads symbols from `bot_settings` where `is_autopilot_enabled = true` (all 10).
 
