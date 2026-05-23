@@ -45,9 +45,13 @@ export function toNumber(value: unknown, fallback = 0): number {
 }
 
 export function toStringValue(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0
-    ? value.trim()
-    : null;
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value.trim();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return null;
 }
 
 /**
