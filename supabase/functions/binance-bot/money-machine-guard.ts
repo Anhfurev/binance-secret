@@ -4,6 +4,7 @@
  */
 import type { OpenTradeRow } from "./types.ts";
 import { toNumber } from "./utils.ts";
+import { resolveOpenTradeEntryPrice } from "./trade-row-helpers.ts";
 import { canFireDbStopLoss } from "./strategy-stop-hold.ts";
 import {
   hasDbStopLossPrice,
@@ -37,7 +38,7 @@ export function evaluateMoneyMachineExits(params: {
   if (!openTrade) {
     return { skipAi: false, forceExit: false, reason: null };
   }
-  const entry = toNumber(openTrade.entryPrice, 0);
+  const entry = resolveOpenTradeEntryPrice(openTrade, 0);
   if (!(entry > 0) || !(price > 0)) {
     return { skipAi: false, forceExit: false, reason: null };
   }

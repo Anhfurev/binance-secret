@@ -4,6 +4,13 @@ import type { AiAnalysis, SignalDecision } from "./types.ts";
 import { passesMeanReversionBuyGate } from "./regime-detection.ts";
 
 const NO_TRADE_FALLBACK_AFTER_DAYS = 10;
+
+function readLiveNoTradeFallbackDays(): number {
+  const raw = String(Deno.env.get("LIVE_NO_TRADE_FALLBACK_DAYS") ?? "2").trim();
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 2;
+  return Math.min(30, Math.floor(n));
+}
 const NO_TRADE_FALLBACK_CONFIDENCE_DROP = 10;
 const NO_TRADE_FALLBACK_MIN_AI_CONFIDENCE = 55;
 const NO_TRADE_FALLBACK_MIN_TECH_SCORE = 3;
@@ -126,7 +133,7 @@ export async function resolveNoTradeFallback(params: {
   const neverBought = !Number.isFinite(lastMs);
   const inactiveLongEnough = paperOnly
     ? neverBought || (minutesSinceLastBuy ?? 0) >= readPaperNoTradeFallbackMinutes()
-    : neverBought || (daysSinceLastBuy ?? 0) >= NO_TRADE_FALLBACK_AFTER_DAYS;
+    : neverBought || (daysSinceLastBuy ?? 0) >= readLiveNoTradeFallbackDays();
   if (!inactiveLongEnough) {
     return {
       active: false,

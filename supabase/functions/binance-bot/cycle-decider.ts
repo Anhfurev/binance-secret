@@ -12,6 +12,7 @@ import {
 } from "./strategy-oversold-bounce.ts";
 import type { BtcMacroBounceGate } from "./macro-bounce-regime-gate.ts";
 import { evaluateMoneyMachineExits } from "./money-machine-guard.ts";
+import { evaluateStalePositionRotation } from "./stale-position-rotation.ts";
 import { decideHybridMatrix } from "./index-decision.ts";
 import { passesMeanReversionBuyGate } from "./regime-detection.ts";
 import { resolveNoTradeFallback } from "./no-trade-fallback.ts";
@@ -167,6 +168,25 @@ export async function decideSymbolCycleOutcome(params: {
   }
   const mm = evaluateMoneyMachineExits({ openTrade: supervisorOpenTrade, price: snapshot.latestPrice });
   if (mm.forceExit) effectiveStrategyExit = { shouldExit: true, exit_reason: mm.reason === "money_machine_trailing_lock" ? "money_machine_trailing_lock" : mm.reason === "money_machine_hard_stop" ? "money_machine_hard_stop" : "stoploss_hit" };
+  const staleRot = evaluateStalePositionRotation({
+    openTrade: supervisorOpenTrade,
+    price: snapshot.latestPrice,
+  });
+  if (staleRot.forceExit) {
+    console.log("[STALE_ROTATION]", {
+      symbol,
+      userId,
+      reason: staleRot.reason,
+      age_h: staleRot.ageHours,
+      pnl_pct: staleRot.pnlPct,
+    });
+    effectiveStrategyExit = {
+      shouldExit: true,
+      exit_reason: staleRot.reason === "stale_flat_rotation"
+        ? "stale_flat_rotation"
+        : "stale_underperform_rotation",
+    };
+  }
   if (mm.reason) console.log("[MONEY_MACHINE]", { symbol, ...mm });
   if (hasOpenPosition) {
     console.log(`[PIPELINE] ${symbol} open_position=yes route=exit_supervisor exit_hint=${resolvePositionSupervisorExitHint(supervisorOpenTrade, Number(snapshot.latestPrice))} remaining_base=${Number(supervisorOpenTrade?.amount ?? 0)}`);
@@ -371,7 +391,7 @@ export async function decideSymbolCycleOutcome(params: {
     minTechScore: minTech,
     aggressiveModeEnabled,
     paperScenarioLiveAi: paperLiveAiDrill,
-    moneyMachineSkipAi: mm.skipAi,
+    moneyMachineSkipAi: mm.skipAi || staleRot.skipAi,
     isSandboxMode,
     isGhostExecution,
     isPaperTrading,

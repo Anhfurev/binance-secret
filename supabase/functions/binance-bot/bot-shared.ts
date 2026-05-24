@@ -6,6 +6,7 @@ import { ATR_STOP_TRAIL_MULTIPLIER } from "./constants.ts";
 import { resolveAssetTrailingStopPct } from "./asset-risk-profile.ts";
 import { widenTrailingStopBelowHigh } from "./buy-helpers.ts";
 import { clamp, toNumber } from "./utils.ts";
+import { resolveOpenTradeEntryPrice } from "./trade-row-helpers.ts";
 
 export const DEFAULT_STRATEGY_NOTES = "unknown_strategy|no_reason";
 export const DEFAULT_TRAILING_STOP_PCT = 0.015;
@@ -152,7 +153,7 @@ export function buildTrailingStopState(
   symbol = "",
 ) {
   const extra = (openTrade.extra as Record<string, unknown> | undefined) ?? {};
-  const entryPrice = toNumber(openTrade.entryPrice, currentPrice);
+  const entryPrice = resolveOpenTradeEntryPrice(openTrade, currentPrice);
   const storedHigh = toNumber(
     extra.highest_price_seen ?? extra.highest_price_reached,
     entryPrice,

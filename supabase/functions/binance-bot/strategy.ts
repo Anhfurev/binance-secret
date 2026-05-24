@@ -13,6 +13,7 @@ import type {
 import { canFireDbStopLoss, canFireSoftSignalExit } from "./strategy-stop-hold.ts";
 import { gtWithTolerance } from "./strategy-numeric-tolerance.ts";
 import { clamp, toNumber } from "./utils.ts";
+import { resolveOpenTradeEntryPrice } from "./trade-row-helpers.ts";
 
 export const STRATEGY_STOPLOSS = -0.25;
 
@@ -112,7 +113,7 @@ export function checkExitConditions(
     return { shouldExit: false, exit_reason: "no_open_trade" };
   }
 
-  const entryPrice = Number(openTrade.entryPrice ?? 0);
+  const entryPrice = resolveOpenTradeEntryPrice(openTrade, 0);
   if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
     return { shouldExit: false, exit_reason: "invalid_entry" };
   }

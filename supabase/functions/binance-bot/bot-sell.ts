@@ -14,6 +14,8 @@ import { insertSellFillQualityLog } from "./sell-fill-quality.ts";
 import { notifyFullSellClose } from "./sell-notify-full-close.ts";
 import { botDebug, botError, botWarn } from "./bot-debug.ts";
 import { releaseTradeExecutionLock } from "./trade-execution-lock.ts";
+import { prepareLiveSellAmount } from "./sell-amount-preflight.ts";
+import { resolveOpenTradeEntryPrice } from "./trade-row-helpers.ts";
 export { applyBreakEvenTrigger } from "./sell-break-even.ts";
 
 export async function executeSellFlow(params: {
@@ -45,8 +47,8 @@ export async function executeSellFlow(params: {
     signal,
   } = params;
   const openId = toStringValue(openTrade.id);
-  const entryPrice = toNumber(openTrade.entryPrice, snapshotPrice);
-  const amount = toNumber(openTrade.amount, 0);
+  const entryPrice = resolveOpenTradeEntryPrice(openTrade, snapshotPrice);
+  let amount = toNumber(openTrade.amount, 0);
   const initialValue = toNumber(openTrade.value, amount > 0 ? amount * entryPrice : 0);
   if (amount <= 0 || initialValue <= 0) {
     botWarn("sellFlow", "invalid_open_trade_block", { userId, symbol, amount, initialValue });
@@ -87,6 +89,42 @@ export async function executeSellFlow(params: {
     };
   }
 
+  const createOrderTestShortCircuit = ghostMode
+    ? true
+    : (exchangeSkipped || isPaperTradingEnvForced());
+
+  const sellPrep = await prepareLiveSellAmount({
+    supabase,
+    userId,
+    symbol,
+    openId,
+    openTrade: openTrade as Record<string, unknown>,
+    requestedAmount: amount,
+    cycleId,
+    exchangeSkipped,
+    isTestMode: createOrderTestShortCircuit,
+  });
+  if (!sellPrep.ok) {
+    botWarn("sellFlow", "sell_preflight_block", {
+      userId,
+      symbol,
+      openId,
+      action: sellPrep.action,
+      free_base: sellPrep.freeBase,
+      detail: sellPrep.detail,
+    });
+    return { action: "skip" as const, detail: sellPrep.detail };
+  }
+  amount = sellPrep.amount;
+  if (sellPrep.clamped) {
+    botDebug("sellFlow", "sell_amount_clamped", {
+      userId,
+      symbol,
+      amount: Number(amount.toFixed(8)),
+      free_base: sellPrep.freeBase,
+    });
+  }
+
   botDebug("sellFlow", "pre_create_sell_order", {
     userId,
     symbol,
@@ -111,9 +149,6 @@ export async function executeSellFlow(params: {
       "Invariant: ghostMode requires resolveExchangeSkipped — refusing createOrder (SELL) to protect live funds",
     );
   }
-  const createOrderTestShortCircuit = ghostMode
-    ? true
-    : (exchangeSkipped || isPaperTradingEnvForced());
 
   const sellOrder = await createOrder({
     supabase,
